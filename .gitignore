@@ -1,0 +1,22 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Agents
+.agents/cache/
+.agents/tmp/
+.agents/**/.env
+.agents/**/secrets*
+
+# symlink to .agents
+.claude
+
+# Scratch dir (for temporary benchmarks)
+scratch/
