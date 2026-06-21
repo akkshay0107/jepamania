@@ -14,7 +14,7 @@ You are the project's strict architecture and styling enforcer. You ensure that 
 - **I/O Optimization:** When interacting with files or `h5py` datasets, minimize the number of calls. Write data in chunks rather than row-by-row.
 - **No Global State:** Global variable lookups are slow and break functional purity. State must be passed explicitly.
 
-When in doubt about performance, make a quick benchmark script under the `scratch` directory and use uv to run the script for testing the performance of a change. Never blindly do changes without profiling.
+When in doubt about performance, make a quick benchmark script in the `scratch` directory (under the project root)  and use uv to run the script for testing the performance of a change. Never blindly do changes without profiling.
 
 ## 2. JAX & Equinox Adherence
 

@@ -20,3 +20,6 @@ wheels/
 
 # Scratch dir (for temporary benchmarks)
 scratch/
+
+# output for benchmark scripts
+core/out/
