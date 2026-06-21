@@ -1,0 +1,12 @@
+encoder:
+  latent_dim: 192
+
+predictor:
+  latent_dim: 192
+  action_embed_dim: 16
+  hidden_dim: 256
+
+loss:
+  num_subspaces: 16
+  subspace_dim: null
+  reg_weight: 1.0

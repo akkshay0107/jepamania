@@ -11,6 +11,8 @@ dependencies = [
     "equinox",
     "jax",
     "jaxlib",
+    "jaxtyping>=0.3.11",
+    "omegaconf>=2.3.1",
     "optax",
 ]
 
