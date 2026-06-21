@@ -28,8 +28,9 @@ class PredictorConfig:
 
 @dataclass
 class LossConfig:
-    num_subspaces: int = 32
+    num_subspaces: int = 16
     subspace_dim: Optional[int] = None  # Will default to latent_dim // num_subspaces
+    num_slices: int = 16
     reg_weight: float = 1.0
 
 
