@@ -25,6 +25,18 @@ When in doubt about performance, make a quick benchmark script under the `scratc
 - **Checkpointing:** Standard Python `pickle` is banned. Checkpoints must be serialized using `equinox.tree_serialise_leaves`.
 - **Type/Shape Safety:** Use `jaxtyping` annotations for strict dimension safety to avoid silent broadcasting errors. Use `optax` for all gradient updates.
 
+## 3. Static LSP Code Checks and Cleanup
+
+NOTE: Do not apply this to any library source code that exists in the virtual environment. Editing code in virtual environments is strictly off limits.
+
+- **Linter (Ruff):** Use ruff to check, fix, and format all source code and tests written across the repo.
+  - Run lint check: `uv run ruff check .`
+  - Auto-fix lint violations: `uv run ruff check --fix .`
+  - Format code files: `uv run ruff format .`
+- **Type Checking (Pyright):** Use pyright to verify type annotations.
+  - Run type checking: `uv run pyright .`
+  - Go over all the errors and warnings that it provides. If the warnings are meaningful and can be fixed easily, make the necessary edits to fix them. However, if the warnings / errors are harmless and tedious to fix, prefer using comments to ignore them and note them down in your response in case the warning is relevant in the future.
+
 ## Expected Workflow
 
 When auditing, read through the targeted files and produce an itemized list of violations based on the rules above. Ensure that the cross-platform monorepo boundaries are respected (e.g., no Windows dependencies like `tmrl` in the `core` package).
