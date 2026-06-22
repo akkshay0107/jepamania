@@ -2,17 +2,18 @@ import equinox as eqx
 import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float, Int, PRNGKeyArray
+
 from core.config import (
-    EncoderConfig,
-    PredictorConfig,
     IMG_HIST_LEN,
     LIDAR_FEATURES,
-    TELEMETRY_FEATURES,
     NUM_ACTIONS,
+    TELEMETRY_FEATURES,
+    EncoderConfig,
+    PredictorConfig,
 )
 
 
-class SubJepaEncoder(eqx.Module):
+class TrackmaniaEncoder(eqx.Module):
     conv1: eqx.nn.Conv2d
     conv2: eqx.nn.Conv2d
     conv3: eqx.nn.Conv2d
@@ -59,10 +60,12 @@ class SubJepaEncoder(eqx.Module):
 
     def __call__(
         self,
-        screen: Float[Array, "hist h w"],
-        lidar: Float[Array, "hist rays"],
-        telemetry: Float[Array, "features"],
+        observations: dict[str, Array],
     ) -> Float[Array, "latent_dim"]:
+        screen = observations["screen"]
+        lidar = observations["lidar"]
+        telemetry = observations["telemetry"]
+
         x_screen = jax.nn.relu(self.conv1(screen))
         x_screen = jax.nn.relu(self.conv2(x_screen))
         x_screen = jax.nn.relu(self.conv3(x_screen))
@@ -75,7 +78,7 @@ class SubJepaEncoder(eqx.Module):
         return self.fusion_mlp(x_fused)
 
 
-class SubJepaPredictor(eqx.Module):
+class TrackmaniaPredictor(eqx.Module):
     action_embedding: eqx.nn.Embedding
     predictor_mlp: eqx.nn.MLP
 

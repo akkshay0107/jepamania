@@ -13,7 +13,7 @@ from core.config import (
     EncoderConfig,
     PredictorConfig,
 )
-from core.models import SubJepaEncoder, SubJepaPredictor
+from core.models import TrackmaniaEncoder, TrackmaniaPredictor
 
 
 def benchmark(func, args, num_warmup=100, num_runs=1000):
@@ -39,10 +39,10 @@ def main():
     ekey, pkey, data_key = jax.random.split(key, 3)
 
     enc_cfg = EncoderConfig()
-    encoder = SubJepaEncoder(enc_cfg, ekey)
+    encoder = TrackmaniaEncoder(enc_cfg, ekey)
 
     pred_cfg = PredictorConfig()
-    predictor = SubJepaPredictor(pred_cfg, pkey)
+    predictor = TrackmaniaPredictor(pred_cfg, pkey)
 
     # Dummy data
     screen = jax.random.normal(data_key, (IMG_HIST_LEN, 64, 64))
@@ -54,8 +54,8 @@ def main():
 
     # JIT compile
     @eqx.filter_jit
-    def run_encoder(s, l, t):
-        return encoder(s, l, t)
+    def run_encoder(screen, lidar, telemetry):
+        return encoder({"screen": screen, "lidar": lidar, "telemetry": telemetry})
 
     @eqx.filter_jit
     def run_predictor(l_state, act):
