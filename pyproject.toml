@@ -19,7 +19,11 @@ dev = [
     "ruff>=0.15.18",
 ]
 
+[tool.ruff]
+line-length = 88
+
 [tool.ruff.lint]
+select = ["E", "F", "W", "I"]
 ignore = [
     "F722", # Forward annotation false positive from jaxtyping
     "F821", # Forward annotation false positive from jaxtyping

@@ -7,18 +7,18 @@ from jaxtyping import Array, Float, PRNGKeyArray
 
 @functools.partial(jax.vmap, in_axes=(0, None, None))
 def _make_projector(
-    k: PRNGKeyArray, latent_dim: int, subspace_dim: int
+    key: PRNGKeyArray, latent_dim: int, subspace_dim: int
 ) -> Float[Array, "latent_dim subspace_dim"]:
-    matrix = jax.random.normal(k, (latent_dim, subspace_dim))
+    matrix = jax.random.normal(key, (latent_dim, subspace_dim))
     q, _ = jnp.linalg.qr(matrix)
     return q
 
 
 @functools.partial(jax.vmap, in_axes=(0, None, None))
 def _make_slice_projector(
-    k: PRNGKeyArray, subspace_dim: int, num_slices: int
+    key: PRNGKeyArray, subspace_dim: int, num_slices: int
 ) -> Float[Array, "subspace_dim num_slices"]:
-    matrix = jax.random.normal(k, (subspace_dim, num_slices))
+    matrix = jax.random.normal(key, (subspace_dim, num_slices))
     norms = jnp.linalg.norm(matrix, axis=0, keepdims=True)
     return matrix / norms
 
@@ -30,9 +30,9 @@ def generate_projectors(
     subspace_dim: int,
     num_slices: int,
 ):
-    k1, k2 = jax.random.split(key)
-    keys_subspace = jax.random.split(k1, num_subspaces)
-    keys_slices = jax.random.split(k2, num_subspaces)
+    key_subspace_split, key_slice_split = jax.random.split(key)
+    keys_subspace = jax.random.split(key_subspace_split, num_subspaces)
+    keys_slices = jax.random.split(key_slice_split, num_subspaces)
 
     subspace_projectors = _make_projector(keys_subspace, latent_dim, subspace_dim)
     slice_projectors = _make_slice_projector(keys_slices, subspace_dim, num_slices)

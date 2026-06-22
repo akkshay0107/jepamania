@@ -22,11 +22,15 @@ class TrackmaniaEncoder(eqx.Module):
     fusion_mlp: eqx.nn.MLP
 
     def __init__(self, cfg: EncoderConfig, key: PRNGKeyArray):
-        k1, k2, k3, k4, k5, k6 = jax.random.split(key, 6)
+        key_conv1, key_conv2, key_conv3, key_lidar, key_telemetry, key_fusion = (
+            jax.random.split(key, 6)
+        )
 
-        self.conv1 = eqx.nn.Conv2d(IMG_HIST_LEN, 32, kernel_size=8, stride=4, key=k1)
-        self.conv2 = eqx.nn.Conv2d(32, 64, kernel_size=4, stride=2, key=k2)
-        self.conv3 = eqx.nn.Conv2d(64, 64, kernel_size=3, stride=1, key=k3)
+        self.conv1 = eqx.nn.Conv2d(
+            IMG_HIST_LEN, 32, kernel_size=8, stride=4, key=key_conv1
+        )
+        self.conv2 = eqx.nn.Conv2d(32, 64, kernel_size=4, stride=2, key=key_conv2)
+        self.conv3 = eqx.nn.Conv2d(64, 64, kernel_size=3, stride=1, key=key_conv3)
 
         flattened_img_size = 64 * 4 * 4
         flattened_lidar_size = IMG_HIST_LEN * LIDAR_FEATURES
@@ -37,7 +41,7 @@ class TrackmaniaEncoder(eqx.Module):
             width_size=128,
             depth=2,
             activation=jax.nn.silu,
-            key=k4,
+            key=key_lidar,
         )
         self.telemetry_mlp = eqx.nn.MLP(
             in_size=TELEMETRY_FEATURES,
@@ -45,7 +49,7 @@ class TrackmaniaEncoder(eqx.Module):
             width_size=128,
             depth=2,
             activation=jax.nn.silu,
-            key=k5,
+            key=key_telemetry,
         )
 
         fusion_in = flattened_img_size + 64 + 64
@@ -55,7 +59,7 @@ class TrackmaniaEncoder(eqx.Module):
             width_size=512,
             depth=2,
             activation=jax.nn.silu,
-            key=k6,
+            key=key_fusion,
         )
 
     def __call__(
@@ -83,9 +87,9 @@ class TrackmaniaPredictor(eqx.Module):
     predictor_mlp: eqx.nn.MLP
 
     def __init__(self, cfg: PredictorConfig, key: PRNGKeyArray):
-        k1, k2 = jax.random.split(key, 2)
+        key_emb, key_mlp = jax.random.split(key, 2)
         self.action_embedding = eqx.nn.Embedding(
-            num_embeddings=NUM_ACTIONS, embedding_size=cfg.action_embed_dim, key=k1
+            num_embeddings=NUM_ACTIONS, embedding_size=cfg.action_embed_dim, key=key_emb
         )
         self.predictor_mlp = eqx.nn.MLP(
             in_size=cfg.latent_dim + cfg.action_embed_dim,
@@ -93,7 +97,7 @@ class TrackmaniaPredictor(eqx.Module):
             width_size=cfg.hidden_dim,
             depth=3,
             activation=jax.nn.silu,
-            key=k2,
+            key=key_mlp,
         )
 
     def __call__(

@@ -36,30 +36,32 @@ def benchmark(func, args, num_warmup=100, num_runs=1000):
 
 def main():
     key = jax.random.PRNGKey(0)
-    ekey, pkey, data_key = jax.random.split(key, 3)
+    key_encoder, key_predictor, key_data = jax.random.split(key, 3)
 
     enc_cfg = EncoderConfig()
-    encoder = TrackmaniaEncoder(enc_cfg, ekey)
+    encoder = TrackmaniaEncoder(enc_cfg, key_encoder)
 
     pred_cfg = PredictorConfig()
-    predictor = TrackmaniaPredictor(pred_cfg, pkey)
+    predictor = TrackmaniaPredictor(pred_cfg, key_predictor)
 
     # Dummy data
-    screen = jax.random.normal(data_key, (IMG_HIST_LEN, 64, 64))
-    lidar = jax.random.normal(data_key, (IMG_HIST_LEN, LIDAR_FEATURES))
-    telemetry = jax.random.normal(data_key, (TELEMETRY_FEATURES,))
+    screen = jax.random.normal(key_data, (IMG_HIST_LEN, 64, 64))
+    lidar = jax.random.normal(key_data, (IMG_HIST_LEN, LIDAR_FEATURES))
+    telemetry = jax.random.normal(key_data, (TELEMETRY_FEATURES,))
 
-    latent_state = jax.random.normal(data_key, (pred_cfg.latent_dim,))
+    latent_state = jax.random.normal(key_data, (pred_cfg.latent_dim,))
     action = jnp.array(0, dtype=jnp.int32)
 
     # JIT compile
     @eqx.filter_jit
-    def run_encoder(screen, lidar, telemetry):
-        return encoder({"screen": screen, "lidar": lidar, "telemetry": telemetry})
+    def run_encoder(screen_data, lidar_data, telemetry_data):
+        return encoder(
+            {"screen": screen_data, "lidar": lidar_data, "telemetry": telemetry_data}
+        )
 
     @eqx.filter_jit
-    def run_predictor(l_state, act):
-        return predictor(l_state, act)
+    def run_predictor(latent, action_val):
+        return predictor(latent, action_val)
 
     print("Benchmarking Encoder...")
     enc_latencies = benchmark(run_encoder, (screen, lidar, telemetry))
