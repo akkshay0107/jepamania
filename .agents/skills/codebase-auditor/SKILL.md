@@ -5,16 +5,15 @@ description: Audit the codebase to enforce Python clean code standards, performa
 
 # Codebase Auditor
 
-You are the project's strict architecture and styling enforcer. You ensure that the code is not only highly performant and readable but strictly adheres to the functional programming paradigms required by JAX and Equinox.
+Ensure that the code is not only highly performant and readable but strictly adheres to the functional programming paradigms required by JAX and Equinox.
+NOTE: Do not apply this to any library source code that exists in the virtual environment or the scratch directory. Editing code in virtual environments is strictly off limits.
 
-## 1. General Python Clean Code & Performance
+## 1. Python Clean Code & Performance
 
-- **Readability:** Adhere to PEP 8 standards. Use descriptive naming and prioritize explicit implementations over implicit "magic."
-- **Efficient Data Handling:** Use list comprehensions instead of explicit `for` loops where possible. Use `.extend()` rather than `.append()` in loops. Use built-in Python functions, as they are implemented in C and highly optimized. Note that these are specific examples, search online if you need to find more common python optimizations that could be used.
-- **I/O Optimization:** When interacting with files or `h5py` datasets, minimize the number of calls. Write data in chunks rather than row-by-row.
-- **No Global State:** Global variable lookups are slow and break functional purity. State must be passed explicitly.
-
-When in doubt about performance, make a quick benchmark script in the `scratch` directory (under the project root) and use uv to run the script for testing the performance of a change. Never blindly do changes without profiling.
+- **Readability:** Follow PEP 8. Use explicit implementations and descriptive naming.
+- **Data & I/O:** Use optimized built-ins/list comprehensions where possible. Batch/chunk file and `h5py` operations.
+- **Purity:** Avoid global state.
+- **Profiling:** When testing performance changes, create and run a benchmark script in the `scratch` directory using `uv`. Do not make optimizations without profiling.
 
 ## 2. JAX & Equinox Adherence
 
@@ -27,21 +26,21 @@ When in doubt about performance, make a quick benchmark script in the `scratch` 
 
 ## 3. Static LSP Code Checks and Cleanup
 
-NOTE: Do not apply this to any library source code that exists in the virtual environment or the scratch directory. Editing code in virtual environments is strictly off limits.
-
-- **Linter (Ruff):** Use ruff to check, fix, and format all source code and tests written across the repo.
+- **Linter (Ruff):**
   - Run lint check: `uv run ruff check .`
   - Auto-fix lint violations: `uv run ruff check --fix .`
   - Format code files: `uv run ruff format .`
 - **Type Checking (Pyright):** Use pyright to verify type annotations.
   - Run type checking: `uv run pyright .`
-  - Go over all the errors and warnings that it provides. If the warnings are meaningful and can be fixed easily, make the necessary edits to fix them. However, if the warnings / errors are harmless and tedious to fix, prefer using comments to ignore them and note them down in your response in case the warning is relevant in the future.
-- **Comment Style:**
-  - Ensure that the comments are meaningful and do not explain the obvious. The comments should provide additional information or clarification that is not directly observable from the code. Prefer explicit names where possible to avoid using comments that explain ambiguous naming conventions.
-  - Avoid using numbered lists or section headers. The code should be structured in a way that they are not necessary.
-  - Use comments to explain why a certain block of code exists or is used rather than what the code does. In places where the code is complex, and the way the code is written obscures its actual functionality, it is ok to explain what the code does.
-  - The above are not hard rules that need to be adhered to, but general guidelines. Feel free to go against them if needed.
+  - Go over all the errors and warnings that it provides. If they are meaningful and can be fixed easily, make the necessary edits to fix them. If they are harmless and tedious to fix, prefer using comments to ignore them and note them down in your response in case the warning is relevant in the future.
+
+## 4. Commenting Style Guideline
+
+- Ensure that the comments are meaningful and do not explain the obvious. Comments should provide additional information or clarification that is not directly observable from the code. Prefer explicit names to avoid using comments that explain ambiguous naming conventions.
+- Avoid using numbered lists or section headers. The code should be structured in a way that they are not necessary.
+- Use comments to explain why a certain block of code exists or is used rather than what the code does. In places where the code is complex, and the way the code is written obscures its actual functionality, it is ok to explain what the code does.
+- The above are not hard rules that need to be adhered to, but general guidelines. Feel free to go against them if needed.
 
 ## Expected Workflow
 
-When auditing, read through the targeted files and produce an itemized list of violations based on the rules above. Ensure that the cross-platform monorepo boundaries are respected (e.g., no Windows dependencies like `tmrl` in the `core` package).
+Audit target files, generate an itemized list of violations, and respect cross-platform boundaries (e.g., no Windows/`tmrl` dependencies in `core`).
