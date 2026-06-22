@@ -57,16 +57,26 @@ def _project_into_slices(
 
 
 def epps_pulley_1d(h: Float[Array, "batch"]) -> Float[Array, ""]:
-    gamma = 0.5
-    diffs = h[:, None] - h[None, :]
-    term1 = jnp.mean(jnp.exp(-gamma * (diffs**2)))
-    term2 = (
-        2.0
-        / jnp.sqrt(1.0 + 2.0 * gamma)
-        * jnp.mean(jnp.exp(-(gamma / (1.0 + 2.0 * gamma)) * (h**2)))
-    )
-    term3 = 1.0 / jnp.sqrt(1.0 + 4.0 * gamma)
-    return term1 - term2 + term3
+    # copied over from the le jepa repo
+    # below will be constant folded
+    knots = 17
+    t_max = 3.0
+    t = jnp.linspace(0.0, t_max, knots)
+    dt = t_max / (knots - 1)
+    weights = jnp.full((knots,), 2 * dt)
+    weights = weights.at[0].set(dt)
+    weights = weights.at[-1].set(dt)
+
+    phi = jnp.exp(-(t**2) / 2.0)
+    weights = weights * phi
+
+    # empirical characteristic function
+    x_t = h[:, None] * t[None, :]
+    cos_mean = jnp.mean(jnp.cos(x_t), axis=0)
+    sin_mean = jnp.mean(jnp.sin(x_t), axis=0)
+
+    err = (cos_mean - phi) ** 2 + sin_mean**2
+    return jnp.dot(err, weights) * h.shape[0]
 
 
 _vmap_slices = jax.vmap(epps_pulley_1d, in_axes=1)
