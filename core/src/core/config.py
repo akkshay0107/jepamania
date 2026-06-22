@@ -15,8 +15,16 @@ NUM_ACTIONS: int = 35
 
 
 @dataclass
+class TransformerConfig:
+    num_layers: int = 3
+    num_heads: int = 4
+    mlp_ratio: float = 4.0
+
+
+@dataclass
 class EncoderConfig:
     latent_dim: int = 192
+    transformer: TransformerConfig = field(default_factory=TransformerConfig)
 
 
 @dataclass

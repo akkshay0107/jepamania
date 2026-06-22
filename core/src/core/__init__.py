@@ -1,10 +1,12 @@
+from .encoders import ConvEncoder, ViTEncoder
 from .interfaces import Encoder, Planner, Predictor
-from .models import TrackmaniaEncoder, TrackmaniaPredictor
+from .predictors import MLPPredictor
 
 __all__ = [
     "Encoder",
     "Predictor",
     "Planner",
-    "TrackmaniaEncoder",
-    "TrackmaniaPredictor",
+    "ConvEncoder",
+    "ViTEncoder",
+    "MLPPredictor",
 ]

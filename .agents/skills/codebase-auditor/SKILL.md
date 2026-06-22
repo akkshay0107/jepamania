@@ -14,7 +14,7 @@ You are the project's strict architecture and styling enforcer. You ensure that 
 - **I/O Optimization:** When interacting with files or `h5py` datasets, minimize the number of calls. Write data in chunks rather than row-by-row.
 - **No Global State:** Global variable lookups are slow and break functional purity. State must be passed explicitly.
 
-When in doubt about performance, make a quick benchmark script in the `scratch` directory (under the project root)  and use uv to run the script for testing the performance of a change. Never blindly do changes without profiling.
+When in doubt about performance, make a quick benchmark script in the `scratch` directory (under the project root) and use uv to run the script for testing the performance of a change. Never blindly do changes without profiling.
 
 ## 2. JAX & Equinox Adherence
 
@@ -27,7 +27,7 @@ When in doubt about performance, make a quick benchmark script in the `scratch` 
 
 ## 3. Static LSP Code Checks and Cleanup
 
-NOTE: Do not apply this to any library source code that exists in the virtual environment. Editing code in virtual environments is strictly off limits.
+NOTE: Do not apply this to any library source code that exists in the virtual environment or the scratch directory. Editing code in virtual environments is strictly off limits.
 
 - **Linter (Ruff):** Use ruff to check, fix, and format all source code and tests written across the repo.
   - Run lint check: `uv run ruff check .`
@@ -36,6 +36,11 @@ NOTE: Do not apply this to any library source code that exists in the virtual en
 - **Type Checking (Pyright):** Use pyright to verify type annotations.
   - Run type checking: `uv run pyright .`
   - Go over all the errors and warnings that it provides. If the warnings are meaningful and can be fixed easily, make the necessary edits to fix them. However, if the warnings / errors are harmless and tedious to fix, prefer using comments to ignore them and note them down in your response in case the warning is relevant in the future.
+- **Comment Style:**
+  - Ensure that the comments are meaningful and do not explain the obvious. The comments should provide additional information or clarification that is not directly observable from the code. Prefer explicit names where possible to avoid using comments that explain ambiguous naming conventions.
+  - Avoid using numbered lists or section headers. The code should be structured in a way that they are not necessary.
+  - Use comments to explain why a certain block of code exists or is used rather than what the code does. In places where the code is complex, and the way the code is written obscures its actual functionality, it is ok to explain what the code does.
+  - The above are not hard rules that need to be adhered to, but general guidelines. Feel free to go against them if needed.
 
 ## Expected Workflow
 
