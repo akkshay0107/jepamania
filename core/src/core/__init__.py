@@ -1,5 +1,6 @@
 from .encoders import ConvEncoder, ViTEncoder
 from .interfaces import Encoder, Planner, Predictor
+from .planners import BeamSearchPlanner, CEMPlanner, RandomShootingPlanner
 from .predictors import MLPPredictor
 
 __all__ = [
@@ -9,4 +10,7 @@ __all__ = [
     "ConvEncoder",
     "ViTEncoder",
     "MLPPredictor",
+    "CEMPlanner",
+    "BeamSearchPlanner",
+    "RandomShootingPlanner",
 ]
