@@ -1,0 +1,11 @@
+hdf5_chunk_size: 128
+
+agent:
+  policy_path: null
+  use_noise: true
+  noise_scale: 0.3
+  ou_theta: 0.15
+  ou_sigma: 0.2
+
+human:
+  record_hotkey: F9

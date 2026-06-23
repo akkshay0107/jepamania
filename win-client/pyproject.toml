@@ -7,6 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "core",
     "h5py",
+    "omegaconf>=2.3.1",
     "tmrl; sys_platform == 'win32'",
 ]
 
