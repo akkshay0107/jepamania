@@ -1,10 +1,15 @@
 import logging
 import queue
 import threading
+from pathlib import Path
+from typing import Any, cast
 
 import h5py
 import numpy as np
+from core.config import IMG_HIST_LEN, LIDAR_FEATURES, TELEMETRY_FEATURES
 from src.settings import cfg
+
+IMG_SIZE: int = 64  # spatial resolution expected by the encoder
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -12,136 +17,211 @@ logging.basicConfig(
 
 
 class HDF5Writer:
-    def __init__(self, filepath, chunk_size=cfg.hdf5_chunk_size):
+    """Asynchronous HDF5 writer with per-episode metadata support."""
+
+    def __init__(self, filepath: Path, chunk_size: int = cfg.hdf5_chunk_size) -> None:
         self.filepath = filepath
         self.chunk_size = chunk_size
-        self.queue = queue.Queue()
 
-        self.obs_buffer = []
-        self.speed_buffer = []
-        self.gear_buffer = []
-        self.rpm_buffer = []
-        self.action_buffer = []
+        # Queue shared between main thread (producer) and writer thread (consumer).
+        self._queue: queue.Queue = queue.Queue()
 
-        self.running = True
-        self.thread = threading.Thread(target=self._writer_loop, daemon=True)
+        # Per-type frame buffers (populated by the writer thread only).
+        self._screen_buf: list[np.ndarray] = []
+        self._lidar_buf: list[np.ndarray] = []
+        self._telemetry_buf: list[np.ndarray] = []
+        self._action_buf: list[np.ndarray] = []
+        self._episode_id_buf: list[int] = []
 
-        self.file = h5py.File(self.filepath, "w")
+        self.current_size: int = 0
+        self._current_episode_id: int = -1
 
-        self.dset_obs = self.file.create_dataset(
-            "observations",
-            shape=(0, *cfg.image_shape),
-            maxshape=(None, *cfg.image_shape),
-            chunks=(self.chunk_size, *cfg.image_shape),
+        self._running: bool = True
+
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        self._file = h5py.File(filepath, "w")
+
+        obs_grp = self._file.create_group("observations")
+        obs_grp.create_dataset(
+            "screen",
+            shape=(0, IMG_HIST_LEN, IMG_SIZE, IMG_SIZE),
+            maxshape=(None, IMG_HIST_LEN, IMG_SIZE, IMG_SIZE),
+            chunks=(chunk_size, IMG_HIST_LEN, IMG_SIZE, IMG_SIZE),
             dtype=np.uint8,
-            compression=cfg.compression,
+            compression="gzip",
         )
-
-        self.dset_speed = self.file.create_dataset(
-            "speed",
-            shape=(0,),
-            maxshape=(None,),
-            chunks=(self.chunk_size,),
+        obs_grp.create_dataset(
+            "lidar",
+            shape=(0, IMG_HIST_LEN, LIDAR_FEATURES),
+            maxshape=(None, IMG_HIST_LEN, LIDAR_FEATURES),
+            chunks=(chunk_size, IMG_HIST_LEN, LIDAR_FEATURES),
             dtype=np.float32,
         )
-        self.dset_gear = self.file.create_dataset(
-            "gear",
-            shape=(0,),
-            maxshape=(None,),
-            chunks=(self.chunk_size,),
-            dtype=np.int32,
-        )
-        self.dset_rpm = self.file.create_dataset(
-            "rpm",
-            shape=(0,),
-            maxshape=(None,),
-            chunks=(self.chunk_size,),
+        obs_grp.create_dataset(
+            "telemetry",
+            shape=(0, TELEMETRY_FEATURES),
+            maxshape=(None, TELEMETRY_FEATURES),
+            chunks=(chunk_size, TELEMETRY_FEATURES),
             dtype=np.float32,
         )
-
-        self.dset_actions = self.file.create_dataset(
+        self._file.create_dataset(
             "actions",
             shape=(0, cfg.action_dim),
             maxshape=(None, cfg.action_dim),
-            chunks=(self.chunk_size, cfg.action_dim),
+            chunks=(chunk_size, cfg.action_dim),
             dtype=np.float32,
-            compression=cfg.compression,
+            compression="gzip",
         )
+        self._file.create_dataset(
+            "episode_id",
+            shape=(0,),
+            maxshape=(None,),
+            chunks=(chunk_size,),
+            dtype=np.int32,
+        )
+        self._file.create_group("metadata")
 
-        self.current_size = 0
-        self.thread.start()
-        logging.info(f"Started HDF5Writer for {self.filepath}")
+        self._thread = threading.Thread(target=self._writer_loop, daemon=True)
+        self._thread.start()
+        logging.info(f"HDF5Writer started → {filepath}")
 
-    def append(self, obs, telemetry, action):
-        obs_array = np.copy(obs)
-        if obs_array.dtype in [np.float32, np.float64]:
-            if obs_array.max() <= 1.0:
-                obs_array = (obs_array * 255.0).astype(np.uint8)
-            else:
-                obs_array = obs_array.astype(np.uint8)
-
-        self.queue.put(
+    def new_episode(self, metadata: dict[str, Any]) -> None:
+        """Signal the start of a new episode."""
+        self._current_episode_id += 1
+        self._queue.put(
             {
-                "obs": obs_array,
-                "speed": float(telemetry.get("speed", 0.0)),
-                "gear": int(telemetry.get("gear", 0)),
-                "rpm": float(telemetry.get("rpm", 0.0)),
-                "action": np.copy(action),
+                "_type": "episode_start",
+                "episode_id": self._current_episode_id,
+                "metadata": dict(metadata),
             }
         )
 
-    def _writer_loop(self):
-        while self.running or not self.queue.empty():
+    def end_episode(self, termination: str = "done") -> None:
+        """
+        Signal the end of the current episode.
+
+        The writer thread will flush all pending frame data for this episode
+        before recording frame_end in the metadata group.
+        """
+        if self._current_episode_id < 0:
+            return
+        self._queue.put(
+            {
+                "_type": "episode_end",
+                "episode_id": self._current_episode_id,
+                "termination": termination,
+            }
+        )
+
+    def append(self, obs_dict: dict[str, np.ndarray], action: np.ndarray) -> None:
+        """Queue a single frame for writing."""
+        self._queue.put(
+            {
+                "_type": "frame",
+                "screen": np.copy(obs_dict["screen"]),
+                "lidar": np.copy(obs_dict["lidar"]),
+                "telemetry": np.copy(obs_dict["telemetry"]),
+                "action": np.copy(action).astype(np.float32),
+                "episode_id": self._current_episode_id,
+            }
+        )
+
+    def close(self) -> None:
+        """Drain the queue, flush remaining data, and close the file."""
+        self._running = False
+        self._thread.join()
+        self._flush()
+        self._file.close()
+        logging.info(f"HDF5Writer closed. Total frames written: {self.current_size}")
+
+    def _writer_loop(self) -> None:
+        """Background thread: processes tokens and frame data from the queue."""
+        # Maps episode_id → pending metadata dict (frame_start unknown until flush).
+        pending: dict[int, dict] = {}
+
+        while self._running or not self._queue.empty():
             try:
-                data = self.queue.get(timeout=0.1)
-                self.obs_buffer.append(data["obs"])
-                self.speed_buffer.append(data["speed"])
-                self.gear_buffer.append(data["gear"])
-                self.rpm_buffer.append(data["rpm"])
-                self.action_buffer.append(data["action"])
-
-                if len(self.obs_buffer) >= self.chunk_size:
-                    self._flush()
-
+                token = self._queue.get(timeout=0.1)
             except queue.Empty:
                 continue
 
-    def _flush(self):
-        n = len(self.obs_buffer)
+            ttype = token["_type"]
+
+            if ttype == "episode_start":
+                # Flush any residual frames from the previous episode so that
+                # current_size reflects the true boundary before recording frame_start.
+                self._flush()
+                pending[token["episode_id"]] = {
+                    **token["metadata"],
+                    "frame_start": self.current_size,
+                }
+
+            elif ttype == "episode_end":
+                # Flush this episode's buffered frames before recording frame_end.
+                self._flush()
+                ep_id = token["episode_id"]
+                if ep_id in pending:
+                    meta = pending.pop(ep_id)
+                    meta["frame_end"] = self.current_size
+                    meta["termination"] = token["termination"]
+
+                    # h5py groups and attributes typing is loose in pyright
+                    grp = cast(h5py.Group, self._file["metadata"]).create_group(
+                        f"episode_{ep_id}"
+                    )
+                    for k, v in meta.items():
+                        # HDF5 attributes must be scalar or string.
+                        if isinstance(v, (int, float, np.integer, np.floating)):
+                            grp.attrs[k] = v
+                        else:
+                            grp.attrs[k] = str(v)
+                    self._file.flush()
+
+            else:  # "frame"
+                self._screen_buf.append(token["screen"])
+                self._lidar_buf.append(token["lidar"])
+                self._telemetry_buf.append(token["telemetry"])
+                self._action_buf.append(token["action"])
+                self._episode_id_buf.append(token["episode_id"])
+
+                if len(self._screen_buf) >= self.chunk_size:
+                    self._flush()
+
+    def _flush(self) -> None:
+        """Write all buffered frames to HDF5 and clear the buffers."""
+        n = len(self._screen_buf)
         if n == 0:
             return
 
         new_size = self.current_size + n
 
-        self.dset_obs.resize(new_size, axis=0)
-        self.dset_speed.resize(new_size, axis=0)
-        self.dset_gear.resize(new_size, axis=0)
-        self.dset_rpm.resize(new_size, axis=0)
-        self.dset_actions.resize(new_size, axis=0)
+        # casting to avoid pyright errors
+        obs = cast(h5py.Group, self._file["observations"])
 
-        self.dset_obs[self.current_size : new_size] = np.stack(self.obs_buffer)
-        self.dset_speed[self.current_size : new_size] = np.array(
-            self.speed_buffer, dtype=np.float32
+        screen_ds = cast(h5py.Dataset, obs["screen"])
+        lidar_ds = cast(h5py.Dataset, obs["lidar"])
+        telem_ds = cast(h5py.Dataset, obs["telemetry"])
+        actions_ds = cast(h5py.Dataset, self._file["actions"])
+        ep_id_ds = cast(h5py.Dataset, self._file["episode_id"])
+
+        screen_ds.resize(new_size, axis=0)
+        lidar_ds.resize(new_size, axis=0)
+        telem_ds.resize(new_size, axis=0)
+        actions_ds.resize(new_size, axis=0)
+        ep_id_ds.resize(new_size, axis=0)
+
+        screen_ds[self.current_size : new_size] = np.stack(self._screen_buf)
+        lidar_ds[self.current_size : new_size] = np.stack(self._lidar_buf)
+        telem_ds[self.current_size : new_size] = np.stack(self._telemetry_buf)
+        actions_ds[self.current_size : new_size] = np.stack(self._action_buf)
+        ep_id_ds[self.current_size : new_size] = np.array(
+            self._episode_id_buf, dtype=np.int32
         )
-        self.dset_gear[self.current_size : new_size] = np.array(
-            self.gear_buffer, dtype=np.int32
-        )
-        self.dset_rpm[self.current_size : new_size] = np.array(
-            self.rpm_buffer, dtype=np.float32
-        )
-        self.dset_actions[self.current_size : new_size] = np.stack(self.action_buffer)
 
         self.current_size = new_size
 
-        self.obs_buffer.clear()
-        self.speed_buffer.clear()
-        self.gear_buffer.clear()
-        self.rpm_buffer.clear()
-        self.action_buffer.clear()
-
-    def close(self):
-        self.running = False
-        self.thread.join()
-        self._flush()
-        self.file.close()
-        logging.info(f"Closed HDF5Writer. Total frames written: {self.current_size}")
+        self._screen_buf.clear()
+        self._lidar_buf.clear()
+        self._telemetry_buf.clear()
+        self._action_buf.clear()
+        self._episode_id_buf.clear()
