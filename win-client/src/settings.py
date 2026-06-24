@@ -12,6 +12,11 @@ _DEFAULTS = {
     "hdf5_chunk_size": 128,
     "agent": {
         "policy_path": None,
+        "exploration": {
+            "ou_noise_mu": 0.0,
+            "ou_noise_theta": 0.15,
+            "ou_noise_sigma": 0.05,
+        },
     },
     "human": {
         "record_hotkey": "F9",

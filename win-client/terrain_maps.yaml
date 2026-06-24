@@ -1,0 +1,27 @@
+# terrain_maps.yaml
+
+# Fallback defaults for terrains
+terrain_defaults:
+  road:
+    policy: "C:/path/to/your/road_sac_checkpoint.pt"
+  dirt:
+    policy: "C:/path/to/your/dirt_sac_checkpoint.pt"
+  ice:
+    # Set to null to use OUNoise random exploration
+    policy: null
+
+# The list of maps to infinitely cycle through
+maps:
+  - name: "Training_Road_1"
+    uid: "some_uid_for_road_map"
+    terrain: "road"
+
+  - name: "Training_Dirt_1"
+    uid: "some_uid_for_dirt_map"
+    terrain: "dirt"
+    
+  - name: "Custom_Exploration"
+    uid: "some_custom_uid"
+    terrain: "ice"
+    # Overrides the default policy for this specific map
+    policy: "C:/path/to/specific_checkpoint.pt"

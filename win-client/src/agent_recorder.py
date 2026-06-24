@@ -11,7 +11,7 @@ import tmrl
 from src.data_writer import HDF5Writer
 from src.settings import cfg
 from src.terrain_scheduler import MapConfig, TerrainScheduler
-from src.utils import obs_to_dict
+from src.utils import OUNoise, obs_to_dict
 from tmrl.actor import TorchActorModule
 
 logging.basicConfig(
@@ -77,6 +77,14 @@ class AgentCollector:
         logging.info(f"Starting on terrain={map_config.terrain!r}")
         obs_dict = switch_map(map_config.uid, env)
 
+        noise = OUNoise(
+            size=cfg.action_dim,
+            mu=cfg.agent.exploration.ou_noise_mu,
+            theta=cfg.agent.exploration.ou_noise_theta,
+            sigma=cfg.agent.exploration.ou_noise_sigma,
+        )
+        noise.reset()
+
         writer.new_episode(
             {
                 "source": "agent",
@@ -96,6 +104,7 @@ class AgentCollector:
         try:
             while True:
                 action = policy(obs_dict)
+                action = np.clip(action + noise(), -1.0, 1.0).astype(np.float32)
                 raw_next, _reward, terminated, truncated, info = env.step(action)
                 next_obs_dict = obs_to_dict(raw_next)
                 done = terminated or truncated
@@ -141,6 +150,7 @@ class AgentCollector:
                     raw_obs, _info = env.reset()
                     obs_dict = obs_to_dict(raw_obs)
 
+                noise.reset()
                 writer.new_episode(
                     {
                         "source": "agent",

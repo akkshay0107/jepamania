@@ -41,3 +41,24 @@ def obs_to_dict(obs) -> dict[str, np.ndarray]:
         "lidar": np.zeros((IMG_HIST_LEN, LIDAR_FEATURES), dtype=np.float32),
         "telemetry": np.zeros(TELEMETRY_FEATURES, dtype=np.float32),
     }
+
+
+class OUNoise:
+    """Ornstein-Uhlenbeck process for exploration noise."""
+
+    def __init__(
+        self, size: int, mu: float = 0.0, theta: float = 0.15, sigma: float = 0.05
+    ):
+        self.mu = mu * np.ones(size, dtype=np.float32)
+        self.theta = theta
+        self.sigma = sigma
+        self.state = np.copy(self.mu)
+
+    def reset(self) -> None:
+        self.state = np.copy(self.mu)
+
+    def __call__(self) -> np.ndarray:
+        x = self.state
+        dx = self.theta * (self.mu - x) + self.sigma * np.random.randn(len(x))
+        self.state = x + dx
+        return self.state.astype(np.float32)
