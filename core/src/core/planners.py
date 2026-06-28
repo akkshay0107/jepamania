@@ -41,8 +41,9 @@ class RandomShootingPlanner(eqx.Module):
         actions: Int[Array, "sequence_len"],
         current_latent_state: Float[Array, "latent_dim"],
     ) -> Float[Array, ""]:
+        scan_step = Partial(self._step_fn)
         (final_score, _), _ = jax.lax.scan(
-            self._step_fn, (jnp.array(0.0), current_latent_state), actions
+            scan_step, (jnp.array(0.0), current_latent_state), actions
         )
         return final_score
 
