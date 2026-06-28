@@ -36,11 +36,16 @@ NOTE: Do not apply this to any library source code that exists in the virtual en
 
 ## 4. Commenting Style Guideline
 
-- Ensure that the comments are meaningful and do not explain the obvious. Comments should provide additional information or clarification that is not directly observable from the code. Prefer explicit names to avoid using comments that explain ambiguous naming conventions.
-- Avoid using numbered lists or section headers. The code should be structured in a way that they are not necessary.
-- Use comments to explain why a certain block of code exists or is used rather than what the code does. In places where the code is complex, and the way the code is written obscures its actual functionality, it is ok to explain what the code does.
-- The above are not hard rules that need to be adhered to, but general guidelines. Feel free to go against them if needed.
+- **Do not explain the obvious**: Comments must provide non-trivial information or clarifications that are not directly observable from reading the code itself.
+- **Prefer self-documenting code**: Use descriptive variable/function/class names rather than comments explaining ambiguous naming conventions.
+- **Explain the "Why," not the "What"**: Comments must explain *why* a block of code exists or why a specific approach was taken, rather than *what* the code does. Writing comments detailing *what* the code does is only permitted if the implementation is highly complex/obscured.
+- **Structure code cleanly**: Avoid using numbered lists or markdown-style section headers inside comment blocks. The code structure must be self-explanatory without these markers.
+- **Purity & Non-discretion**: These rules are mandatory requirements of the codebase auditing process. Every audited file must be scanned specifically for comment-style violations.
 
 ## Expected Workflow
 
-Audit target files, generate an itemized list of violations, and respect cross-platform boundaries (e.g., no Windows/`tmrl` dependencies in `core`).
+1. Target target files for audit.
+2. Perform lint/type checks as specified in Section 3.
+3. Scan the code specifically for comment-style compliance against the strict rules in Section 4.
+4. Generate a comprehensive itemized list of JAX purity, Python performance, type safety, and commenting style violations.
+5. Fix violations or report them explicitly to the user. Respect cross-platform boundaries (e.g., no Windows/`tmrl` dependencies in `core`).

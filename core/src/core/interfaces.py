@@ -33,6 +33,9 @@ class Planner(Protocol):
     Returns a sequence of actions. For single-step plans, return a sequence of length 1.
     """
 
+    @property
+    def sequence_len(self) -> int: ...
+
     def __call__(
         self,
         current_latent_state: Float[Array, "latent_dim"],
