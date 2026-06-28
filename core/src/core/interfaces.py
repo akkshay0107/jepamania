@@ -1,4 +1,4 @@
-from typing import Any, Dict, Protocol, runtime_checkable
+from typing import Any, Callable, Dict, Optional, Protocol, runtime_checkable
 
 from jaxtyping import Array, Float, Int
 
@@ -36,6 +36,9 @@ class Planner(Protocol):
     def __call__(
         self,
         current_latent_state: Float[Array, "latent_dim"],
-        goal_latent_state: Float[Array, "latent_dim"],
+        goal_latent_state: Optional[Float[Array, "latent_dim"]] = None,
+        objective_fn: Optional[
+            Callable[[Float[Array, "latent_dim"]], Float[Array, ""]]
+        ] = None,
         **kwargs: Any,
     ) -> Int[Array, "sequence_len"]: ...

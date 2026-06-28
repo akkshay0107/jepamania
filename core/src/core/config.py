@@ -35,6 +35,12 @@ class PredictorConfig:
 
 
 @dataclass
+class ValueHeadConfig:
+    latent_dim: int = 192
+    hidden_dim: int = 256
+
+
+@dataclass
 class LossConfig:
     num_subspaces: int = 16
     subspace_dim: Optional[int] = None  # Will default to latent_dim // num_subspaces
@@ -46,6 +52,7 @@ class LossConfig:
 class SubJepaConfig:
     encoder: EncoderConfig = field(default_factory=EncoderConfig)
     predictor: PredictorConfig = field(default_factory=PredictorConfig)
+    value_head: ValueHeadConfig = field(default_factory=ValueHeadConfig)
     loss: LossConfig = field(default_factory=LossConfig)
 
 

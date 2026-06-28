@@ -1,7 +1,7 @@
+from .dynamics import MLPPredictor, MLPValueHead
 from .encoders import ConvEncoder, ViTEncoder
 from .interfaces import Encoder, Planner, Predictor
 from .planners import BeamSearchPlanner, CEMPlanner, RandomShootingPlanner
-from .predictors import MLPPredictor
 
 __all__ = [
     "Encoder",
@@ -10,6 +10,7 @@ __all__ = [
     "ConvEncoder",
     "ViTEncoder",
     "MLPPredictor",
+    "MLPValueHead",
     "CEMPlanner",
     "BeamSearchPlanner",
     "RandomShootingPlanner",
