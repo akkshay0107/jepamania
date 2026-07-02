@@ -8,7 +8,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 from core.config import (
     IMG_HIST_LEN,
-    LIDAR_FEATURES,
     TELEMETRY_FEATURES,
     EncoderConfig,
     PredictorConfig,
@@ -48,7 +47,6 @@ def main():
 
     # Dummy data
     screen = jax.random.normal(key_data, (IMG_HIST_LEN, 64, 64))
-    lidar = jax.random.normal(key_data, (IMG_HIST_LEN, LIDAR_FEATURES))
     telemetry = jax.random.normal(key_data, (TELEMETRY_FEATURES,))
 
     latent_state = jax.random.normal(key_data, (pred_cfg.latent_dim,))
@@ -56,26 +54,22 @@ def main():
 
     # JIT compile
     @eqx.filter_jit
-    def run_conv_encoder(screen_data, lidar_data, telemetry_data):
-        return encoder_conv(
-            {"screen": screen_data, "lidar": lidar_data, "telemetry": telemetry_data}
-        )
+    def run_conv_encoder(screen_data, telemetry_data):
+        return encoder_conv({"screen": screen_data, "telemetry": telemetry_data})
 
     @eqx.filter_jit
-    def run_vit_encoder(screen_data, lidar_data, telemetry_data):
-        return encoder_vit(
-            {"screen": screen_data, "lidar": lidar_data, "telemetry": telemetry_data}
-        )
+    def run_vit_encoder(screen_data, telemetry_data):
+        return encoder_vit({"screen": screen_data, "telemetry": telemetry_data})
 
     @eqx.filter_jit
     def run_predictor(latent, action_val):
         return predictor(latent, action_val)
 
     print("Benchmarking Conv Encoder...")
-    conv_enc_latencies = benchmark(run_conv_encoder, (screen, lidar, telemetry))
+    conv_enc_latencies = benchmark(run_conv_encoder, (screen, telemetry))
 
     print("Benchmarking ViT Encoder...")
-    vit_enc_latencies = benchmark(run_vit_encoder, (screen, lidar, telemetry))
+    vit_enc_latencies = benchmark(run_vit_encoder, (screen, telemetry))
 
     print("Benchmarking Predictor...")
     pred_latencies = benchmark(run_predictor, (latent_state, action))

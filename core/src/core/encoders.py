@@ -3,7 +3,7 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from core.config import IMG_HIST_LEN, LIDAR_FEATURES, TELEMETRY_FEATURES, EncoderConfig
+from core.config import IMG_HIST_LEN, TELEMETRY_FEATURES, EncoderConfig
 
 
 def get_2d_sincos_pos_embed(
@@ -156,10 +156,6 @@ class ViTEncoder(eqx.Module):
     latent_dim: int
     conv_stem: ConvStem
 
-    lidar_outer_proj: eqx.nn.Linear
-    lidar_center_proj: eqx.nn.Linear
-    lidar_type_embed: eqx.nn.Embedding
-
     tel_progress_proj: eqx.nn.Linear
     tel_kinematics_proj: eqx.nn.Linear
     tel_mechanics_proj: eqx.nn.Linear
@@ -172,23 +168,11 @@ class ViTEncoder(eqx.Module):
     def __init__(self, cfg: EncoderConfig, key: PRNGKeyArray):
         self.latent_dim = cfg.latent_dim
 
-        key_stem, key_lidar, key_telemetry, key_tf, key_pool = jax.random.split(key, 5)
+        key_stem, key_telemetry, key_tf, key_pool = jax.random.split(key, 4)
 
         self.conv_stem = ConvStem(
             in_channels=IMG_HIST_LEN, out_channels=cfg.latent_dim, key=key_stem
         )
-
-        key_l_outer, key_l_center, key_l_emb = jax.random.split(key_lidar, 3)
-        # shared projection matrix for the left and right group of lidar scans
-        # with different type embeddings to differentiate them.
-        # Cant share features with center proj due to shape mismatch
-        self.lidar_outer_proj = eqx.nn.Linear(
-            IMG_HIST_LEN * 6, cfg.latent_dim, key=key_l_outer
-        )
-        self.lidar_center_proj = eqx.nn.Linear(
-            IMG_HIST_LEN * 7, cfg.latent_dim, key=key_l_center
-        )
-        self.lidar_type_embed = eqx.nn.Embedding(3, cfg.latent_dim, key=key_l_emb)
 
         key_t_prog, key_t_kin, key_t_mech, key_t_ctrl, key_t_emb = jax.random.split(
             key_telemetry, 5
@@ -215,27 +199,12 @@ class ViTEncoder(eqx.Module):
 
     def __call__(self, observations: dict[str, Array]) -> Float[Array, "latent_dim"]:
         screen = observations["screen"]  # (4, 64, 64)
-        lidar = observations["lidar"]  # (4, 19)
         telemetry = observations["telemetry"]  # (33,)
 
         x_visual = self.conv_stem(screen)  # (latent_dim, 4, 4)
         x_visual = x_visual.reshape(self.latent_dim, 16)
         x_visual = x_visual.T  # (16, latent_dim)
         x_visual = x_visual + get_2d_sincos_pos_embed(self.latent_dim, grid_size=4)
-
-        left_lidar = lidar[:, 0:6].reshape(-1)
-        center_lidar = lidar[:, 6:13].reshape(-1)
-        right_lidar = lidar[:, 13:19].reshape(-1)
-
-        token_lidar_left = self.lidar_outer_proj(left_lidar) + self.lidar_type_embed(
-            jnp.array(0)
-        )
-        token_lidar_center = self.lidar_center_proj(
-            center_lidar
-        ) + self.lidar_type_embed(jnp.array(1))
-        token_lidar_right = self.lidar_outer_proj(right_lidar) + self.lidar_type_embed(
-            jnp.array(2)
-        )
 
         tel_progress = telemetry[0:4]
         tel_kinematics = telemetry[4:16]
@@ -255,9 +224,6 @@ class ViTEncoder(eqx.Module):
             tel_control
         ) + self.telemetry_type_embed(jnp.array(3))
 
-        lidar_tokens = jnp.stack(
-            [token_lidar_left, token_lidar_center, token_lidar_right], axis=0
-        )
         tel_tokens = jnp.stack(
             [
                 token_tel_progress,
@@ -267,7 +233,7 @@ class ViTEncoder(eqx.Module):
             ],
             axis=0,
         )
-        tokens = jnp.concatenate([x_visual, lidar_tokens, tel_tokens], axis=0)
+        tokens = jnp.concatenate([x_visual, tel_tokens], axis=0)
 
         tokens = self.transformer(tokens)
         z_t = self.pool(tokens)
@@ -279,13 +245,12 @@ class ConvEncoder(eqx.Module):
     conv1: eqx.nn.Conv2d
     conv2: eqx.nn.Conv2d
     conv3: eqx.nn.Conv2d
-    lidar_mlp: eqx.nn.MLP
     telemetry_mlp: eqx.nn.MLP
     fusion_mlp: eqx.nn.MLP
 
     def __init__(self, cfg: EncoderConfig, key: PRNGKeyArray):
-        key_conv1, key_conv2, key_conv3, key_lidar, key_telemetry, key_fusion = (
-            jax.random.split(key, 6)
+        key_conv1, key_conv2, key_conv3, key_telemetry, key_fusion = jax.random.split(
+            key, 5
         )
 
         self.conv1 = eqx.nn.Conv2d(
@@ -295,16 +260,7 @@ class ConvEncoder(eqx.Module):
         self.conv3 = eqx.nn.Conv2d(64, 64, kernel_size=3, stride=1, key=key_conv3)
 
         flattened_img_size = 64 * 4 * 4
-        flattened_lidar_size = IMG_HIST_LEN * LIDAR_FEATURES
 
-        self.lidar_mlp = eqx.nn.MLP(
-            in_size=flattened_lidar_size,
-            out_size=64,
-            width_size=128,
-            depth=2,
-            activation=jax.nn.silu,
-            key=key_lidar,
-        )
         self.telemetry_mlp = eqx.nn.MLP(
             in_size=TELEMETRY_FEATURES,
             out_size=64,
@@ -314,7 +270,7 @@ class ConvEncoder(eqx.Module):
             key=key_telemetry,
         )
 
-        fusion_in = flattened_img_size + 64 + 64
+        fusion_in = flattened_img_size + 64
         self.fusion_mlp = eqx.nn.MLP(
             in_size=fusion_in,
             out_size=cfg.latent_dim,
@@ -329,7 +285,6 @@ class ConvEncoder(eqx.Module):
         observations: dict[str, Array],
     ) -> Float[Array, "latent_dim"]:
         screen = observations["screen"]
-        lidar = observations["lidar"]
         telemetry = observations["telemetry"]
 
         x_screen = jax.nn.relu(self.conv1(screen))
@@ -337,8 +292,7 @@ class ConvEncoder(eqx.Module):
         x_screen = jax.nn.relu(self.conv3(x_screen))
         x_screen = x_screen.reshape(-1)
 
-        x_lidar = self.lidar_mlp(lidar.reshape(-1))
         x_telemetry = self.telemetry_mlp(telemetry)
 
-        x_fused = jnp.concatenate([x_screen, x_lidar, x_telemetry], axis=0)
+        x_fused = jnp.concatenate([x_screen, x_telemetry], axis=0)
         return self.fusion_mlp(x_fused)

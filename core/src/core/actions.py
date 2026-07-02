@@ -3,9 +3,7 @@ import numpy as np
 from jaxtyping import Array, Float, Int
 
 # Explicit steering grid values (7 targets)
-STEER_VALUES_NP = np.array(
-    [-1.0, -0.5, -0.15, 0.0, 0.15, 0.5, 1.0], dtype=np.float32
-)
+STEER_VALUES_NP = np.array([-1.0, -0.5, -0.15, 0.0, 0.15, 0.5, 1.0], dtype=np.float32)
 STEER_VALUES_JAX = jnp.array(
     [-1.0, -0.5, -0.15, 0.0, 0.15, 0.5, 1.0], dtype=jnp.float32
 )
@@ -33,9 +31,7 @@ GAS_BRAKE_VALUES_JAX = jnp.array(
 )
 
 
-def discretize_action(
-    continuous_action: Float[Array, "... 3"]
-) -> Int[Array, "..."]:
+def discretize_action(continuous_action: Float[Array, "... 3"]) -> Int[Array, "..."]:
     """Discretizes a continuous action [steer, gas, brake] into a flat integer index.
 
     Steering is snapped to the closest of 7 custom values:
@@ -72,9 +68,7 @@ def discretize_action(
     return steer_bin * 5 + gb_bin
 
 
-def to_continuous_action(
-    discrete_action: Int[Array, "..."]
-) -> Float[Array, "... 3"]:
+def to_continuous_action(discrete_action: Int[Array, "..."]) -> Float[Array, "... 3"]:
     """Reconstructs a continuous action [steer, gas, brake] from a flat integer index.
 
     Inverse mapping of discretize_action. Maps indices back to the exact

@@ -3,9 +3,8 @@ from typing import Optional
 
 from omegaconf import OmegaConf
 
-# Fixed TMRL Constants
+# Fixed TMRL Constants (TM2020FULL)
 IMG_HIST_LEN: int = 4
-LIDAR_FEATURES: int = 19
 TELEMETRY_FEATURES: int = 33
 
 # Steering [-1.0, 1.0] -> discretized into 7 bins

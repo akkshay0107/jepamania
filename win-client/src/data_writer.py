@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import h5py
 import numpy as np
-from core.config import IMG_HIST_LEN, LIDAR_FEATURES, TELEMETRY_FEATURES
+from core.config import IMG_HIST_LEN, TELEMETRY_FEATURES
 from src.settings import cfg
 
 IMG_SIZE: int = 64  # spatial resolution expected by the encoder
@@ -28,7 +28,6 @@ class HDF5Writer:
 
         # Per-type frame buffers (populated by the writer thread only).
         self._screen_buf: list[np.ndarray] = []
-        self._lidar_buf: list[np.ndarray] = []
         self._telemetry_buf: list[np.ndarray] = []
         self._action_buf: list[np.ndarray] = []
         self._episode_id_buf: list[int] = []
@@ -49,13 +48,6 @@ class HDF5Writer:
             chunks=(chunk_size, IMG_HIST_LEN, IMG_SIZE, IMG_SIZE),
             dtype=np.uint8,
             compression="gzip",
-        )
-        obs_grp.create_dataset(
-            "lidar",
-            shape=(0, IMG_HIST_LEN, LIDAR_FEATURES),
-            maxshape=(None, IMG_HIST_LEN, LIDAR_FEATURES),
-            chunks=(chunk_size, IMG_HIST_LEN, LIDAR_FEATURES),
-            dtype=np.float32,
         )
         obs_grp.create_dataset(
             "telemetry",
@@ -119,7 +111,6 @@ class HDF5Writer:
             {
                 "_type": "frame",
                 "screen": np.copy(obs_dict["screen"]),
-                "lidar": np.copy(obs_dict["lidar"]),
                 "telemetry": np.copy(obs_dict["telemetry"]),
                 "action": np.copy(action).astype(np.float32),
                 "episode_id": self._current_episode_id,
@@ -179,7 +170,6 @@ class HDF5Writer:
 
             else:  # "frame"
                 self._screen_buf.append(token["screen"])
-                self._lidar_buf.append(token["lidar"])
                 self._telemetry_buf.append(token["telemetry"])
                 self._action_buf.append(token["action"])
                 self._episode_id_buf.append(token["episode_id"])
@@ -199,19 +189,16 @@ class HDF5Writer:
         obs = cast(h5py.Group, self._file["observations"])
 
         screen_ds = cast(h5py.Dataset, obs["screen"])
-        lidar_ds = cast(h5py.Dataset, obs["lidar"])
         telem_ds = cast(h5py.Dataset, obs["telemetry"])
         actions_ds = cast(h5py.Dataset, self._file["actions"])
         ep_id_ds = cast(h5py.Dataset, self._file["episode_id"])
 
         screen_ds.resize(new_size, axis=0)
-        lidar_ds.resize(new_size, axis=0)
         telem_ds.resize(new_size, axis=0)
         actions_ds.resize(new_size, axis=0)
         ep_id_ds.resize(new_size, axis=0)
 
         screen_ds[self.current_size : new_size] = np.stack(self._screen_buf)
-        lidar_ds[self.current_size : new_size] = np.stack(self._lidar_buf)
         telem_ds[self.current_size : new_size] = np.stack(self._telemetry_buf)
         actions_ds[self.current_size : new_size] = np.stack(self._action_buf)
         ep_id_ds[self.current_size : new_size] = np.array(
@@ -221,7 +208,6 @@ class HDF5Writer:
         self.current_size = new_size
 
         self._screen_buf.clear()
-        self._lidar_buf.clear()
         self._telemetry_buf.clear()
         self._action_buf.clear()
         self._episode_id_buf.clear()
