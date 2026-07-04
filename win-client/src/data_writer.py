@@ -36,6 +36,7 @@ class HDF5Writer:
         self._current_episode_id: int = -1
 
         self._running: bool = True
+        self._closed: bool = False
 
         filepath.parent.mkdir(parents=True, exist_ok=True)
         self._file = h5py.File(filepath, "w")
@@ -107,6 +108,13 @@ class HDF5Writer:
 
     def append(self, obs_dict: dict[str, np.ndarray], action: np.ndarray) -> None:
         """Queue a single frame for writing."""
+        qsize = self._queue.qsize()
+        if qsize > 500:
+            logging.warning(
+                f"I/O Warning: Queue size is {qsize} frames! "
+                "Writing to disk is falling behind the real-time game loop."
+            )
+
         self._queue.put(
             {
                 "_type": "frame",
@@ -119,8 +127,12 @@ class HDF5Writer:
 
     def close(self) -> None:
         """Drain the queue, flush remaining data, and close the file."""
+        if self._closed:
+            return
+        self._closed = True
         self._running = False
-        self._thread.join()
+        if self._thread.is_alive():
+            self._thread.join()
         self._flush()
         self._file.close()
         logging.info(f"HDF5Writer closed. Total frames written: {self.current_size}")

@@ -20,18 +20,17 @@ _DEFAULTS = {
             "ou_noise_sigma": 0.05,
         },
     },
-    "human": {
-        "record_hotkey": "F9",
-    },
     "episode_monitor": {
         # Speed (km/h) below which the car is considered stuck.
         "stuck_speed_kmh": 5.0,
         # Consecutive frames all below stuck_speed_kmh required to trigger reset.
-        "stuck_window_frames": 60,
-        # Hard cap on frames per episode (~150 s at 20 Hz).
-        "max_frames_per_episode": 3000,
+        "stuck_window_frames": 80,
+        # Hard cap on frames per episode (~90 s at 20 Hz).
+        "max_frames_per_episode": 1800,
         # Frames discarded after each reset (physics settle-in period).
         "warmup_frames": 20,
+        # Number of completed episodes to record per HDF5 shard file.
+        "episodes_per_shard": 50,
     },
 }
 

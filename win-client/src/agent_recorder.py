@@ -97,6 +97,54 @@ class AgentCollector:
                 done = terminated or truncated
                 speed = float(info.get("speed", 0.0))
 
+                reason = None
+                if done:
+                    reason = "done"
+                elif (
+                    warmup_counter >= cfg.episode_monitor.warmup_frames
+                    and len(speed_window) == speed_window.maxlen
+                    and max(speed_window) < cfg.episode_monitor.stuck_speed_kmh
+                ):
+                    reason = "stuck"
+                elif (
+                    warmup_counter >= cfg.episode_monitor.warmup_frames
+                    and frame_count >= cfg.episode_monitor.max_frames_per_episode
+                ):
+                    reason = "frame_budget"
+
+                if reason:
+                    writer.end_episode(termination=reason)
+                    completed_episodes += 1
+                    logging.info(
+                        f"Episode {completed_episodes} ended via reason: {reason}"
+                    )
+
+                    frame_count = 0
+                    speed_window.clear()
+                    warmup_counter = 0
+
+                    raw_obs, _info = env.reset()
+                    obs_dict = obs_to_dict(raw_obs)
+                    noise.reset()
+
+                    if completed_episodes % cfg.episode_monitor.episodes_per_shard == 0:
+                        logging.info(
+                            "Sharding HDF5 file: "
+                            "closing current shard and starting a new one."
+                        )
+                        writer.close()
+                        writer = HDF5Writer(self._session_path())
+
+                    writer.new_episode(
+                        {
+                            "source": "agent",
+                            "map_name": map_name,
+                            "map_uid": map_uid,
+                            "timestamp": datetime.datetime.now().isoformat(),
+                        }
+                    )
+                    continue
+
                 if warmup_counter < cfg.episode_monitor.warmup_frames:
                     warmup_counter += 1
                     obs_dict = next_obs_dict
@@ -106,41 +154,6 @@ class AgentCollector:
                 obs_dict = next_obs_dict
                 frame_count += 1
                 speed_window.append(speed)
-
-                reason = None
-                if done:
-                    reason = "done"
-                elif (
-                    len(speed_window) == speed_window.maxlen
-                    and max(speed_window) < cfg.episode_monitor.stuck_speed_kmh
-                ):
-                    reason = "stuck"
-                elif frame_count >= cfg.episode_monitor.max_frames_per_episode:
-                    reason = "frame_budget"
-
-                if not reason:
-                    continue
-
-                writer.end_episode(termination=reason)
-                completed_episodes += 1
-                logging.info(f"Episode {completed_episodes} ended via reason: {reason}")
-
-                frame_count = 0
-                speed_window.clear()
-                warmup_counter = 0
-
-                raw_obs, _info = env.reset()
-                obs_dict = obs_to_dict(raw_obs)
-                noise.reset()
-
-                writer.new_episode(
-                    {
-                        "source": "agent",
-                        "map_name": map_name,
-                        "map_uid": map_uid,
-                        "timestamp": datetime.datetime.now().isoformat(),
-                    }
-                )
 
         except KeyboardInterrupt:
             logging.info("Keyboard interrupt received.")
