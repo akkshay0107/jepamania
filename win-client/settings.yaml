@@ -4,17 +4,15 @@
 human:
   record_hotkey: "F9" # Start/stop recording hotkey
 
-# Episode and Map rotation settings
+# Agent collection settings
+agent:
+  policy_path: null # Set this to the absolute path of your trained SAC actor .tmod file
+  map_name: "Summer 2026 - 01"
+  map_uid: "unknown"
+
+# Episode settings
 episode_monitor:
   stuck_speed_kmh: 5.0 # If the car is below this speed for too long, reset
   stuck_window_frames: 60 # How many consecutive frames below stuck_speed_kmh
   max_frames_per_episode: 3000 # Hard reset limit per episode
   warmup_frames: 20 # Initial unrecorded frames after a map loads
-  terrain_episode_budget: 10 # How many episodes to play before switching maps
-
-# How long to wait (in seconds) for a map to load via Play Map Extended
-map_cycler:
-  map_load_wait_s: 10.0
-
-# Path to the terrain definitions
-terrain_maps_path: "terrain_maps.yaml"

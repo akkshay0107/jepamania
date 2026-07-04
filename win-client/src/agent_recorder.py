@@ -1,7 +1,5 @@
 import datetime
 import logging
-import time
-import webbrowser
 from collections import deque
 from pathlib import Path
 from typing import Callable
@@ -10,7 +8,6 @@ import numpy as np
 import tmrl
 from src.data_writer import HDF5Writer
 from src.settings import cfg
-from src.terrain_scheduler import MapConfig, TerrainScheduler
 from src.utils import OUNoise, obs_to_dict
 from tmrl.actor import TorchActorModule
 
@@ -23,8 +20,8 @@ def load_policy(path_str: str | None) -> Callable[[dict], np.ndarray]:
     """Load a PyTorch SAC actor. Raises an error if path is None or invalid."""
     if not path_str:
         raise ValueError(
-            "A policy checkpoint must be configured for all tracks. "
-            "Random OUNoise exploration is disabled."
+            "A policy checkpoint must be configured. "
+            "Please specify agent.policy_path in settings.yaml."
         )
 
     path = Path(path_str)
@@ -41,41 +38,29 @@ def load_policy(path_str: str | None) -> Callable[[dict], np.ndarray]:
     return _actor
 
 
-def switch_map(uid: str, env) -> dict:
-    """Trigger a map switch via Play Map Extended and reset the env."""
-    logging.info(f"Switching map to UID: {uid}")
-    uri = f"trackmania://openplanet/playmapextended/open?uid={uid}"
-    webbrowser.open(uri)
-    time.sleep(cfg.map_cycler.map_load_wait_s)
-    raw_obs, _info = env.reset()
-    return obs_to_dict(raw_obs)
-
-
 class AgentCollector:
     """
-    Drives the full data collection loop:
-    Schedules maps, runs the environment, records data, and handles episode resets.
+    Drives the data collection loop on the currently loaded map:
+    Runs the environment, records data, and handles episode resets.
     """
 
     def __init__(self) -> None:
-
-        registry_path = Path(__file__).parent.parent / cfg.terrain_maps_path
-        self._scheduler = TerrainScheduler(registry_path)
+        pass
 
     def _session_path(self) -> Path:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         return Path(cfg.data_output_dir) / f"agent_{timestamp}.h5"
 
     def run(self) -> None:
-        """Start the automated data collection loop."""
+        """Start the map-agnostic data collection loop."""
         env = tmrl.get_environment()
         writer = HDF5Writer(self._session_path())
 
-        map_config: MapConfig = next(self._scheduler)
-        policy = load_policy(map_config.policy)
+        policy = load_policy(cfg.agent.policy_path)
 
-        logging.info(f"Starting on terrain={map_config.terrain!r}")
-        obs_dict = switch_map(map_config.uid, env)
+        logging.info("Starting collection. Make sure you are loaded into the map.")
+        raw_obs, _info = env.reset()
+        obs_dict = obs_to_dict(raw_obs)
 
         noise = OUNoise(
             size=cfg.action_dim,
@@ -85,12 +70,15 @@ class AgentCollector:
         )
         noise.reset()
 
+        # Load metadata from config overrides or default to unknown
+        map_name = getattr(cfg.agent, "map_name", "unknown")
+        map_uid = getattr(cfg.agent, "map_uid", "unknown")
+
         writer.new_episode(
             {
                 "source": "agent",
-                "terrain_type": map_config.terrain,
-                "map_name": map_config.name,
-                "map_uid": map_config.uid,
+                "map_name": map_name,
+                "map_uid": map_uid,
                 "timestamp": datetime.datetime.now().isoformat(),
             }
         )
@@ -99,7 +87,6 @@ class AgentCollector:
         speed_window = deque(maxlen=cfg.episode_monitor.stuck_window_frames)
         frame_count = 0
         completed_episodes = 0
-        terrain_episodes = 0
 
         try:
             while True:
@@ -136,27 +123,21 @@ class AgentCollector:
 
                 writer.end_episode(termination=reason)
                 completed_episodes += 1
-                terrain_episodes += 1
+                logging.info(f"Episode {completed_episodes} ended via reason: {reason}")
+
                 frame_count = 0
                 speed_window.clear()
                 warmup_counter = 0
 
-                if terrain_episodes >= cfg.episode_monitor.terrain_episode_budget:
-                    terrain_episodes = 0
-                    map_config = next(self._scheduler)
-                    policy = load_policy(map_config.policy)
-                    obs_dict = switch_map(map_config.uid, env)
-                else:
-                    raw_obs, _info = env.reset()
-                    obs_dict = obs_to_dict(raw_obs)
-
+                raw_obs, _info = env.reset()
+                obs_dict = obs_to_dict(raw_obs)
                 noise.reset()
+
                 writer.new_episode(
                     {
                         "source": "agent",
-                        "terrain_type": map_config.terrain,
-                        "map_name": map_config.name,
-                        "map_uid": map_config.uid,
+                        "map_name": map_name,
+                        "map_uid": map_uid,
                         "timestamp": datetime.datetime.now().isoformat(),
                     }
                 )

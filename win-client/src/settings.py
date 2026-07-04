@@ -12,6 +12,8 @@ _DEFAULTS = {
     "hdf5_chunk_size": 128,
     "agent": {
         "policy_path": None,
+        "map_name": "unknown",
+        "map_uid": "unknown",
         "exploration": {
             "ou_noise_mu": 0.0,
             "ou_noise_theta": 0.15,
@@ -30,16 +32,7 @@ _DEFAULTS = {
         "max_frames_per_episode": 3000,
         # Frames discarded after each reset (physics settle-in period).
         "warmup_frames": 20,
-        # Completed episodes per terrain before rotating to the next map.
-        "terrain_episode_budget": 10,
     },
-    "map_cycler": {
-        # Seconds to wait after firing the URI before calling env.reset().
-        # Increase if your machine takes longer to load maps.
-        "map_load_wait_s": 10.0,
-    },
-    # Path to the map registry YAML, relative to the win-client package root.
-    "terrain_maps_path": "terrain_maps.yaml",
 }
 
 yaml_path = BASE_DIR / "settings.yaml"

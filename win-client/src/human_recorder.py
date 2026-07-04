@@ -48,7 +48,6 @@ class HumanRecorder:
     def _default_metadata(self) -> dict:
         return {
             "source": "human",
-            "terrain_type": "unknown",
             "map_name": "unknown",
             "map_uid": "unknown",
             "policy_name": "human",
