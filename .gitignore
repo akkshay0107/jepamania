@@ -23,3 +23,6 @@ scratch/
 
 # output for benchmark scripts
 core/out/
+
+# Ruff cache
+.ruff_cache
