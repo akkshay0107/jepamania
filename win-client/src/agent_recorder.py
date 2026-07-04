@@ -91,7 +91,11 @@ class AgentCollector:
         try:
             while True:
                 action = policy(obs_dict)
-                action = np.clip(action + noise(), -1.0, 1.0).astype(np.float32)
+                action = action + noise()
+                action[0] = np.clip(action[0], -1.0, 1.0)
+                action[1] = np.clip(action[1], 0.0, 1.0)
+                action[2] = np.clip(action[2], 0.0, 1.0)
+                action = action.astype(np.float32)
                 raw_next, _reward, terminated, truncated, info = env.step(action)
                 next_obs_dict = obs_to_dict(raw_next)
                 done = terminated or truncated

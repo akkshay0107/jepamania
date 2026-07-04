@@ -81,6 +81,8 @@ def to_continuous_action(discrete_action: Int[Array, "..."]) -> Float[Array, "..
     Returns:
         JAX Array of shape (..., 3) containing continuous actions [steer, gas, brake].
     """
+    # Clamp to valid range [0, 34] to prevent JAX out-of-bounds indexing errors
+    discrete_action = jnp.clip(discrete_action, 0, 34)
     steer_bin = discrete_action // 5
     gb_bin = discrete_action % 5
 
@@ -132,6 +134,8 @@ def to_continuous_action_np(discrete_action: np.ndarray) -> np.ndarray:
     Returns:
         NumPy array of shape (..., 3) containing continuous actions [steer, gas, brake].
     """
+    if not np.all((discrete_action >= 0) & (discrete_action < 35)):
+        raise ValueError("Discrete action index out of bounds [0, 34]")
     steer_bin = discrete_action // 5
     gb_bin = discrete_action % 5
 
