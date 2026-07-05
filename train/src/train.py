@@ -117,6 +117,16 @@ def load_checkpoint(path: Union[str, Path], template: CheckpointT) -> Checkpoint
     return eqx.tree_deserialise_leaves(Path(path), template)
 
 
+def _last_epoch_index(checkpoint_dir: Path) -> int:
+    """Highest epoch number among existing weight checkpoints, or 0."""
+    indices = []
+    for path in checkpoint_dir.glob("subjepa_epoch_*.eqx"):
+        suffix = path.stem.removeprefix("subjepa_epoch_")
+        if suffix.isdigit():
+            indices.append(int(suffix))
+    return max(indices, default=0)
+
+
 def train(
     models: Models,
     dataloader: Iterable[Dict[str, np.ndarray]],
@@ -128,18 +138,26 @@ def train(
     key: PRNGKeyArray,
     checkpoint_dir: Union[str, Path],
     log_every: int = 50,
+    resume: bool = False,
 ) -> Models:
     """Runs offline pretraining and returns the trained (encoder, predictor).
 
     Checkpoints are written to `checkpoint_dir` after every epoch as
     `subjepa_epoch_{n}.eqx` plus a rolling `subjepa_latest.eqx`, with the
-    optimizer state alongside in matching `*_optstate.eqx` files.
+    optimizer state alongside in matching `*_optstate.eqx` files and the
+    frozen loss projectors in `subjepa_projectors.eqx`.
+
+    With `resume=True`, weights, optimizer state, and projectors are restored
+    from the rolling files and epoch numbering continues from the highest
+    existing epoch checkpoint; `num_epochs` more epochs are then trained.
     """
     checkpoint_dir = Path(checkpoint_dir)
 
     subspace_dim = loss_cfg.subspace_dim or latent_dim // loss_cfg.num_subspaces
     key_proj, _ = jax.random.split(key)
-    # Projectors are frozen random orthogonal bases; deterministic given `key`.
+    # Frozen random orthogonal bases; the freshly generated values are only
+    # templates when resuming — the serialized ones are restored below, so a
+    # resumed run keeps its original loss surface regardless of `key`.
     subspace_projectors, slice_projectors = generate_projectors(
         key_proj,
         latent_dim=latent_dim,
@@ -154,12 +172,31 @@ def train(
     )
     opt_state = optimizer.init(eqx.filter(models, eqx.is_array))
 
+    projectors_path = checkpoint_dir / "subjepa_projectors.eqx"
+    start_epoch = 0
+    if resume:
+        latest_path = checkpoint_dir / "subjepa_latest.eqx"
+        latest_opt_path = checkpoint_dir / "subjepa_latest_optstate.eqx"
+        for path in (latest_path, latest_opt_path, projectors_path):
+            if not path.exists():
+                raise FileNotFoundError(f"Cannot resume: missing {path}")
+        models = load_checkpoint(latest_path, models)
+        opt_state = load_checkpoint(latest_opt_path, opt_state)
+        subspace_projectors, slice_projectors = load_checkpoint(
+            projectors_path, (subspace_projectors, slice_projectors)
+        )
+        start_epoch = _last_epoch_index(checkpoint_dir)
+        print(f"Resumed from {latest_path} at epoch {start_epoch}")
+    else:
+        save_checkpoint(projectors_path, (subspace_projectors, slice_projectors))
+
     train_step = make_train_step(
         optimizer, subspace_projectors, slice_projectors, loss_cfg.reg_weight
     )
 
+    last_epoch = start_epoch + num_epochs
     global_step = 0
-    for epoch in range(num_epochs):
+    for epoch in range(start_epoch, last_epoch):
         # Keep losses as device scalars; a float() every step would block the
         # host on each result and defeat JAX async dispatch.
         epoch_losses = []
@@ -172,7 +209,7 @@ def train(
 
             if global_step % log_every == 0:
                 print(
-                    f"epoch {epoch + 1}/{num_epochs} | step {global_step} | "
+                    f"epoch {epoch + 1}/{last_epoch} | step {global_step} | "
                     f"loss {float(loss):.6f}"
                 )
 
@@ -184,7 +221,7 @@ def train(
         mean_loss = float(jnp.mean(jnp.stack(epoch_losses)))
         duration = time.time() - epoch_start
         print(
-            f"epoch {epoch + 1}/{num_epochs} done | "
+            f"epoch {epoch + 1}/{last_epoch} done | "
             f"mean loss {mean_loss:.6f} | "
             f"{len(epoch_losses)} batches in {duration:.1f}s"
         )

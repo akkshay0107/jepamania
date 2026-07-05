@@ -32,6 +32,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-every", type=int, default=50)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Continue from the rolling checkpoints in --checkpoint-dir",
+    )
     return parser.parse_args()
 
 
@@ -60,6 +65,7 @@ def main() -> None:
         shuffle=True,
         drop_last=True,
         num_workers=args.num_workers,
+        seed=args.seed,
     )
 
     key = jax.random.PRNGKey(args.seed)
@@ -81,6 +87,7 @@ def main() -> None:
         key=key_train,
         checkpoint_dir=args.checkpoint_dir,
         log_every=args.log_every,
+        resume=args.resume,
     )
     print(f"Training complete. Checkpoints written to {args.checkpoint_dir}")
 

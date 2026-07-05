@@ -186,12 +186,16 @@ class DataLoader:
         shuffle: bool = True,
         drop_last: bool = True,
         num_workers: int = 1,
+        seed: Optional[int] = None,
     ) -> None:
         self.dataset = dataset
         self.batch_size = int(batch_size)
         self.shuffle = bool(shuffle)
         self.drop_last = bool(drop_last)
         self.num_workers = int(num_workers)
+        # Owned generator (not global np.random) so shuffle order is
+        # reproducible given a seed; state advances across epochs.
+        self.rng = np.random.default_rng(seed)
 
         self.indices = np.arange(len(self.dataset))
         self.queue: queue.Queue = queue.Queue(maxsize=8)
@@ -204,7 +208,7 @@ class DataLoader:
 
         indices = np.copy(self.indices)
         if self.shuffle:
-            np.random.shuffle(indices)
+            self.rng.shuffle(indices)
 
         num_batches = len(indices) // self.batch_size
         if not self.drop_last and len(indices) % self.batch_size != 0:
