@@ -155,34 +155,20 @@ class AttentionPool(eqx.Module):
 class ViTEncoder(eqx.Module):
     latent_dim: int
     conv_stem: ConvStem
-
-    tel_progress_proj: eqx.nn.Linear
-    tel_kinematics_proj: eqx.nn.Linear
-    tel_mechanics_proj: eqx.nn.Linear
-    tel_control_proj: eqx.nn.Linear
-    telemetry_type_embed: eqx.nn.Embedding
-
+    tel_proj: eqx.nn.Linear
     transformer: TransformerStack
     pool: AttentionPool
 
     def __init__(self, cfg: EncoderConfig, key: PRNGKeyArray):
         self.latent_dim = cfg.latent_dim
 
-        key_stem, key_telemetry, key_tf, key_pool = jax.random.split(key, 4)
+        key_stem, key_tel, key_tf, key_pool = jax.random.split(key, 4)
 
         self.conv_stem = ConvStem(
             in_channels=IMG_HIST_LEN, out_channels=cfg.latent_dim, key=key_stem
         )
 
-        key_t_prog, key_t_kin, key_t_mech, key_t_ctrl, key_t_emb = jax.random.split(
-            key_telemetry, 5
-        )
-
-        self.tel_progress_proj = eqx.nn.Linear(4, cfg.latent_dim, key=key_t_prog)
-        self.tel_kinematics_proj = eqx.nn.Linear(12, cfg.latent_dim, key=key_t_kin)
-        self.tel_mechanics_proj = eqx.nn.Linear(11, cfg.latent_dim, key=key_t_mech)
-        self.tel_control_proj = eqx.nn.Linear(6, cfg.latent_dim, key=key_t_ctrl)
-        self.telemetry_type_embed = eqx.nn.Embedding(4, cfg.latent_dim, key=key_t_emb)
+        self.tel_proj = eqx.nn.Linear(TELEMETRY_FEATURES, cfg.latent_dim, key=key_tel)
 
         self.transformer = TransformerStack(
             latent_dim=cfg.latent_dim,
@@ -199,41 +185,19 @@ class ViTEncoder(eqx.Module):
 
     def __call__(self, observations: dict[str, Array]) -> Float[Array, "latent_dim"]:
         screen = observations["screen"]  # (4, 64, 64)
-        telemetry = observations["telemetry"]  # (33,)
+        telemetry = observations["telemetry"]  # (TELEMETRY_FEATURES,)
 
         x_visual = self.conv_stem(screen)  # (latent_dim, 4, 4)
         x_visual = x_visual.reshape(self.latent_dim, 16)
         x_visual = x_visual.T  # (16, latent_dim)
         x_visual = x_visual + get_2d_sincos_pos_embed(self.latent_dim, grid_size=4)
 
-        tel_progress = telemetry[0:4]
-        tel_kinematics = telemetry[4:16]
-        tel_mechanics = telemetry[16:27]
-        tel_control = telemetry[27:33]
+        # Single telemetry token; it is distinguishable from the visual tokens
+        # by the absence of the 2D positional embedding, so no type embedding
+        # is needed.
+        tel_token = self.tel_proj(telemetry)[jnp.newaxis, :]
 
-        token_tel_progress = self.tel_progress_proj(
-            tel_progress
-        ) + self.telemetry_type_embed(jnp.array(0))
-        token_tel_kinematics = self.tel_kinematics_proj(
-            tel_kinematics
-        ) + self.telemetry_type_embed(jnp.array(1))
-        token_tel_mechanics = self.tel_mechanics_proj(
-            tel_mechanics
-        ) + self.telemetry_type_embed(jnp.array(2))
-        token_tel_control = self.tel_control_proj(
-            tel_control
-        ) + self.telemetry_type_embed(jnp.array(3))
-
-        tel_tokens = jnp.stack(
-            [
-                token_tel_progress,
-                token_tel_kinematics,
-                token_tel_mechanics,
-                token_tel_control,
-            ],
-            axis=0,
-        )
-        tokens = jnp.concatenate([x_visual, tel_tokens], axis=0)
+        tokens = jnp.concatenate([x_visual, tel_token], axis=0)
 
         tokens = self.transformer(tokens)
         z_t = self.pool(tokens)

@@ -48,11 +48,15 @@ def obs_to_dict(obs) -> dict[str, np.ndarray]:
         else:
             telemetry = np.zeros(TELEMETRY_FEATURES, dtype=np.float32)
 
-        # Ensure exact telemetry feature size
-        if len(telemetry) < TELEMETRY_FEATURES:
-            telemetry = np.pad(telemetry, (0, TELEMETRY_FEATURES - len(telemetry)))
-        elif len(telemetry) > TELEMETRY_FEATURES:
-            telemetry = telemetry[:TELEMETRY_FEATURES]
+        # Fail loudly on layout mismatch: silently padding/truncating here
+        # previously masked a wrong TELEMETRY_FEATURES constant and produced
+        # shards that were mostly zero padding.
+        if len(telemetry) != TELEMETRY_FEATURES:
+            raise ValueError(
+                f"Environment produced {len(telemetry)} telemetry floats, "
+                f"expected TELEMETRY_FEATURES={TELEMETRY_FEATURES}. "
+                "Check the env observation layout against core.config."
+            )
 
         return {
             "screen": screen,

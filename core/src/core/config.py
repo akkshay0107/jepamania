@@ -5,7 +5,11 @@ from omegaconf import OmegaConf
 
 # Fixed TMRL Constants (TM2020FULL)
 IMG_HIST_LEN: int = 4
-TELEMETRY_FEATURES: int = 33
+# The TMRL Full env observation carries exactly 9 telemetry floats:
+# speed, gear, rpm, plus the two previous actions (3 floats each).
+# (The Openplanet plugin sends 11 floats; distance and position feed the
+# reward function only and never reach the observation.)
+TELEMETRY_FEATURES: int = 9
 
 # Steering [-1.0, 1.0] -> discretized into 7 bins
 # Gas / Brake -> discretized into 5 bins
