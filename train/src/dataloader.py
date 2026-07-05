@@ -142,7 +142,7 @@ class SlidingWindowDataset:
 
     def __getitem__(
         self, idx: int
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         shard_idx = self.shard_indices_map[idx]
         local_t = self.local_indices_map[idx]
         shard = self.shards[shard_idx]
@@ -154,11 +154,15 @@ class SlidingWindowDataset:
 
         if self.preload_to_ram:
             telemetry_t = shard["telemetry"][local_t]
+            telemetry_target = shard["telemetry"][local_t + self.K]
             actions_seq = shard["actions"][local_t : local_t + self.K]
         else:
             with h5py.File(shard["file_path"], "r") as f:
                 telem_ds = cast(h5py.Dataset, f["observations/telemetry"])
                 telemetry_t = np.asarray(telem_ds[local_t], dtype=np.float32)
+                telemetry_target = np.asarray(
+                    telem_ds[local_t + self.K], dtype=np.float32
+                )
                 actions_ds = cast(h5py.Dataset, f["actions"])
                 actions_seq = np.asarray(
                     actions_ds[local_t : local_t + self.K], dtype=np.float32
@@ -169,7 +173,7 @@ class SlidingWindowDataset:
 
         obs_stack_target = self._get_history_stack(shard, local_t + self.K, frame_start)
 
-        return obs_stack_t, telemetry_t, actions_seq, obs_stack_target
+        return obs_stack_t, telemetry_t, actions_seq, obs_stack_target, telemetry_target
 
 
 class DataLoader:
@@ -217,23 +221,37 @@ class DataLoader:
             )
             self.thread.start()
 
-            for _ in range(num_batches):
-                batch = self.queue.get()
-                if batch is None:
-                    break
-                yield batch
-
-            self.shutdown_event.set()
-            while not self.queue.empty():
-                try:
-                    self.queue.get_nowait()
-                except queue.Empty:
-                    break
-            self.thread.join()
+            try:
+                for _ in range(num_batches):
+                    batch = self.queue.get()
+                    if batch is None:
+                        break
+                    yield batch
+            finally:
+                # Runs even if the consumer abandons the generator mid-epoch;
+                # join before draining so the worker cannot enqueue a stale
+                # item (or sentinel) after the queue has been emptied.
+                self.shutdown_event.set()
+                self.thread.join()
+                while not self.queue.empty():
+                    try:
+                        self.queue.get_nowait()
+                    except queue.Empty:
+                        break
         else:
             for i in range(num_batches):
                 batch_indices = indices[i * self.batch_size : (i + 1) * self.batch_size]
                 yield self._collate(batch_indices)
+
+    def _put_blocking(self, item: Optional[Dict[str, np.ndarray]]) -> bool:
+        """Puts an item, waiting for queue space unless shutdown is requested."""
+        while not self.shutdown_event.is_set():
+            try:
+                self.queue.put(item, timeout=1.0)
+                return True
+            except queue.Full:
+                continue
+        return False
 
     def _prefetch_loop(self, indices: np.ndarray, num_batches: int) -> None:
         for i in range(num_batches):
@@ -242,29 +260,35 @@ class DataLoader:
             batch_indices = indices[i * self.batch_size : (i + 1) * self.batch_size]
             try:
                 batch = self._collate(batch_indices)
-                self.queue.put(batch, timeout=10.0)
-            except Exception:
-                # Sentinel signals worker errors so that generator thread can exit
-                self.queue.put(None)
+            except Exception as e:
+                # Sentinel below signals the error so the generator can exit
+                print(f"Warning: DataLoader worker failed to collate batch: {e}")
                 break
-        self.queue.put(None)
+            # A slow consumer (e.g. JIT compilation) must not terminate the
+            # epoch early; wait for space instead of treating Full as an error.
+            if not self._put_blocking(batch):
+                break
+        self._put_blocking(None)
 
     def _collate(self, batch_indices: np.ndarray) -> Dict[str, np.ndarray]:
         obs_stack_t_list = []
         telemetry_t_list = []
         actions_seq_list = []
         obs_stack_target_list = []
+        telemetry_target_list = []
 
         for idx in batch_indices:
-            obs_t, telem_t, act_seq, obs_target = self.dataset[idx]
+            obs_t, telem_t, act_seq, obs_target, telem_target = self.dataset[idx]
             obs_stack_t_list.append(obs_t)
             telemetry_t_list.append(telem_t)
             actions_seq_list.append(act_seq)
             obs_stack_target_list.append(obs_target)
+            telemetry_target_list.append(telem_target)
 
         return {
             "obs_stack_t": np.stack(obs_stack_t_list, axis=0),
             "telemetry_t": np.stack(telemetry_t_list, axis=0),
             "actions_seq": np.stack(actions_seq_list, axis=0),
             "obs_stack_target": np.stack(obs_stack_target_list, axis=0),
+            "telemetry_target": np.stack(telemetry_target_list, axis=0),
         }
