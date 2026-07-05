@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import h5py
 import numpy as np
-from core.config import IMG_HIST_LEN, TELEMETRY_FEATURES
+from core.config import TELEMETRY_FEATURES
 from src.settings import cfg
 
 IMG_SIZE: int = 64  # spatial resolution expected by the encoder
@@ -44,9 +44,9 @@ class HDF5Writer:
         obs_grp = self._file.create_group("observations")
         obs_grp.create_dataset(
             "screen",
-            shape=(0, IMG_HIST_LEN, IMG_SIZE, IMG_SIZE),
-            maxshape=(None, IMG_HIST_LEN, IMG_SIZE, IMG_SIZE),
-            chunks=(chunk_size, IMG_HIST_LEN, IMG_SIZE, IMG_SIZE),
+            shape=(0, 1, IMG_SIZE, IMG_SIZE),
+            maxshape=(None, 1, IMG_SIZE, IMG_SIZE),
+            chunks=(chunk_size, 1, IMG_SIZE, IMG_SIZE),
             dtype=np.uint8,
             compression="gzip",
         )

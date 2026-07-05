@@ -1,5 +1,5 @@
 import numpy as np
-from core.config import IMG_HIST_LEN, TELEMETRY_FEATURES
+from core.config import TELEMETRY_FEATURES
 
 # Spatial resolution expected by the encoder.
 IMG_SIZE: int = 64
@@ -8,15 +8,20 @@ IMG_SIZE: int = 64
 def obs_to_dict(obs) -> dict[str, np.ndarray]:
     """
     Normalise the raw observation returned by the tmrl / rtgym environment
-    into a dict: {screen, telemetry}.
+    into a dict: {screen, telemetry}, keeping only the single latest screen frame.
 
     The full TM20 environment (TM2020FULL) returns a tuple of two arrays:
     obs[0] — screen stack  (IMG_HIST_LEN, H, W) uint8
     obs[1] — telemetry     (TELEMETRY_FEATURES,) float32
     """
     if isinstance(obs, dict):
+        screen = np.asarray(obs["screen"], dtype=np.uint8)
+        if screen.ndim == 3:
+            screen = screen[-1:]
+        elif screen.ndim == 2:
+            screen = screen[np.newaxis, ...]
         return {
-            "screen": np.asarray(obs["screen"], dtype=np.uint8),
+            "screen": screen,
             "telemetry": np.asarray(obs["telemetry"], dtype=np.float32),
         }
 
@@ -31,7 +36,12 @@ def obs_to_dict(obs) -> dict[str, np.ndarray]:
                 telem_parts.append(arr.flatten().astype(np.float32))
 
         if screen is None:
-            screen = np.zeros((IMG_HIST_LEN, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
+            screen = np.zeros((1, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
+        else:
+            if screen.ndim == 3:
+                screen = screen[-1:]
+            elif screen.ndim == 2:
+                screen = screen[np.newaxis, ...]
 
         if telem_parts:
             telemetry = np.concatenate(telem_parts, axis=0)
@@ -49,12 +59,14 @@ def obs_to_dict(obs) -> dict[str, np.ndarray]:
             "telemetry": telemetry,
         }
 
-    # fallback: single image array with zero-padded telemetry.
+    # Shape normalization supports raw numpy arrays directly passed to the environment
     arr = np.asarray(obs)
-    if arr.ndim >= 3 and arr.shape[0] == IMG_HIST_LEN:
-        screen = arr.astype(np.uint8)
+    if arr.ndim >= 3:
+        screen = arr[-1:].astype(np.uint8)
+    elif arr.ndim == 2:
+        screen = arr[np.newaxis, ...].astype(np.uint8)
     else:
-        screen = np.zeros((IMG_HIST_LEN, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
+        screen = np.zeros((1, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
 
     return {
         "screen": screen,
