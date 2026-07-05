@@ -30,12 +30,10 @@ class HumanRecorder:
         return Path(cfg.data_output_dir) / f"human_session_{timestamp}.h5"
 
     def _default_metadata(self) -> dict:
-        map_name = getattr(cfg.agent, "map_name", "unknown")
-        map_uid = getattr(cfg.agent, "map_uid", "unknown")
         return {
             "source": "human",
-            "map_name": map_name,
-            "map_uid": map_uid,
+            "map_name": cfg.agent.map_name,
+            "map_uid": cfg.agent.map_uid,
             "policy_name": "human",
             "timestamp": datetime.datetime.now().isoformat(),
         }

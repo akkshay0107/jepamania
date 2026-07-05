@@ -19,6 +19,13 @@ _DEFAULTS = {
             "ou_noise_theta": 0.15,
             "ou_noise_sigma": 0.05,
         },
+        "filter": {
+            "enabled": False,
+            "steer_deadzone": 0.015,
+            "min_alpha": 0.5,
+            "max_alpha": 0.85,
+            "delta_scale": 0.3,
+        },
     },
     "episode_monitor": {
         # Speed (km/h) below which the car is considered stuck.

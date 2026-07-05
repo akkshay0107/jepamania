@@ -8,7 +8,7 @@ import numpy as np
 import tmrl
 from src.data_writer import HDF5Writer
 from src.settings import cfg
-from src.utils import OUNoise, obs_to_dict
+from src.utils import AdaptiveActionFilter, OUNoise, obs_to_dict
 from tmrl.actor import TorchActorModule
 
 logging.basicConfig(
@@ -70,9 +70,17 @@ class AgentCollector:
         )
         noise.reset()
 
-        # Load metadata from config overrides or default to unknown
-        map_name = getattr(cfg.agent, "map_name", "unknown")
-        map_uid = getattr(cfg.agent, "map_uid", "unknown")
+        action_filter = AdaptiveActionFilter(
+            enabled=cfg.agent.filter.enabled,
+            steer_deadzone=cfg.agent.filter.steer_deadzone,
+            min_alpha=cfg.agent.filter.min_alpha,
+            max_alpha=cfg.agent.filter.max_alpha,
+            delta_scale=cfg.agent.filter.delta_scale,
+        )
+        action_filter.reset()
+
+        map_name = cfg.agent.map_name
+        map_uid = cfg.agent.map_uid
 
         writer.new_episode(
             {
@@ -95,7 +103,9 @@ class AgentCollector:
                 action[0] = np.clip(action[0], -1.0, 1.0)
                 action[1] = np.clip(action[1], 0.0, 1.0)
                 action[2] = np.clip(action[2], 0.0, 1.0)
+                action = action_filter(action)
                 action = action.astype(np.float32)
+
                 raw_next, _reward, terminated, truncated, info = env.step(action)
                 next_obs_dict = obs_to_dict(raw_next)
                 done = terminated or truncated
@@ -130,6 +140,7 @@ class AgentCollector:
                     raw_obs, _info = env.reset()
                     obs_dict = obs_to_dict(raw_obs)
                     noise.reset()
+                    action_filter.reset()
 
                     if completed_episodes % cfg.episode_monitor.episodes_per_shard == 0:
                         logging.info(

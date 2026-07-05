@@ -81,3 +81,58 @@ class OUNoise:
         dx = self.theta * (self.mu - x) + self.sigma * np.random.randn(len(x))
         self.state = x + dx
         return self.state.astype(np.float32)
+
+
+class AdaptiveActionFilter:
+    """
+    Adaptive action filter for smoothing SAC outputs during data collection.
+
+    Applies a deadzone around zero and an Adaptive Exponential Moving Average (EMA)
+    to the steering channel (channel 0), while leaving gas (channel 1) and brake
+    (channel 2) untouched for crisp pedal control.
+
+    If filtering is disabled in config, __call__ is a no-op returning the input action.
+    """
+
+    def __init__(
+        self,
+        enabled: bool = False,
+        steer_deadzone: float = 0.015,
+        min_alpha: float = 0.5,
+        max_alpha: float = 0.85,
+        delta_scale: float = 0.3,
+    ) -> None:
+        self.enabled = bool(enabled)
+        self.deadzone = float(steer_deadzone)
+        self.min_alpha = float(min_alpha)
+        self.max_alpha = float(max_alpha)
+        self.alpha_range = self.max_alpha - self.min_alpha
+        self.inv_delta_scale = 1.0 / float(delta_scale) if delta_scale > 0 else 1.0
+        self.prev_steer = 0.0
+
+    def reset(self) -> None:
+        self.prev_steer = 0.0
+
+    def __call__(self, action: np.ndarray) -> np.ndarray:
+        if not self.enabled:
+            return action
+
+        raw_steer = float(action[0])
+        if -self.deadzone < raw_steer < self.deadzone:
+            raw_steer = 0.0
+
+        delta = abs(raw_steer - self.prev_steer)
+        if delta * self.inv_delta_scale >= 1.0:
+            alpha = self.max_alpha
+        else:
+            alpha = self.min_alpha + self.alpha_range * (delta * self.inv_delta_scale)
+
+        smooth_steer = alpha * raw_steer + (1.0 - alpha) * self.prev_steer
+        if abs(smooth_steer) < 1e-4:
+            smooth_steer = 0.0
+
+        self.prev_steer = smooth_steer
+
+        out_action = np.copy(action)
+        out_action[0] = smooth_steer
+        return out_action

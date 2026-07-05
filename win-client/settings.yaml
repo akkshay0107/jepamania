@@ -5,6 +5,12 @@ agent:
   policy_path: null # Set this to the absolute path of your trained SAC actor .tmod file
   map_name: "Summer 2026 - 01"
   map_uid: "unknown"
+  filter:
+    enabled: true
+    steer_deadzone: 0.015 # Ignore steering jitter below this absolute threshold
+    min_alpha: 0.5 # Minimum EMA weight (more smoothing for tiny jitter)
+    max_alpha: 0.85 # Maximum EMA weight (less smoothing for fast turn-in)
+    delta_scale: 0.3 # Steering delta required to reach max_alpha
 
 # Episode settings
 episode_monitor:
