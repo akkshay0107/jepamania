@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+# Ruff cache
+.ruff_cache
+
 # Agents
 .agents/cache/
 .agents/tmp/
@@ -29,5 +32,6 @@ wandb/
 checkpoints/
 *.eqx
 
-# Ruff cache
-.ruff_cache
+# Data collection
+data/
+win-client/data
