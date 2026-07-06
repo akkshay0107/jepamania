@@ -2,22 +2,24 @@ import datetime
 import logging
 from collections import deque
 from pathlib import Path
-from typing import Callable
 
 import numpy as np
 import tmrl
+import tmrl.config.config_objects as cfg_obj
 from src.data_writer import HDF5Writer
 from src.settings import cfg
 from src.utils import AdaptiveActionFilter, OUNoise, obs_to_dict
-from tmrl.actor import TorchActorModule
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
 
-def load_policy(path_str: str | None) -> Callable[[dict], np.ndarray]:
-    """Load a PyTorch SAC actor. Raises an error if path is None or invalid."""
+def load_actor(path_str: str | None, observation_space, action_space):
+    """
+    Load a pretrained SAC actor like how tmrl does it for their
+    pretrained model
+    """
     if not path_str:
         raise ValueError(
             "A policy checkpoint must be configured. "
@@ -28,14 +30,15 @@ def load_policy(path_str: str | None) -> Callable[[dict], np.ndarray]:
     if not path.exists():
         raise FileNotFoundError(f"Policy checkpoint not found: {path}")
 
-    actor = TorchActorModule()
-    actor.load(str(path), device="cpu")
-    logging.info(f"Policy: loaded SAC actor from {path.name}")
-
-    def _actor(obs_dict: dict) -> np.ndarray:
-        return np.asarray(actor.act(obs_dict, test=True), dtype=np.float32)
-
-    return _actor
+    # cfg_obj.POLICY is set at import time based on config.json:
+    #   - grayscale images  → SquashedGaussianVanillaCNNActor
+    #   - color images      → SquashedGaussianVanillaColorCNNActor
+    #   - lidar             → SquashedGaussianMLPActor
+    policy_cls = cfg_obj.POLICY
+    actor = policy_cls(observation_space=observation_space, action_space=action_space)
+    actor = actor.load(str(path), device="cpu")
+    logging.info(f"Policy: loaded {policy_cls.__name__} from {path.name}")
+    return actor
 
 
 class AgentCollector:
@@ -52,15 +55,21 @@ class AgentCollector:
         return Path(cfg.data_output_dir) / f"agent_{timestamp}.h5"
 
     def run(self) -> None:
-        """Start the map-agnostic data collection loop."""
         env = tmrl.get_environment()
         writer = HDF5Writer(self._session_path())
 
-        policy = load_policy(cfg.agent.policy_path)
+        actor = load_actor(
+            cfg.agent.policy_path,
+            env.observation_space,
+            env.action_space,
+        )
+
+        # tmrl --test uses cfg_obj.OBS_PREPROCESSOR, which is
+        # obs_preprocessor_tm_act_in_obs for the full (non-lidar) env.
+        obs_preprocessor = cfg_obj.OBS_PREPROCESSOR
 
         logging.info("Starting collection. Make sure you are loaded into the map.")
         raw_obs, _info = env.reset()
-        obs_dict = obs_to_dict(raw_obs)
 
         noise = OUNoise(
             size=cfg.action_dim,
@@ -98,7 +107,11 @@ class AgentCollector:
 
         try:
             while True:
-                action = policy(obs_dict)
+                preprocessed_obs = obs_preprocessor(raw_obs)
+                action = actor.act_(preprocessed_obs, test=True)
+                action = np.asarray(action, dtype=np.float32)
+
+                # exploration noise + smoothing
                 action = action + noise()
                 action[0] = np.clip(action[0], -1.0, 1.0)
                 action[1] = np.clip(action[1], 0.0, 1.0)
@@ -107,7 +120,6 @@ class AgentCollector:
                 action = action.astype(np.float32)
 
                 raw_next, _reward, terminated, truncated, info = env.step(action)
-                next_obs_dict = obs_to_dict(raw_next)
                 done = terminated or truncated
                 speed = float(info.get("speed", 0.0))
 
@@ -138,7 +150,6 @@ class AgentCollector:
                     warmup_counter = 0
 
                     raw_obs, _info = env.reset()
-                    obs_dict = obs_to_dict(raw_obs)
                     noise.reset()
                     action_filter.reset()
 
@@ -162,11 +173,12 @@ class AgentCollector:
 
                 if warmup_counter < cfg.episode_monitor.warmup_frames:
                     warmup_counter += 1
-                    obs_dict = next_obs_dict
+                    raw_obs = raw_next
                     continue
 
+                obs_dict = obs_to_dict(raw_next)
                 writer.append(obs_dict, action)
-                obs_dict = next_obs_dict
+                raw_obs = raw_next
                 frame_count += 1
                 speed_window.append(speed)
 
