@@ -15,7 +15,10 @@ def parse_args() -> argparse.Namespace:
         "--mode",
         choices=["human", "agent"],
         default="human",
-        help="Recording mode: 'human' for keyboard/gamepad play, 'agent' for trained RL policy rollout.",
+        help=(
+            "Recording mode: 'human' for keyboard/gamepad play, "
+            "'agent' for trained RL policy rollout."
+        ),
     )
     return parser.parse_args()
 

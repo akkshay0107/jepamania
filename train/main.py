@@ -5,6 +5,7 @@ from pathlib import Path
 
 import jax
 from core.config import IMG_HIST_LEN, load_config
+from omegaconf import OmegaConf
 from src.dataloader import DataLoader, SlidingWindowDataset
 from src.train import train
 
@@ -28,7 +29,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--rollout-len", type=int, default=5)
     parser.add_argument("--num-workers", type=int, default=1)
-    parser.add_argument("--no-preload", action="store_true")
     parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-every", type=int, default=50)
@@ -52,18 +52,31 @@ def main() -> None:
         data_dir=args.data_dir,
         history_len=IMG_HIST_LEN,
         rollout_len=args.rollout_len,
-        preload_to_ram=not args.no_preload,
         discretize_actions=True,
     )
     if len(dataset) == 0:
         raise SystemExit(f"No valid transitions found in {args.data_dir}")
     print(f"Indexed {len(dataset)} transitions across {len(dataset.shards)} shards")
 
-    dataloader = DataLoader(
-        dataset,
+    train_dataset, val_dataset = dataset.split(val_ratio=0.1, seed=args.seed)
+    print(
+        f"Dataset split by episode: {len(train_dataset)} train transitions, "
+        f"{len(val_dataset)} validation transitions"
+    )
+
+    train_dataloader = DataLoader(
+        train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         drop_last=True,
+        num_workers=args.num_workers,
+        seed=args.seed,
+    )
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        drop_last=False,
         num_workers=args.num_workers,
         seed=args.seed,
     )
@@ -77,9 +90,16 @@ def main() -> None:
         encoder = ConvEncoder(cfg.encoder, key_enc)
     predictor = MLPPredictor(cfg.predictor, key_pred)
 
+    config_dict = {
+        "cfg": OmegaConf.to_container(cfg, resolve=True),
+        "args": {
+            k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
+        },
+    }
+
     train(
         (encoder, predictor),
-        dataloader,
+        train_dataloader,
         latent_dim=cfg.encoder.latent_dim,
         loss_cfg=cfg.loss,
         num_epochs=args.epochs,
@@ -88,6 +108,8 @@ def main() -> None:
         checkpoint_dir=args.checkpoint_dir,
         log_every=args.log_every,
         resume=args.resume,
+        val_dataloader=val_dataloader,
+        config_dict=config_dict,
     )
     print(f"Training complete. Checkpoints written to {args.checkpoint_dir}")
 

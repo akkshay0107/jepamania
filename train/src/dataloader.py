@@ -16,18 +16,17 @@ class SlidingWindowDataset:
         data_dir: Union[str, Path],
         history_len: int = 4,
         rollout_len: int = 5,
-        preload_to_ram: bool = True,
         discretize_actions: bool = False,
     ) -> None:
         self.data_dir = Path(data_dir)
         self.H = int(history_len)
         self.K = int(rollout_len)
-        self.preload_to_ram = bool(preload_to_ram)
         self.discretize_actions = bool(discretize_actions)
 
         self.shards: List[Dict[str, Any]] = []
         self.shard_indices_map: np.ndarray = np.empty(0, dtype=np.int32)
         self.local_indices_map: np.ndarray = np.empty(0, dtype=np.int32)
+        self.episode_indices_map: np.ndarray = np.empty(0, dtype=np.int32)
 
         self._build_index()
 
@@ -38,6 +37,7 @@ class SlidingWindowDataset:
         h5_files = sorted(list(self.data_dir.glob("*.h5")))
         shard_indices = []
         local_indices = []
+        episode_indices = []
 
         for shard_idx, file_path in enumerate(h5_files):
             try:
@@ -84,14 +84,6 @@ class SlidingWindowDataset:
                         "episode_ids": episode_ids,
                     }
 
-                    if self.preload_to_ram:
-                        screen_ds = cast(h5py.Dataset, f["observations/screen"])
-                        shard_data["screen"] = np.asarray(screen_ds, dtype=np.uint8)
-                        telem_ds = cast(h5py.Dataset, f["observations/telemetry"])
-                        shard_data["telemetry"] = np.asarray(telem_ds, dtype=np.float32)
-                        actions_ds = cast(h5py.Dataset, f["actions"])
-                        shard_data["actions"] = np.asarray(actions_ds, dtype=np.float32)
-
                     self.shards.append(shard_data)
 
                     shard_indices.append(
@@ -100,6 +92,7 @@ class SlidingWindowDataset:
                         )
                     )
                     local_indices.append(valid_local_ts)
+                    episode_indices.append(episode_ids[valid_local_ts])
 
             except Exception as e:
                 # Avoid blocking initialization if a single shard is corrupted
@@ -108,23 +101,58 @@ class SlidingWindowDataset:
         if shard_indices:
             self.shard_indices_map = np.concatenate(shard_indices, axis=0)
             self.local_indices_map = np.concatenate(local_indices, axis=0)
+            self.episode_indices_map = np.concatenate(episode_indices, axis=0)
+
+    def split(
+        self, val_ratio: float = 0.1, seed: int = 42
+    ) -> Tuple["SlidingWindowDataset", "SlidingWindowDataset"]:
+        """Splits into train and val sets by episode."""
+        if val_ratio <= 0.0 or val_ratio >= 1.0:
+            raise ValueError("val_ratio must be between 0.0 and 1.0 exclusive.")
+
+        if len(self) == 0:
+            return self, self
+
+        pairs = np.stack([self.shard_indices_map, self.episode_indices_map], axis=1)
+        unique_pairs, inverse_indices = np.unique(pairs, axis=0, return_inverse=True)
+        rng = np.random.default_rng(seed)
+        shuffled_indices = rng.permutation(len(unique_pairs))
+
+        num_val = int(len(unique_pairs) * val_ratio)
+        if num_val == 0 and len(unique_pairs) > 1:
+            num_val = 1
+
+        val_pair_indices = shuffled_indices[:num_val]
+        val_mask = np.isin(inverse_indices, val_pair_indices)
+        train_mask = ~val_mask
+
+        train_ds = SlidingWindowDataset.__new__(SlidingWindowDataset)
+        val_ds = SlidingWindowDataset.__new__(SlidingWindowDataset)
+
+        for ds, mask in ((train_ds, train_mask), (val_ds, val_mask)):
+            ds.data_dir = self.data_dir
+            ds.H = self.H
+            ds.K = self.K
+            ds.discretize_actions = self.discretize_actions
+            ds.shards = self.shards
+            ds.shard_indices_map = self.shard_indices_map[mask]
+            ds.local_indices_map = self.local_indices_map[mask]
+            ds.episode_indices_map = self.episode_indices_map[mask]
+
+        return train_ds, val_ds
 
     def __len__(self) -> int:
         return len(self.shard_indices_map)
 
     def _get_history_stack(
-        self, shard: Dict[str, Any], idx: int, frame_start: int
+        self, f: h5py.File, idx: int, frame_start: int
     ) -> np.ndarray:
         slice_start = max(idx - self.H + 1, frame_start)
         slice_end = idx
         slice_len = slice_end - slice_start + 1
 
-        if self.preload_to_ram:
-            raw_slice = shard["screen"][slice_start : slice_end + 1]
-        else:
-            with h5py.File(shard["file_path"], "r") as f:
-                screen_ds = cast(h5py.Dataset, f["observations/screen"])
-                raw_slice = screen_ds[slice_start : slice_end + 1]
+        screen_ds = cast(h5py.Dataset, f["observations/screen"])
+        raw_slice = screen_ds[slice_start : slice_end + 1]
 
         # Squeezing avoids extra axis overhead while preserving features
         raw_slice_sq = raw_slice[:, 0]
@@ -150,28 +178,21 @@ class SlidingWindowDataset:
         ep_id = shard["episode_ids"][local_t]
         frame_start, _ = shard["episode_boundaries"][ep_id]
 
-        obs_stack_t = self._get_history_stack(shard, local_t, frame_start)
+        with h5py.File(shard["file_path"], "r") as f:
+            obs_stack_t = self._get_history_stack(f, local_t, frame_start)
 
-        if self.preload_to_ram:
-            telemetry_t = shard["telemetry"][local_t]
-            telemetry_target = shard["telemetry"][local_t + self.K]
-            actions_seq = shard["actions"][local_t : local_t + self.K]
-        else:
-            with h5py.File(shard["file_path"], "r") as f:
-                telem_ds = cast(h5py.Dataset, f["observations/telemetry"])
-                telemetry_t = np.asarray(telem_ds[local_t], dtype=np.float32)
-                telemetry_target = np.asarray(
-                    telem_ds[local_t + self.K], dtype=np.float32
-                )
-                actions_ds = cast(h5py.Dataset, f["actions"])
-                actions_seq = np.asarray(
-                    actions_ds[local_t : local_t + self.K], dtype=np.float32
-                )
+            telem_ds = cast(h5py.Dataset, f["observations/telemetry"])
+            telemetry_t = np.asarray(telem_ds[local_t], dtype=np.float32)
+            telemetry_target = np.asarray(telem_ds[local_t + self.K], dtype=np.float32)
+            actions_ds = cast(h5py.Dataset, f["actions"])
+            actions_seq = np.asarray(
+                actions_ds[local_t : local_t + self.K], dtype=np.float32
+            )
+
+            obs_stack_target = self._get_history_stack(f, local_t + self.K, frame_start)
 
         if self.discretize_actions:
             actions_seq = discretize_action_np(actions_seq)
-
-        obs_stack_target = self._get_history_stack(shard, local_t + self.K, frame_start)
 
         return obs_stack_t, telemetry_t, actions_seq, obs_stack_target, telemetry_target
 

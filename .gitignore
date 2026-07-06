@@ -24,7 +24,8 @@ scratch/
 # output for benchmark scripts
 core/out/
 
-# Training checkpoints
+# Training artifacts (checkpoints / wandb logs)
+wandb/
 checkpoints/
 *.eqx
 

@@ -10,13 +10,14 @@ distribution to prevent collapse.
 
 import time
 from pathlib import Path
-from typing import Dict, Iterable, Mapping, Tuple, TypeVar, Union
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple, TypeVar, Union
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import wandb
 from core.config import LossConfig
 from core.interfaces import Encoder, Predictor
 from core.loss import generate_projectors, sub_jepa_loss
@@ -139,6 +140,8 @@ def train(
     checkpoint_dir: Union[str, Path],
     log_every: int = 50,
     resume: bool = False,
+    val_dataloader: Optional[Iterable[Dict[str, np.ndarray]]] = None,
+    config_dict: Optional[Dict[str, Any]] = None,
 ) -> Models:
     """Runs offline pretraining and returns the trained (encoder, predictor).
 
@@ -152,6 +155,12 @@ def train(
     existing epoch checkpoint; `num_epochs` more epochs are then trained.
     """
     checkpoint_dir = Path(checkpoint_dir)
+
+    wandb.init(
+        project="jepamania",
+        mode="offline",
+        config=config_dict or {},
+    )
 
     subspace_dim = loss_cfg.subspace_dim or latent_dim // loss_cfg.num_subspaces
     key_proj, _ = jax.random.split(key)
@@ -194,45 +203,107 @@ def train(
         optimizer, subspace_projectors, slice_projectors, loss_cfg.reg_weight
     )
 
-    last_epoch = start_epoch + num_epochs
-    global_step = 0
-    for epoch in range(start_epoch, last_epoch):
-        # Keep losses as device scalars; a float() every step would block the
-        # host on each result and defeat JAX async dispatch.
-        epoch_losses = []
-        epoch_start = time.time()
+    @eqx.filter_jit
+    def eval_step(
+        models_eval: Models,
+        batch_eval: Batch,
+    ) -> Float[Array, ""]:
+        return compute_loss(
+            models_eval,
+            batch_eval,
+            subspace_projectors,
+            slice_projectors,
+            loss_cfg.reg_weight,
+        )
 
-        for batch in dataloader:
-            models, opt_state, loss = train_step(models, opt_state, batch)
-            epoch_losses.append(loss)
-            global_step += 1
-
-            if global_step % log_every == 0:
+    best_val_loss = float("inf")
+    if resume and val_dataloader is not None:
+        best_path = checkpoint_dir / "subjepa_best.eqx"
+        if best_path.exists():
+            best_models = load_checkpoint(best_path, models)
+            val_losses = [eval_step(best_models, b) for b in val_dataloader]
+            if val_losses:
+                best_val_loss = float(jnp.mean(jnp.stack(val_losses)))
                 print(
-                    f"epoch {epoch + 1}/{last_epoch} | step {global_step} | "
-                    f"loss {float(loss):.6f}"
+                    f"Restored best validation loss from {best_path}: "
+                    f"{best_val_loss:.6f}"
                 )
 
-        if not epoch_losses:
-            raise RuntimeError(
-                "DataLoader yielded no batches; check data_dir and batch_size."
+    last_epoch = start_epoch + num_epochs
+    global_step = 0
+    try:
+        for epoch in range(start_epoch, last_epoch):
+            # Keep losses as device scalars; a float() every step would block the
+            # host on each result and defeat JAX async dispatch.
+            epoch_losses = []
+            epoch_start = time.time()
+
+            for batch in dataloader:
+                models, opt_state, loss = train_step(models, opt_state, batch)
+                epoch_losses.append(loss)
+                global_step += 1
+
+                if global_step % log_every == 0:
+                    print(
+                        f"epoch {epoch + 1}/{last_epoch} | step {global_step} | "
+                        f"loss {float(loss):.6f}"
+                    )
+                    wandb.log(
+                        {
+                            "train/step_loss": float(loss),
+                            "epoch": epoch + 1,
+                            "global_step": global_step,
+                        },
+                        step=global_step,
+                    )
+
+            if not epoch_losses:
+                raise RuntimeError(
+                    "DataLoader yielded no batches; check data_dir and batch_size."
+                )
+
+            mean_loss = float(jnp.mean(jnp.stack(epoch_losses)))
+            duration = time.time() - epoch_start
+
+            val_loss_str = ""
+            val_mean_loss = None
+            if val_dataloader is not None:
+                val_losses = []
+                for val_batch in val_dataloader:
+                    val_losses.append(eval_step(models, val_batch))
+                if val_losses:
+                    val_mean_loss = float(jnp.mean(jnp.stack(val_losses)))
+                    val_loss_str = f" | val loss {val_mean_loss:.6f}"
+
+            print(
+                f"epoch {epoch + 1}/{last_epoch} done | "
+                f"mean loss {mean_loss:.6f}{val_loss_str} | "
+                f"{len(epoch_losses)} batches in {duration:.1f}s"
             )
 
-        mean_loss = float(jnp.mean(jnp.stack(epoch_losses)))
-        duration = time.time() - epoch_start
-        print(
-            f"epoch {epoch + 1}/{last_epoch} done | "
-            f"mean loss {mean_loss:.6f} | "
-            f"{len(epoch_losses)} batches in {duration:.1f}s"
-        )
+            log_dict = {
+                "train/epoch_loss": mean_loss,
+                "epoch": epoch + 1,
+                "duration_s": duration,
+            }
+            if val_mean_loss is not None:
+                log_dict["val/epoch_loss"] = val_mean_loss
+            wandb.log(log_dict, step=global_step)
 
-        # Weights and optimizer state live in separate files so deployment
-        # ships weights-only while resume can restore the Adam moments.
-        save_checkpoint(checkpoint_dir / f"subjepa_epoch_{epoch + 1}.eqx", models)
-        save_checkpoint(checkpoint_dir / "subjepa_latest.eqx", models)
-        save_checkpoint(
-            checkpoint_dir / f"subjepa_epoch_{epoch + 1}_optstate.eqx", opt_state
-        )
-        save_checkpoint(checkpoint_dir / "subjepa_latest_optstate.eqx", opt_state)
+            # Weights and optimizer state live in separate files so deployment
+            # ships weights-only while resume can restore the Adam moments.
+            save_checkpoint(checkpoint_dir / f"subjepa_epoch_{epoch + 1}.eqx", models)
+            save_checkpoint(checkpoint_dir / "subjepa_latest.eqx", models)
+            save_checkpoint(
+                checkpoint_dir / f"subjepa_epoch_{epoch + 1}_optstate.eqx", opt_state
+            )
+            save_checkpoint(checkpoint_dir / "subjepa_latest_optstate.eqx", opt_state)
+
+            if val_mean_loss is not None and val_mean_loss < best_val_loss:
+                best_val_loss = val_mean_loss
+                save_checkpoint(checkpoint_dir / "subjepa_best.eqx", models)
+                save_checkpoint(checkpoint_dir / "subjepa_best_optstate.eqx", opt_state)
+    finally:
+        wandb.finish()
 
     return models
