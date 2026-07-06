@@ -183,7 +183,7 @@ if platform.system() == "Windows":
             obs = [speed, gear, rpm, imgs]
             end_of_track = bool(data[8])
 
-            info = {"action": np.array([data[6], data[7], data[5]], dtype="float32")}
+            info = {"action": np.array([data[5], data[6], data[7]], dtype="float32")}
 
             if end_of_track:
                 terminated = True
@@ -214,9 +214,7 @@ if platform.system() == "Windows":
                 else:
                     import logging
 
-                    logging.warning(
-                        "Trackmania window not focused. Reset key skipped."
-                    )
+                    logging.warning("Trackmania window not focused. Reset key skipped.")
 
         ck.keyres = patched_keyres
 
