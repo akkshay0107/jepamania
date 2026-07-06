@@ -13,6 +13,14 @@ WORKSPACE_DIR = SCRIPT_DIR.parent.parent
 DATA_DIR = WORKSPACE_DIR / "win-client" / "data"
 OUTPUT_PLOT = SCRIPT_DIR.parent / "out" / "action_distributions.png"
 
+# Telemetry layout (TELEMETRY_FEATURES = 9):
+#   [0]   speed
+#   [1]   gear
+#   [2]   rpm
+#   [3:6] act1  — most recent previous action (steer, gas, brake)
+#   [6:9] act2  — action before that
+TELEM_ACT1_SLICE = slice(3, 6)
+
 
 def load_gamepad_actions(data_dir: Path):
     """Loads all actions and telemetry inputs from HDF5 files in the data directory.
@@ -50,9 +58,10 @@ def load_gamepad_actions(data_dir: Path):
                     if "telemetry" in obs_grp:
                         telemetry_ds = cast(h5py.Dataset, obs_grp["telemetry"])
                         telemetry = cast(np.ndarray, telemetry_ds[:])
-                        # Telemetry features 30, 31, 32 correspond to steer, gas, brake
-                        if telemetry.shape[1] >= 33:
-                            telemetry_actions = telemetry[:, 30:33]
+                        # act1 (most recent previous action) is at indices 3:6
+                        # within the 9-float telemetry vector.
+                        if telemetry.shape[1] >= 6:
+                            telemetry_actions = telemetry[:, TELEM_ACT1_SLICE]
                             all_telemetry_actions.append(telemetry_actions)
         except Exception as e:
             print(f"Error reading {file_path.name}: {e}")
@@ -130,7 +139,9 @@ def main():
     print_statistics("Recorded actions Dataset", actions)
 
     if telem_actions is not None:
-        print_statistics("Telemetry input features (Indices 30-32)", telem_actions)
+        print_statistics(
+            "Telemetry act1 features (Indices 3-5: steer, gas, brake)", telem_actions
+        )
 
         diff = np.abs(actions - telem_actions)
         max_diff = np.max(diff)

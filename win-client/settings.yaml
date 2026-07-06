@@ -5,6 +5,10 @@ agent:
   policy_path: null # Set this to the absolute path of your trained SAC actor .tmod file
   map_name: "Summer 2026 - 01"
   map_uid: "unknown"
+  exploration:
+    ou_noise_mu: 0.0      # Mean the OU process reverts to (0 = unbiased)
+    ou_noise_theta: 0.15  # Mean-reversion rate (higher = faster reversion)
+    ou_noise_sigma: 0.05  # Noise volatility (lower = less jitter)
   filter:
     enabled: true
     steer_deadzone: 0.015 # Ignore steering jitter below this absolute threshold

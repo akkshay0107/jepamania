@@ -111,17 +111,14 @@ class AgentCollector:
                 action = actor.act_(preprocessed_obs, test=True)
                 action = np.asarray(action, dtype=np.float32)
 
-                # exploration noise + smoothing
-                action = action + noise()
-                action[0] = np.clip(action[0], -1.0, 1.0)
-                action[1] = np.clip(action[1], 0.0, 1.0)
-                action[2] = np.clip(action[2], 0.0, 1.0)
+                # Add OU noise to steering only
+                action[0] = action[0] + noise()[0]
                 action = action_filter(action)
                 action = action.astype(np.float32)
 
                 raw_next, _reward, terminated, truncated, info = env.step(action)
                 done = terminated or truncated
-                speed = float(info.get("speed", 0.0))
+                speed = float(np.asarray(raw_next[0]).flat[0])
 
                 reason = None
                 if done:
