@@ -112,7 +112,7 @@ class AgentCollector:
                 action = np.asarray(action, dtype=np.float32)
                 action[2] = action[2] + noise()[2]
                 action = action_filter(action)
-                action = np.clip(action, -1.0, 1.0).astype(np.float32)
+                np.clip(action, [0.0, 0.0, -1.0], [1.0, 1.0, 1.0], out=action)
 
                 raw_next, _reward, terminated, truncated, info = env.step(action)
                 done = terminated or truncated
