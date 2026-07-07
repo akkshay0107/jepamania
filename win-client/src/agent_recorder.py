@@ -110,8 +110,6 @@ class AgentCollector:
                 preprocessed_obs = obs_preprocessor(raw_obs)
                 action = actor.act_(preprocessed_obs, test=True)
                 action = np.asarray(action, dtype=np.float32)
-
-                # Add OU noise to steering only
                 action[0] = action[0] + noise()[0]
                 action = action_filter(action)
                 action = action.astype(np.float32)

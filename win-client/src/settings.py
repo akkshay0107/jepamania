@@ -50,5 +50,5 @@ else:
 
 OmegaConf.set_struct(cfg, False)
 
-cfg.action_dim = 3  # [steer, gas, brake]
+cfg.action_dim = 3
 cfg.data_output_dir = str(DATA_OUTPUT_DIR)

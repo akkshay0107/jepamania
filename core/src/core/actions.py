@@ -56,11 +56,9 @@ def discretize_action(continuous_action: Float[Array, "... 3"]) -> Int[Array, ".
     steer = continuous_action[..., 0]
     gas_brake = continuous_action[..., 1:3]
 
-    # Find closest steering value index
     steer_diffs = jnp.abs(steer[..., None] - STEER_VALUES_JAX)
     steer_bin = jnp.argmin(steer_diffs, axis=-1)
 
-    # Find closest gas/brake combination index
     gb_diffs = gas_brake[..., None, :] - GAS_BRAKE_VALUES_JAX
     gb_dist = jnp.sum(jnp.square(gb_diffs), axis=-1)
     gb_bin = jnp.argmin(gb_dist, axis=-1)
@@ -109,11 +107,9 @@ def discretize_action_np(continuous_action: np.ndarray) -> np.ndarray:
     steer = continuous_action[..., 0]
     gas_brake = continuous_action[..., 1:3]
 
-    # Find closest steering value index
     steer_diffs = np.abs(steer[..., None] - STEER_VALUES_NP)
     steer_bin = np.argmin(steer_diffs, axis=-1)
 
-    # Find closest gas/brake combination index
     gb_diffs = gas_brake[..., None, :] - GAS_BRAKE_VALUES_NP
     gb_dist = np.sum(np.square(gb_diffs), axis=-1)
     gb_bin = np.argmin(gb_dist, axis=-1)

@@ -31,7 +31,6 @@ class AsyncPlannerWrapper:
         self.planner = planner
         self.default_action = default_action
 
-        # JIT compile the core pipeline components for maximum speed
         self._encode_jit = eqx.filter_jit(self.encoder)
         self._predict_jit = eqx.filter_jit(self.predictor)
         self._plan_jit = eqx.filter_jit(self.planner)

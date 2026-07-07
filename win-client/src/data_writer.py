@@ -9,7 +9,7 @@ import numpy as np
 from core.config import TELEMETRY_FEATURES
 from src.settings import cfg
 
-IMG_SIZE: int = 64  # spatial resolution expected by the encoder
+IMG_SIZE: int = 64
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -19,7 +19,15 @@ logging.basicConfig(
 class HDF5Writer:
     """Asynchronous HDF5 writer with per-episode metadata support."""
 
-    def __init__(self, filepath: Path, chunk_size: int = cfg.hdf5_chunk_size) -> None:
+    def __init__(
+        self,
+        filepath: Path,
+        chunk_size: int = cfg.hdf5_chunk_size,
+        obs_type: str = "screen",
+    ) -> None:
+        if obs_type not in ("screen", "lidar"):
+            raise ValueError("obs_type must be either 'screen' or 'lidar'.")
+        self.obs_type = obs_type
         self.filepath = filepath
         self.chunk_size = chunk_size
 
@@ -27,7 +35,7 @@ class HDF5Writer:
         self._queue: queue.Queue = queue.Queue()
 
         # Per-type frame buffers (populated by the writer thread only).
-        self._screen_buf: list[np.ndarray] = []
+        self._obs_buf: list[np.ndarray] = []
         self._telemetry_buf: list[np.ndarray] = []
         self._action_buf: list[np.ndarray] = []
         self._episode_id_buf: list[int] = []
@@ -42,14 +50,25 @@ class HDF5Writer:
         self._file = h5py.File(filepath, "w")
 
         obs_grp = self._file.create_group("observations")
-        obs_grp.create_dataset(
-            "screen",
-            shape=(0, 1, IMG_SIZE, IMG_SIZE),
-            maxshape=(None, 1, IMG_SIZE, IMG_SIZE),
-            chunks=(chunk_size, 1, IMG_SIZE, IMG_SIZE),
-            dtype=np.uint8,
-            compression="gzip",
-        )
+        if self.obs_type == "lidar":
+            from core.config import LIDAR_BEAMS
+
+            obs_grp.create_dataset(
+                "lidar",
+                shape=(0, LIDAR_BEAMS),
+                maxshape=(None, LIDAR_BEAMS),
+                chunks=(chunk_size, LIDAR_BEAMS),
+                dtype=np.float32,
+            )
+        else:
+            obs_grp.create_dataset(
+                "screen",
+                shape=(0, 1, IMG_SIZE, IMG_SIZE),
+                maxshape=(None, 1, IMG_SIZE, IMG_SIZE),
+                chunks=(chunk_size, 1, IMG_SIZE, IMG_SIZE),
+                dtype=np.uint8,
+                compression="gzip",
+            )
         obs_grp.create_dataset(
             "telemetry",
             shape=(0, TELEMETRY_FEATURES),
@@ -115,15 +134,17 @@ class HDF5Writer:
                 "Writing to disk is falling behind the real-time game loop."
             )
 
-        self._queue.put(
-            {
-                "_type": "frame",
-                "screen": np.copy(obs_dict["screen"]),
-                "telemetry": np.copy(obs_dict["telemetry"]),
-                "action": np.copy(action).astype(np.float32),
-                "episode_id": self._current_episode_id,
-            }
-        )
+        frame_data = {
+            "_type": "frame",
+            "telemetry": np.copy(obs_dict["telemetry"]),
+            "action": np.copy(action).astype(np.float32),
+            "episode_id": self._current_episode_id,
+        }
+        if self.obs_type == "lidar":
+            frame_data["lidar"] = np.copy(obs_dict["lidar"])
+        else:
+            frame_data["screen"] = np.copy(obs_dict["screen"])
+        self._queue.put(frame_data)
 
     def close(self) -> None:
         """Drain the queue, flush remaining data, and close the file."""
@@ -180,18 +201,21 @@ class HDF5Writer:
                             grp.attrs[k] = str(v)
                     self._file.flush()
 
-            else:  # "frame"
-                self._screen_buf.append(token["screen"])
+            else:
+                if self.obs_type == "lidar":
+                    self._obs_buf.append(token["lidar"])
+                else:
+                    self._obs_buf.append(token["screen"])
                 self._telemetry_buf.append(token["telemetry"])
                 self._action_buf.append(token["action"])
                 self._episode_id_buf.append(token["episode_id"])
 
-                if len(self._screen_buf) >= self.chunk_size:
+                if len(self._obs_buf) >= self.chunk_size:
                     self._flush()
 
     def _flush(self) -> None:
         """Write all buffered frames to HDF5 and clear the buffers."""
-        n = len(self._screen_buf)
+        n = len(self._obs_buf)
         if n == 0:
             return
 
@@ -200,17 +224,20 @@ class HDF5Writer:
         # casting to avoid pyright errors
         obs = cast(h5py.Group, self._file["observations"])
 
-        screen_ds = cast(h5py.Dataset, obs["screen"])
+        if self.obs_type == "lidar":
+            obs_ds = cast(h5py.Dataset, obs["lidar"])
+        else:
+            obs_ds = cast(h5py.Dataset, obs["screen"])
         telem_ds = cast(h5py.Dataset, obs["telemetry"])
         actions_ds = cast(h5py.Dataset, self._file["actions"])
         ep_id_ds = cast(h5py.Dataset, self._file["episode_id"])
 
-        screen_ds.resize(new_size, axis=0)
+        obs_ds.resize(new_size, axis=0)
         telem_ds.resize(new_size, axis=0)
         actions_ds.resize(new_size, axis=0)
         ep_id_ds.resize(new_size, axis=0)
 
-        screen_ds[self.current_size : new_size] = np.stack(self._screen_buf)
+        obs_ds[self.current_size : new_size] = np.stack(self._obs_buf)
         telem_ds[self.current_size : new_size] = np.stack(self._telemetry_buf)
         actions_ds[self.current_size : new_size] = np.stack(self._action_buf)
         ep_id_ds[self.current_size : new_size] = np.array(
@@ -219,7 +246,7 @@ class HDF5Writer:
 
         self.current_size = new_size
 
-        self._screen_buf.clear()
+        self._obs_buf.clear()
         self._telemetry_buf.clear()
         self._action_buf.clear()
         self._episode_id_buf.clear()

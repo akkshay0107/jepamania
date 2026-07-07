@@ -11,6 +11,9 @@ IMG_HIST_LEN: int = 4
 # reward function only and never reach the observation.)
 TELEMETRY_FEATURES: int = 9
 
+# Fixed TMRL Constants (TM2020LIDAR)
+LIDAR_BEAMS: int = 19
+
 # Steering [-1.0, 1.0] -> discretized into 7 bins
 # Gas / Brake -> discretized into 5 bins
 # so 35 distinct actions possible at any given moment of time

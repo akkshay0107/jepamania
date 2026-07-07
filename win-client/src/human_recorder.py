@@ -41,7 +41,6 @@ class HumanRecorder:
     def run(self) -> None:
         env = tmrl.get_environment()
 
-        # Initialize writer and start recording immediately
         self.writer = HDF5Writer(self._make_session_path())
         self.writer.new_episode(self._default_metadata())
 

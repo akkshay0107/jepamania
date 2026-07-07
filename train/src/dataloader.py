@@ -17,7 +17,11 @@ class SlidingWindowDataset:
         history_len: int = 4,
         rollout_len: int = 5,
         discretize_actions: bool = False,
+        obs_type: str = "screen",
     ) -> None:
+        if obs_type not in ("screen", "lidar"):
+            raise ValueError("obs_type must be either 'screen' or 'lidar'.")
+        self.obs_type = obs_type
         self.data_dir = Path(data_dir)
         self.H = int(history_len)
         self.K = int(rollout_len)
@@ -42,7 +46,8 @@ class SlidingWindowDataset:
         for shard_idx, file_path in enumerate(h5_files):
             try:
                 with h5py.File(file_path, "r") as f:
-                    if "episode_id" not in f or "observations/screen" not in f:
+                    obs_key = f"observations/{self.obs_type}"
+                    if "episode_id" not in f or obs_key not in f:
                         continue
 
                     ep_id_ds = cast(h5py.Dataset, f["episode_id"])
@@ -83,46 +88,41 @@ class SlidingWindowDataset:
                         "episode_boundaries": episode_boundaries,
                         "episode_ids": episode_ids,
                     }
-
                     self.shards.append(shard_data)
 
                     shard_indices.append(
-                        np.full_like(
-                            valid_local_ts, len(self.shards) - 1, dtype=np.int32
-                        )
+                        np.full(len(valid_local_ts), shard_idx, dtype=np.int32)
                     )
-                    local_indices.append(valid_local_ts)
+                    local_indices.append(valid_local_ts.astype(np.int32))
                     episode_indices.append(episode_ids[valid_local_ts])
-
-            except Exception as e:
-                # Avoid blocking initialization if a single shard is corrupted
-                print(f"Warning: Failed to index HDF5 shard {file_path}: {e}")
+            except (OSError, h5py.FileError) as e:
+                print(f"Warning: Failed to read {file_path}, skipping shard: {e}")
 
         if shard_indices:
-            self.shard_indices_map = np.concatenate(shard_indices, axis=0)
-            self.local_indices_map = np.concatenate(local_indices, axis=0)
-            self.episode_indices_map = np.concatenate(episode_indices, axis=0)
+            self.shard_indices_map = np.concatenate(shard_indices)
+            self.local_indices_map = np.concatenate(local_indices)
+            self.episode_indices_map = np.concatenate(episode_indices)
 
     def split(
         self, val_ratio: float = 0.1, seed: int = 42
     ) -> Tuple["SlidingWindowDataset", "SlidingWindowDataset"]:
         """Splits into train and val sets by episode."""
-        if val_ratio <= 0.0 or val_ratio >= 1.0:
-            raise ValueError("val_ratio must be between 0.0 and 1.0 exclusive.")
+        if len(self.shard_indices_map) == 0:
+            raise ValueError("Cannot split empty dataset")
 
-        if len(self) == 0:
-            return self, self
+        unique_pairs = np.unique(
+            np.stack([self.shard_indices_map, self.episode_indices_map], axis=1), axis=0
+        )
+        num_episodes = len(unique_pairs)
+        num_val_episodes = max(1, int(num_episodes * val_ratio))
 
-        pairs = np.stack([self.shard_indices_map, self.episode_indices_map], axis=1)
-        unique_pairs, inverse_indices = np.unique(pairs, axis=0, return_inverse=True)
         rng = np.random.default_rng(seed)
-        shuffled_indices = rng.permutation(len(unique_pairs))
+        shuffled_indices = rng.permutation(num_episodes)
+        val_pair_indices = unique_pairs[shuffled_indices[:num_val_episodes]]
 
-        num_val = int(len(unique_pairs) * val_ratio)
-        if num_val == 0 and len(unique_pairs) > 1:
-            num_val = 1
-
-        val_pair_indices = shuffled_indices[:num_val]
+        inverse_indices = np.stack(
+            [self.shard_indices_map, self.episode_indices_map], axis=1
+        )
         val_mask = np.isin(inverse_indices, val_pair_indices)
         train_mask = ~val_mask
 
@@ -134,6 +134,7 @@ class SlidingWindowDataset:
             ds.H = self.H
             ds.K = self.K
             ds.discretize_actions = self.discretize_actions
+            ds.obs_type = self.obs_type
             ds.shards = self.shards
             ds.shard_indices_map = self.shard_indices_map[mask]
             ds.local_indices_map = self.local_indices_map[mask]
@@ -151,16 +152,18 @@ class SlidingWindowDataset:
         slice_end = idx
         slice_len = slice_end - slice_start + 1
 
-        screen_ds = cast(h5py.Dataset, f["observations/screen"])
-        raw_slice = screen_ds[slice_start : slice_end + 1]
+        obs_ds = cast(h5py.Dataset, f[f"observations/{self.obs_type}"])
+        raw_slice = obs_ds[slice_start : slice_end + 1]
 
-        # Squeezing avoids extra axis overhead while preserving features
-        raw_slice_sq = raw_slice[:, 0]
+        is_screen = self.obs_type == "screen"
+        if is_screen and raw_slice.ndim >= 3 and raw_slice.shape[1] == 1:
+            raw_slice_sq = raw_slice[:, 0]
+        else:
+            raw_slice_sq = raw_slice
 
         if slice_len < self.H:
             pad_len = self.H - slice_len
             first_frame = raw_slice_sq[0]
-            # Leverage numpy broadcasting for memory-efficient padding repetition
             padding = np.repeat(first_frame[np.newaxis, ...], pad_len, axis=0)
             obs_stack = np.concatenate([padding, raw_slice_sq], axis=0)
         else:

@@ -19,6 +19,7 @@ import numpy as np
 import optax
 import wandb
 from core.config import LossConfig
+from core.encoders import LidarEncoder
 from core.interfaces import Encoder, Predictor
 from core.loss import generate_projectors, sub_jepa_loss
 from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree
@@ -58,16 +59,26 @@ def compute_loss(
 ) -> Float[Array, ""]:
     encoder, predictor = models
 
-    # uint8 -> float32 here so the cast runs on-device after the (4x smaller)
-    # uint8 transfer, conserving PCIe bandwidth.
-    obs_t = {
-        "screen": batch["obs_stack_t"].astype(jnp.float32) / 255.0,
-        "telemetry": batch["telemetry_t"],
-    }
-    obs_target = {
-        "screen": batch["obs_stack_target"].astype(jnp.float32) / 255.0,
-        "telemetry": batch["telemetry_target"],
-    }
+    if isinstance(encoder, LidarEncoder):
+        obs_t = {
+            "lidar": batch["obs_stack_t"].astype(jnp.float32),
+            "telemetry": batch["telemetry_t"],
+        }
+        obs_target = {
+            "lidar": batch["obs_stack_target"].astype(jnp.float32),
+            "telemetry": batch["telemetry_target"],
+        }
+    else:
+        # uint8 -> float32 here so the cast runs on-device after the (4x smaller)
+        # uint8 transfer, conserving PCIe bandwidth.
+        obs_t = {
+            "screen": batch["obs_stack_t"].astype(jnp.float32) / 255.0,
+            "telemetry": batch["telemetry_t"],
+        }
+        obs_target = {
+            "screen": batch["obs_stack_target"].astype(jnp.float32) / 255.0,
+            "telemetry": batch["telemetry_target"],
+        }
     actions = batch["actions_seq"].astype(jnp.int32)
 
     z_t = jax.vmap(encoder)(obs_t)

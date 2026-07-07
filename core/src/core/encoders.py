@@ -3,7 +3,12 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from core.config import IMG_HIST_LEN, TELEMETRY_FEATURES, EncoderConfig
+from core.config import (
+    IMG_HIST_LEN,
+    LIDAR_BEAMS,
+    TELEMETRY_FEATURES,
+    EncoderConfig,
+)
 
 
 def get_2d_sincos_pos_embed(
@@ -18,7 +23,6 @@ def get_2d_sincos_pos_embed(
     assert latent_dim % 2 == 0, f"latent_dim must be even, got {latent_dim}"
     d = latent_dim // 2
 
-    # Standard absolute positional embedding
     omega = 1.0 / (10000 ** (jnp.arange(d // 2) * 2 / d))
     out_y = grid_y[:, None] * omega[None, :]
     emb_y = jnp.concatenate([jnp.sin(out_y), jnp.cos(out_y)], axis=-1)
@@ -86,12 +90,10 @@ class TransformerBlock(eqx.Module):
     def __call__(
         self, x: Float[Array, "seq_len latent_dim"]
     ) -> Float[Array, "seq_len latent_dim"]:
-        # Pre-LN attention
         x_ln1 = jax.vmap(self.ln1)(x)
         attn_out = self.mha(x_ln1, x_ln1, x_ln1)
         x = x + attn_out
 
-        # MLP
         x_ln2 = jax.vmap(self.ln2)(x)
         mlp_out = jax.vmap(self.mlp_linear1)(x_ln2)
         mlp_out = jax.nn.gelu(mlp_out)
@@ -184,12 +186,12 @@ class ViTEncoder(eqx.Module):
         )
 
     def __call__(self, observations: dict[str, Array]) -> Float[Array, "latent_dim"]:
-        screen = observations["screen"]  # (4, 64, 64)
-        telemetry = observations["telemetry"]  # (TELEMETRY_FEATURES,)
+        screen = observations["screen"]
+        telemetry = observations["telemetry"]
 
-        x_visual = self.conv_stem(screen)  # (latent_dim, 4, 4)
+        x_visual = self.conv_stem(screen)
         x_visual = x_visual.reshape(self.latent_dim, 16)
-        x_visual = x_visual.T  # (16, latent_dim)
+        x_visual = x_visual.T
         x_visual = x_visual + get_2d_sincos_pos_embed(self.latent_dim, grid_size=4)
 
         # Single telemetry token; it is distinguishable from the visual tokens
@@ -204,8 +206,8 @@ class ViTEncoder(eqx.Module):
         return z_t
 
 
-# simpler model with conv backbone and late fusion
 class ConvEncoder(eqx.Module):
+    """A simpler model with convolutional backbone and late telemetry fusion."""
     conv1: eqx.nn.Conv2d
     conv2: eqx.nn.Conv2d
     conv3: eqx.nn.Conv2d
@@ -259,4 +261,61 @@ class ConvEncoder(eqx.Module):
         x_telemetry = self.telemetry_mlp(telemetry)
 
         x_fused = jnp.concatenate([x_screen, x_telemetry], axis=0)
+        return self.fusion_mlp(x_fused)
+
+
+class LidarEncoder(eqx.Module):
+    lidar_mlp: eqx.nn.MLP
+    telemetry_mlp: eqx.nn.MLP
+    fusion_mlp: eqx.nn.MLP
+
+    def __init__(self, cfg: EncoderConfig, key: PRNGKeyArray):
+        key_lidar, key_telemetry, key_fusion = jax.random.split(key, 3)
+
+        lidar_in_size = IMG_HIST_LEN * LIDAR_BEAMS
+
+        self.lidar_mlp = eqx.nn.MLP(
+            in_size=lidar_in_size,
+            out_size=128,
+            width_size=256,
+            depth=2,
+            activation=jax.nn.silu,
+            key=key_lidar,
+        )
+
+        self.telemetry_mlp = eqx.nn.MLP(
+            in_size=TELEMETRY_FEATURES,
+            out_size=64,
+            width_size=128,
+            depth=2,
+            activation=jax.nn.silu,
+            key=key_telemetry,
+        )
+
+        fusion_in = 128 + 64
+        self.fusion_mlp = eqx.nn.MLP(
+            in_size=fusion_in,
+            out_size=cfg.latent_dim,
+            width_size=256,
+            depth=2,
+            activation=jax.nn.silu,
+            key=key_fusion,
+        )
+
+    def __call__(
+        self,
+        observations: dict[str, Array],
+    ) -> Float[Array, "latent_dim"]:
+        lidar = observations.get("lidar")
+        if lidar is None or lidar.size != IMG_HIST_LEN * LIDAR_BEAMS:
+            raise ValueError(
+                "LidarEncoder requires 'lidar' observation of total size "
+                f"{IMG_HIST_LEN * LIDAR_BEAMS}."
+            )
+        telemetry = observations["telemetry"]
+
+        x_lidar = self.lidar_mlp(lidar.reshape(-1))
+        x_telemetry = self.telemetry_mlp(telemetry)
+
+        x_fused = jnp.concatenate([x_lidar, x_telemetry], axis=0)
         return self.fusion_mlp(x_fused)

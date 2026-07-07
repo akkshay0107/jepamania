@@ -7,66 +7,113 @@ from core.config import TELEMETRY_FEATURES
 IMG_SIZE: int = 64
 
 
-def obs_to_dict(obs) -> dict[str, np.ndarray]:
+def obs_to_dict(obs, obs_type: str = "screen") -> dict[str, np.ndarray]:
     """
     Normalise the raw observation returned by the tmrl / rtgym environment
-    into a dict: {screen, telemetry}, keeping only the single latest screen frame.
-
-    The full TM20 environment (TM2020FULL) returns a tuple of two arrays:
-    obs[0] — screen stack  (IMG_HIST_LEN, H, W) uint8
-    obs[1] — telemetry     (TELEMETRY_FEATURES,) float32
+    into a dict: {screen, telemetry} or {lidar, telemetry}.
     """
+    if obs_type not in ("screen", "lidar"):
+        raise ValueError("obs_type must be either 'screen' or 'lidar'.")
+
     if isinstance(obs, dict):
-        screen = np.asarray(obs["screen"], dtype=np.uint8)
-        if screen.ndim == 3:
-            screen = screen[-1:]
-        elif screen.ndim == 2:
-            screen = screen[np.newaxis, ...]
-        return {
-            "screen": screen,
-            "telemetry": np.asarray(obs["telemetry"], dtype=np.float32),
-        }
-
-    if isinstance(obs, (tuple, list)) and len(obs) >= 1:
-        screen = None
-        telem_parts = []
-        for item in obs:
-            arr = np.asarray(item)
-            if screen is None and (arr.ndim >= 3 or arr.dtype == np.uint8):
-                screen = arr.astype(np.uint8)
-            else:
-                telem_parts.append(arr.flatten().astype(np.float32))
-
-        if screen is None:
-            screen = np.zeros((1, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
+        telemetry = np.asarray(obs["telemetry"], dtype=np.float32)
+        if len(telemetry) < TELEMETRY_FEATURES:
+            pad_len = TELEMETRY_FEATURES - len(telemetry)
+            telemetry = np.pad(telemetry, (0, pad_len), mode="constant")
+        elif len(telemetry) > TELEMETRY_FEATURES:
+            raise ValueError(
+                f"Environment produced {len(telemetry)} telemetry floats, "
+                f"expected at most TELEMETRY_FEATURES={TELEMETRY_FEATURES}."
+            )
+        if obs_type == "lidar":
+            lidar = np.asarray(obs["lidar"], dtype=np.float32)
+            if lidar.ndim == 2:
+                lidar = lidar[-1:]
+            elif lidar.ndim == 1:
+                lidar = lidar[np.newaxis, ...]
+            return {"lidar": lidar, "telemetry": telemetry}
         else:
+            screen = np.asarray(obs["screen"], dtype=np.uint8)
             if screen.ndim == 3:
                 screen = screen[-1:]
             elif screen.ndim == 2:
                 screen = screen[np.newaxis, ...]
+            return {"screen": screen, "telemetry": telemetry}
+
+    if isinstance(obs, (tuple, list)) and len(obs) >= 1:
+        lidar = None
+        screen = None
+        if obs_type == "lidar":
+            telem_parts = []
+            for item in obs:
+                arr = np.asarray(item)
+                if lidar is None and (arr.ndim == 2 or arr.size >= 19):
+                    lidar = arr.astype(np.float32)
+                else:
+                    telem_parts.append(arr.flatten().astype(np.float32))
+
+            if lidar is None:
+                from core.config import LIDAR_BEAMS
+
+                lidar = np.zeros((1, LIDAR_BEAMS), dtype=np.float32)
+            else:
+                if lidar.ndim == 2:
+                    lidar = lidar[-1:]
+                elif lidar.ndim == 1:
+                    lidar = lidar[np.newaxis, ...]
+        else:
+            telem_parts = []
+            for item in obs:
+                arr = np.asarray(item)
+                if screen is None and (arr.ndim >= 3 or arr.dtype == np.uint8):
+                    screen = arr.astype(np.uint8)
+                else:
+                    telem_parts.append(arr.flatten().astype(np.float32))
+
+            if screen is None:
+                screen = np.zeros((1, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
+            else:
+                if screen.ndim == 3:
+                    screen = screen[-1:]
+                elif screen.ndim == 2:
+                    screen = screen[np.newaxis, ...]
 
         if telem_parts:
             telemetry = np.concatenate(telem_parts, axis=0)
         else:
             telemetry = np.zeros(TELEMETRY_FEATURES, dtype=np.float32)
 
-        # Fail loudly on layout mismatch: silently padding/truncating here
-        # previously masked a wrong TELEMETRY_FEATURES constant and produced
-        # shards that were mostly zero padding.
-        if len(telemetry) != TELEMETRY_FEATURES:
+        if len(telemetry) < TELEMETRY_FEATURES:
+            pad_len = TELEMETRY_FEATURES - len(telemetry)
+            telemetry = np.pad(telemetry, (0, pad_len), mode="constant")
+        elif len(telemetry) > TELEMETRY_FEATURES:
             raise ValueError(
                 f"Environment produced {len(telemetry)} telemetry floats, "
-                f"expected TELEMETRY_FEATURES={TELEMETRY_FEATURES}. "
+                f"expected at most TELEMETRY_FEATURES={TELEMETRY_FEATURES}. "
                 "Check the env observation layout against core.config."
             )
 
+        if obs_type == "lidar":
+            assert lidar is not None
+            return {"lidar": lidar, "telemetry": telemetry}
+        assert screen is not None
+        return {"screen": screen, "telemetry": telemetry}
+
+    arr = np.asarray(obs)
+    if obs_type == "lidar":
+        from core.config import LIDAR_BEAMS
+
+        if arr.ndim >= 2:
+            lidar = arr[-1:].astype(np.float32)
+        elif arr.ndim == 1:
+            lidar = arr[np.newaxis, ...].astype(np.float32)
+        else:
+            lidar = np.zeros((1, LIDAR_BEAMS), dtype=np.float32)
         return {
-            "screen": screen,
-            "telemetry": telemetry,
+            "lidar": lidar,
+            "telemetry": np.zeros(TELEMETRY_FEATURES, dtype=np.float32),
         }
 
-    # Shape normalization supports raw numpy arrays directly passed to the environment
-    arr = np.asarray(obs)
     if arr.ndim >= 3:
         screen = arr[-1:].astype(np.uint8)
     elif arr.ndim == 2:

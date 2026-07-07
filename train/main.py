@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 from src.dataloader import DataLoader, SlidingWindowDataset
 from src.train import train
 
-from core import ConvEncoder, MLPPredictor, ViTEncoder
+from core import ConvEncoder, LidarEncoder, MLPPredictor, ViTEncoder
 
 # Anchor to the repo layout so the default works from any working directory.
 DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "core" / "config.yaml"
@@ -22,7 +22,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument(
-        "--encoder", choices=["vit", "conv"], default="vit", help="Encoder backbone"
+        "--encoder",
+        choices=["vit", "conv", "lidar"],
+        default="vit",
+        help="Encoder backbone",
     )
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=256)
@@ -48,11 +51,13 @@ def main() -> None:
         print(f"Warning: config {args.config} not found; using structured defaults")
     cfg = load_config(str(args.config))
 
+    obs_type = "lidar" if args.encoder == "lidar" else "screen"
     dataset = SlidingWindowDataset(
         data_dir=args.data_dir,
         history_len=IMG_HIST_LEN,
         rollout_len=args.rollout_len,
         discretize_actions=True,
+        obs_type=obs_type,
     )
     if len(dataset) == 0:
         raise SystemExit(f"No valid transitions found in {args.data_dir}")
@@ -86,6 +91,8 @@ def main() -> None:
 
     if args.encoder == "vit":
         encoder = ViTEncoder(cfg.encoder, key_enc)
+    elif args.encoder == "lidar":
+        encoder = LidarEncoder(cfg.encoder, key_enc)
     else:
         encoder = ConvEncoder(cfg.encoder, key_enc)
     predictor = MLPPredictor(cfg.predictor, key_pred)

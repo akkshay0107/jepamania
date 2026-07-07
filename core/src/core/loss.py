@@ -57,8 +57,11 @@ def _project_into_slices(
 
 
 def epps_pulley_1d(h: Float[Array, "batch"]) -> Float[Array, ""]:
-    # copied over from the le jepa repo
-    # below will be constant folded
+    """Epps-Pulley normality test statistic along a 1D projection slice.
+
+    Note: The trapezoidal integration grid and weights below depend only on
+    fixed constants and will be constant-folded by XLA during JIT compilation.
+    """
     knots = 17
     t_max = 3.0
     t = jnp.linspace(0.0, t_max, knots)
@@ -70,7 +73,6 @@ def epps_pulley_1d(h: Float[Array, "batch"]) -> Float[Array, ""]:
     phi = jnp.exp(-(t**2) / 2.0)
     weights = weights * phi
 
-    # empirical characteristic function
     x_t = h[:, None] * t[None, :]
     cos_mean = jnp.mean(jnp.cos(x_t), axis=0)
     sin_mean = jnp.mean(jnp.sin(x_t), axis=0)

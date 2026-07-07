@@ -14,14 +14,13 @@ def benchmark(func, args, num_warmup=10, num_runs=100):
         res = func(*args)
         jax.block_until_ready(res)
 
-    # Benchmark run
     latencies = []
     for _ in range(num_runs):
         start = time.perf_counter()
         res = func(*args)
         jax.block_until_ready(res)
         end = time.perf_counter()
-        latencies.append((end - start) * 1000.0)  # convert to ms
+        latencies.append((end - start) * 1000.0)
 
     return np.array(latencies)
 
