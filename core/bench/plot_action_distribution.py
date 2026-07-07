@@ -17,7 +17,7 @@ OUTPUT_PLOT = SCRIPT_DIR.parent / "out" / "action_distributions.png"
 #   [0]   speed
 #   [1]   gear
 #   [2]   rpm
-#   [3:6] act1  — most recent previous action (steer, gas, brake)
+#   [3:6] act1  — most recent previous action (gas, brake, steer)
 #   [6:9] act2  — action before that
 TELEM_ACT1_SLICE = slice(3, 6)
 
@@ -78,14 +78,14 @@ def load_gamepad_actions(data_dir: Path):
 
 
 def print_statistics(name: str, actions: np.ndarray):
-    """Prints basic summary statistics for steering, gas, and braking actions."""
+    """Prints basic summary statistics for gas, brake, and steering actions."""
     print(f"\nSummary Statistics for {name} (Total Frames: {len(actions)}):")
     headers = ["Input Channel", "Min", "Max", "Mean", "Std Dev"]
     h0, h1, h2, h3, h4 = headers
     print(f"{h0:<15} | {h1:>8} | {h2:>8} | {h3:>8} | {h4:>8}")
     print("-" * 55)
 
-    channels = ["Steering", "Gas", "Braking"]
+    channels = ["Gas", "Braking", "Steering"]
     for i, channel_name in enumerate(channels):
         val = actions[:, i]
         print(
@@ -95,23 +95,23 @@ def print_statistics(name: str, actions: np.ndarray):
 
 
 def plot_distributions(actions: np.ndarray, output_path: Path):
-    """Plots the histograms of steering, gas, and braking actions."""
+    """Plots the histograms of gas, brake, and steering actions."""
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.5), sharey=False)
 
-    axes[0].hist(actions[:, 0], bins=50, color="#2cb0c5", edgecolor="black", alpha=0.7)
-    axes[0].set_title("Steering Distribution")
-    axes[0].set_xlabel("Steer Value [-1.0, 1.0]")
+    axes[0].hist(actions[:, 0], bins=30, color="#3bba5c", edgecolor="black", alpha=0.7)
+    axes[0].set_title("Gas Pedal Distribution")
+    axes[0].set_xlabel("Gas Value [0.0, 1.0]")
     axes[0].set_ylabel("Frequency")
     axes[0].grid(True, linestyle="--", alpha=0.6)
 
-    axes[1].hist(actions[:, 1], bins=30, color="#3bba5c", edgecolor="black", alpha=0.7)
-    axes[1].set_title("Gas Pedal Distribution")
-    axes[1].set_xlabel("Gas Value [0.0, 1.0]")
+    axes[1].hist(actions[:, 1], bins=30, color="#f05454", edgecolor="black", alpha=0.7)
+    axes[1].set_title("Braking Distribution")
+    axes[1].set_xlabel("Brake Value [0.0, 1.0]")
     axes[1].grid(True, linestyle="--", alpha=0.6)
 
-    axes[2].hist(actions[:, 2], bins=30, color="#f05454", edgecolor="black", alpha=0.7)
-    axes[2].set_title("Braking Distribution")
-    axes[2].set_xlabel("Brake Value [0.0, 1.0]")
+    axes[2].hist(actions[:, 2], bins=50, color="#2cb0c5", edgecolor="black", alpha=0.7)
+    axes[2].set_title("Steering Distribution")
+    axes[2].set_xlabel("Steer Value [-1.0, 1.0]")
     axes[2].grid(True, linestyle="--", alpha=0.6)
 
     plt.suptitle(
@@ -140,7 +140,7 @@ def main():
 
     if telem_actions is not None:
         print_statistics(
-            "Telemetry act1 features (Indices 3-5: steer, gas, brake)", telem_actions
+            "Telemetry act1 features (Indices 3-5: gas, brake, steer)", telem_actions
         )
 
         diff = np.abs(actions - telem_actions)

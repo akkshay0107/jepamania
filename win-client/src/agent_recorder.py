@@ -110,9 +110,9 @@ class AgentCollector:
                 preprocessed_obs = obs_preprocessor(raw_obs)
                 action = actor.act_(preprocessed_obs, test=True)
                 action = np.asarray(action, dtype=np.float32)
-                action[0] = action[0] + noise()[0]
+                action[2] = action[2] + noise()[2]
                 action = action_filter(action)
-                action = action.astype(np.float32)
+                action = np.clip(action, -1.0, 1.0).astype(np.float32)
 
                 raw_next, _reward, terminated, truncated, info = env.step(action)
                 done = terminated or truncated

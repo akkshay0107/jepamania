@@ -32,7 +32,7 @@ GAS_BRAKE_VALUES_JAX = jnp.array(
 
 
 def discretize_action(continuous_action: Float[Array, "... 3"]) -> Int[Array, "..."]:
-    """Discretizes a continuous action [steer, gas, brake] into a flat integer index.
+    """Discretizes a continuous action [gas, brake, steer] into a flat integer index.
 
     Steering is snapped to the closest of 7 custom values:
         [-1.0, -0.5, -0.15, 0.0, 0.15, 0.5, 1.0]
@@ -48,13 +48,13 @@ def discretize_action(continuous_action: Float[Array, "... 3"]) -> Int[Array, ".
     and minimum Euclidean distance (L2 norm) for gas/brake.
 
     Args:
-        continuous_action: JAX Array of shape (..., 3) containing [steer, gas, brake].
+        continuous_action: JAX Array of shape (..., 3) containing [gas, brake, steer].
 
     Returns:
         JAX Array of shape (...) containing flat integer action indices in [0, 34].
     """
-    steer = continuous_action[..., 0]
-    gas_brake = continuous_action[..., 1:3]
+    gas_brake = continuous_action[..., 0:2]
+    steer = continuous_action[..., 2]
 
     steer_diffs = jnp.abs(steer[..., None] - STEER_VALUES_JAX)
     steer_bin = jnp.argmin(steer_diffs, axis=-1)
@@ -67,7 +67,7 @@ def discretize_action(continuous_action: Float[Array, "... 3"]) -> Int[Array, ".
 
 
 def to_continuous_action(discrete_action: Int[Array, "..."]) -> Float[Array, "... 3"]:
-    """Reconstructs a continuous action [steer, gas, brake] from a flat integer index.
+    """Reconstructs a continuous action [gas, brake, steer] from a flat integer index.
 
     Inverse mapping of discretize_action. Maps indices back to the exact
     optimal coordinate targets.
@@ -77,7 +77,7 @@ def to_continuous_action(discrete_action: Int[Array, "..."]) -> Float[Array, "..
             in [0, 34].
 
     Returns:
-        JAX Array of shape (..., 3) containing continuous actions [steer, gas, brake].
+        JAX Array of shape (..., 3) containing continuous actions [gas, brake, steer].
     """
     # Clamp to valid range [0, 34] to prevent JAX out-of-bounds indexing errors
     discrete_action = jnp.clip(discrete_action, 0, 34)
@@ -89,23 +89,23 @@ def to_continuous_action(discrete_action: Int[Array, "..."]) -> Float[Array, "..
     gas = gb_pair[..., 0]
     brake = gb_pair[..., 1]
 
-    return jnp.stack([steer, gas, brake], axis=-1)
+    return jnp.stack([gas, brake, steer], axis=-1)
 
 
 def discretize_action_np(continuous_action: np.ndarray) -> np.ndarray:
-    """Discretizes a continuous action [steer, gas, brake] into a flat integer index.
+    """Discretizes a continuous action [gas, brake, steer] into a flat integer index.
 
     NumPy implementation of discretize_action for client-side or CPU-only
     compatibility.
 
     Args:
-        continuous_action: NumPy array of shape (..., 3) containing [steer, gas, brake].
+        continuous_action: NumPy array of shape (..., 3) containing [gas, brake, steer].
 
     Returns:
         NumPy array of shape (...) containing flat integer action indices in [0, 34].
     """
-    steer = continuous_action[..., 0]
-    gas_brake = continuous_action[..., 1:3]
+    gas_brake = continuous_action[..., 0:2]
+    steer = continuous_action[..., 2]
 
     steer_diffs = np.abs(steer[..., None] - STEER_VALUES_NP)
     steer_bin = np.argmin(steer_diffs, axis=-1)
@@ -118,7 +118,7 @@ def discretize_action_np(continuous_action: np.ndarray) -> np.ndarray:
 
 
 def to_continuous_action_np(discrete_action: np.ndarray) -> np.ndarray:
-    """Reconstructs a continuous action [steer, gas, brake] from a flat integer index.
+    """Reconstructs a continuous action [gas, brake, steer] from a flat integer index.
 
     NumPy implementation of to_continuous_action for client-side or CPU-only
     compatibility.
@@ -128,7 +128,7 @@ def to_continuous_action_np(discrete_action: np.ndarray) -> np.ndarray:
             in [0, 34].
 
     Returns:
-        NumPy array of shape (..., 3) containing continuous actions [steer, gas, brake].
+        NumPy array of shape (..., 3) containing continuous actions [gas, brake, steer].
     """
     if not np.all((discrete_action >= 0) & (discrete_action < 35)):
         raise ValueError("Discrete action index out of bounds [0, 34]")
@@ -140,4 +140,4 @@ def to_continuous_action_np(discrete_action: np.ndarray) -> np.ndarray:
     gas = gb_pair[..., 0]
     brake = gb_pair[..., 1]
 
-    return np.stack([steer, gas, brake], axis=-1)
+    return np.stack([gas, brake, steer], axis=-1)

@@ -14,8 +14,8 @@ TELEMETRY_FEATURES: int = 9
 # Fixed TMRL Constants (TM2020LIDAR)
 LIDAR_BEAMS: int = 19
 
-# Steering [-1.0, 1.0] -> discretized into 7 bins
 # Gas / Brake -> discretized into 5 bins
+# Steering [-1.0, 1.0] -> discretized into 7 bins
 # so 35 distinct actions possible at any given moment of time
 NUM_ACTIONS: int = 35
 

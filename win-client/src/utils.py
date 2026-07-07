@@ -153,8 +153,7 @@ class AdaptiveActionFilter:
     Adaptive action filter for smoothing SAC outputs during data collection.
 
     Applies a deadzone around zero and an Adaptive Exponential Moving Average (EMA)
-    to the steering channel (channel 0), while leaving gas (channel 1) and brake
-    (channel 2) untouched for crisp pedal control.
+    to the steering channel (channel 2 in TMRL), leaving gas / brake untouched.
 
     If filtering is disabled in config, __call__ is a no-op returning the input action.
     """
@@ -182,7 +181,7 @@ class AdaptiveActionFilter:
         if not self.enabled:
             return action
 
-        raw_steer = float(action[0])
+        raw_steer = float(action[2])
         if -self.deadzone < raw_steer < self.deadzone:
             raw_steer = 0.0
 
@@ -199,7 +198,7 @@ class AdaptiveActionFilter:
         self.prev_steer = smooth_steer
 
         out_action = np.copy(action)
-        out_action[0] = smooth_steer
+        out_action[2] = smooth_steer
         return out_action
 
 
