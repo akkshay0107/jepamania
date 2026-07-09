@@ -39,6 +39,19 @@ _DEFAULTS = {
         # Number of completed episodes to record per HDF5 shard file.
         "episodes_per_shard": 50,
     },
+    "mpc": {
+        "checkpoint_path": None,
+        "value_head_path": None,
+        "encoder_type": "vit",
+        "planner_type": "cem",
+        "sequence_len": 10,
+        "num_samples": 128,
+        "num_iters": 3,
+        "num_elites": 16,
+        "beam_width": 16,
+        "record_rollouts": False,
+        "seed": 42,
+    },
 }
 
 yaml_path = BASE_DIR / "settings.yaml"

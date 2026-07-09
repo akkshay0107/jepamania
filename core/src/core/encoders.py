@@ -208,6 +208,7 @@ class ViTEncoder(eqx.Module):
 
 class ConvEncoder(eqx.Module):
     """A simpler model with convolutional backbone and late telemetry fusion."""
+
     conv1: eqx.nn.Conv2d
     conv2: eqx.nn.Conv2d
     conv3: eqx.nn.Conv2d

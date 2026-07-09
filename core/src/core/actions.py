@@ -117,23 +117,26 @@ def discretize_action_np(continuous_action: np.ndarray) -> np.ndarray:
     return steer_bin * 5 + gb_bin
 
 
-def to_continuous_action_np(discrete_action: np.ndarray) -> np.ndarray:
+def to_continuous_action_np(
+    discrete_action: np.ndarray | int | np.integer,
+) -> np.ndarray:
     """Reconstructs a continuous action [gas, brake, steer] from a flat integer index.
 
     NumPy implementation of to_continuous_action for client-side or CPU-only
     compatibility.
 
     Args:
-        discrete_action: NumPy array of shape (...) containing flat action indices
+        discrete_action: NumPy array or integer scalar containing flat action index
             in [0, 34].
 
     Returns:
         NumPy array of shape (..., 3) containing continuous actions [gas, brake, steer].
     """
-    if not np.all((discrete_action >= 0) & (discrete_action < 35)):
+    discrete_arr = np.asarray(discrete_action)
+    if not np.all((discrete_arr >= 0) & (discrete_arr < 35)):
         raise ValueError("Discrete action index out of bounds [0, 34]")
-    steer_bin = discrete_action // 5
-    gb_bin = discrete_action % 5
+    steer_bin = discrete_arr // 5
+    gb_bin = discrete_arr % 5
 
     steer = STEER_VALUES_NP[steer_bin]
     gb_pair = GAS_BRAKE_VALUES_NP[gb_bin]

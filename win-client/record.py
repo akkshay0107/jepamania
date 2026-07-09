@@ -1,4 +1,9 @@
-"""Entry point for Trackmania data collection on Windows."""
+"""
+Entry point for Trackmania data collection on Windows.
+
+Supports recording human gameplay via keyboard/gamepad or agent rollouts
+via a pretrained SAC policy.
+"""
 
 import argparse
 import logging

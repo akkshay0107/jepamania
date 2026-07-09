@@ -1,4 +1,4 @@
-from typing import Any, Dict, Protocol, runtime_checkable
+from typing import Any, Mapping, Protocol, runtime_checkable
 
 from jaxtyping import Array, Float, Int
 
@@ -11,7 +11,7 @@ class Encoder(Protocol):
     """
 
     def __call__(
-        self, observations: Dict[str, Float[Array, "..."]]
+        self, observations: Mapping[str, Any]
     ) -> Float[Array, "latent_dim"]: ...
 
 

@@ -63,6 +63,14 @@ class AsyncPlannerWrapper:
         if self._thread is not None:
             self._thread.join()
 
+    def reset(self):
+        """Resets planner buffers and internal state between episodes."""
+        with self._lock:
+            self._action_buffer.clear()
+            self._latest_obs = None
+            self._ticks_passed = 0
+            self._current_action = self.default_action
+
     def step(self, obs_dict: Dict[str, np.ndarray]) -> int:
         """
         O(1) real-time response.

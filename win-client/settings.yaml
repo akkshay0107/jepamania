@@ -21,5 +21,18 @@ episode_monitor:
   stuck_speed_kmh: 5.0 # If the car is below this speed for too long, reset
   stuck_window_frames: 80 # How many consecutive frames below stuck_speed_kmh (80 frames = 4s at 20Hz)
   max_frames_per_episode: 1800 # Hard reset limit per episode (1800 frames = 1.5 minutes at 20Hz)
-  warmup_frames: 20 # Initial unrecorded frames after a map loads
   episodes_per_shard: 50 # Number of episodes to save per file shard before starting a new file
+
+# Online MPC Deployment settings
+mpc:
+  checkpoint_path: null # Path to pretrained Sub-JEPA checkpoint (.eqx) e.g., checkpoints/subjepa_best.eqx
+  value_head_path: null # Optional path to pretrained MLPValueHead checkpoint (.eqx)
+  encoder_type: "vit"   # "vit", "conv", or "lidar"
+  planner_type: "cem"   # "cem", "beam", or "random"
+  sequence_len: 10
+  num_samples: 128
+  num_iters: 3
+  num_elites: 16
+  beam_width: 16
+  record_rollouts: false
+  seed: 42
