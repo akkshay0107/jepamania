@@ -1,5 +1,3 @@
-import platform
-
 import numpy as np
 from core.config import TELEMETRY_FEATURES
 
@@ -202,69 +200,3 @@ class AdaptiveActionFilter:
         return out_action
 
 
-# Runtime monkey-patching
-# Runs at import time as a side effect
-# TODO: fix this later if sticking with the monkey patch approach
-# to be more explicit and not as a import side effect.
-if platform.system() == "Windows":
-    try:
-        import time
-
-        import tmrl.custom.tm.utils.control_keyboard as ck
-        import win32gui
-        from tmrl.custom.tm.tm_gym_interfaces import TM2020Interface
-
-        # The default TM2020Interface get_obs_rew_terminated_info discards player input.
-        # Extract them here to preserve the actions required for model training.
-        def patched_get_obs_rew_terminated_info(self):
-            data, img = self.grab_data_and_img()
-            speed = np.array([data[0]], dtype="float32")
-            gear = np.array([data[9]], dtype="float32")
-            rpm = np.array([data[10]], dtype="float32")
-            rew, terminated = self.reward_function.compute_reward(
-                pos=np.array([data[2], data[3], data[4]])
-            )
-            self.img_hist.append(img)
-            imgs = np.array(list(self.img_hist))
-            obs = [speed, gear, rpm, imgs]
-            end_of_track = bool(data[8])
-
-            info = {"action": np.array([data[5], data[6], data[7]], dtype="float32")}
-
-            if end_of_track:
-                terminated = True
-                rew += self.finish_reward
-            rew += self.constant_penalty
-            rew = np.float32(rew)
-            return obs, rew, terminated, info
-
-        TM2020Interface.get_obs_rew_terminated_info = (
-            patched_get_obs_rew_terminated_info
-        )
-
-        # SendInput sends simulated keyboard events globally
-        # to the active focused window. We assert game window focus before running
-        # keyres to prevent key event leaks to the console host.
-        original_keyres = ck.keyres
-
-        def patched_keyres():
-            hwnd = win32gui.FindWindow(None, "Trackmania")
-            if hwnd != 0:
-                try:
-                    win32gui.SetForegroundWindow(hwnd)
-                except Exception:
-                    pass
-                time.sleep(0.05)
-                if win32gui.GetForegroundWindow() == hwnd:
-                    original_keyres()
-                else:
-                    import logging
-
-                    logging.warning("Trackmania window not focused. Reset key skipped.")
-
-        ck.keyres = patched_keyres
-
-    except Exception as e:
-        import logging
-
-        logging.warning(f"Failed to apply Windows TMRL patches: {e}")

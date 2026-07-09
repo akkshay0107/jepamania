@@ -8,6 +8,7 @@ autonomously using asynchronous trajectory optimization.
 import argparse
 import logging
 
+from src.env_patches import apply_data_collection_patches
 from src.mpc_driver import MPCDriver
 from src.settings import cfg
 
@@ -53,6 +54,8 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
     )
+
+    apply_data_collection_patches()
 
     logging.info("Initializing Sub-JEPA Real-Time MPC Driver...")
     if args.record_rollouts:

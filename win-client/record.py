@@ -9,6 +9,7 @@ import argparse
 import logging
 
 from src.agent_recorder import AgentCollector
+from src.env_patches import apply_data_collection_patches
 from src.human_recorder import HumanRecorder
 
 
@@ -33,6 +34,8 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
     )
+
+    apply_data_collection_patches()
 
     if args.mode == "human":
         logging.info("Initializing Human Play Recorder...")
