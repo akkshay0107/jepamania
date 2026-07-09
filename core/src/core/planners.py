@@ -6,8 +6,28 @@ import jax.numpy as jnp
 from jax.tree_util import Partial
 from jaxtyping import Array, Float, Int, PRNGKeyArray
 
+from core.actions import UNIT_TRANSITION_COST_MATRIX
 from core.config import NUM_ACTIONS
 from core.interfaces import Predictor
+
+
+def _compute_sequence_penalties(
+    action_seqs: Int[Array, "... sequence_len"],
+    smoothness_weight: float,
+    prev_action: Optional[Int[Array, ""]] = None,
+) -> Float[Array, "..."]:
+    if smoothness_weight <= 0.0:
+        return jnp.zeros(action_seqs.shape[:-1], dtype=jnp.float32)
+
+    cost_matrix = smoothness_weight * UNIT_TRANSITION_COST_MATRIX
+    transitions = cost_matrix[action_seqs[..., :-1], action_seqs[..., 1:]]
+    penalties = jnp.sum(transitions, axis=-1)
+
+    if prev_action is not None:
+        first_actions = action_seqs[..., 0]
+        penalties = penalties + cost_matrix[prev_action, first_actions]
+
+    return penalties
 
 
 class RandomShootingPlanner(eqx.Module):
@@ -20,6 +40,7 @@ class RandomShootingPlanner(eqx.Module):
     objective_fn: Callable[[Float[Array, "latent_dim"]], Float[Array, ""]]
     sequence_len: int
     num_samples: int
+    smoothness_weight: float = 0.0
 
     def _step_fn(
         self,
@@ -49,14 +70,20 @@ class RandomShootingPlanner(eqx.Module):
                 "RandomShootingPlanner requires a PRNGKey passed as 'key' in kwargs."
             )
 
+        prev_action: Optional[Int[Array, ""]] = kwargs.get("prev_action")
+
         action_seqs = jax.random.randint(
             key, (self.num_samples, self.sequence_len), minval=0, maxval=NUM_ACTIONS
         )
         rollout_wrapper = Partial(
             self._rollout_fn, current_latent_state=current_latent_state
         )
-
         scores = jax.vmap(rollout_wrapper)(action_seqs)
+        if self.smoothness_weight > 0.0:
+            penalties = _compute_sequence_penalties(
+                action_seqs, self.smoothness_weight, prev_action
+            )
+            scores = scores - penalties
         best_idx = jnp.argmax(scores)
         return action_seqs[best_idx]
 
@@ -74,6 +101,7 @@ class CEMPlanner(eqx.Module):
     num_samples: int
     num_elites: int
     alpha: float
+    smoothness_weight: float = 0.0
 
     def _step_fn(
         self,
@@ -98,6 +126,7 @@ class CEMPlanner(eqx.Module):
         iter_key: PRNGKeyArray,
         *,
         current_latent_state: Float[Array, "latent_dim"],
+        prev_action: Optional[Int[Array, ""]] = None,
     ) -> Tuple[Float[Array, "sequence_len NUM_ACTIONS"], Int[Array, "sequence_len"]]:
         action_seqs = jax.random.categorical(
             iter_key, logits, shape=(self.num_samples, self.sequence_len)
@@ -106,6 +135,11 @@ class CEMPlanner(eqx.Module):
             self._rollout_fn, current_latent_state=current_latent_state
         )
         scores = jax.vmap(rollout_wrapper)(action_seqs)
+        if self.smoothness_weight > 0.0:
+            penalties = _compute_sequence_penalties(
+                action_seqs, self.smoothness_weight, prev_action
+            )
+            scores = scores - penalties
 
         _, topk_indices = jax.lax.top_k(scores, self.num_elites)
         elites = action_seqs[topk_indices]
@@ -128,10 +162,14 @@ class CEMPlanner(eqx.Module):
         if key is None:
             raise ValueError("CEMPlanner requires a PRNGKey passed as 'key' in kwargs.")
 
+        prev_action: Optional[Int[Array, ""]] = kwargs.get("prev_action")
+
         init_logits = jnp.zeros((self.sequence_len, NUM_ACTIONS))
 
         cem_iter_wrapper = Partial(
-            self._cem_iter_fn, current_latent_state=current_latent_state
+            self._cem_iter_fn,
+            current_latent_state=current_latent_state,
+            prev_action=prev_action,
         )
 
         keys = jax.random.split(key, self.num_iters)
@@ -150,6 +188,7 @@ class BeamSearchPlanner(eqx.Module):
     objective_fn: Callable[[Float[Array, "latent_dim"]], Float[Array, ""]]
     sequence_len: int
     beam_width: int
+    smoothness_weight: float = 0.0
 
     def _expand_beam(
         self,
@@ -168,6 +207,7 @@ class BeamSearchPlanner(eqx.Module):
         ],
         step_idx: Int[Array, ""],
         actions_to_try: Int[Array, "num_actions"],
+        prev_action: Optional[Int[Array, ""]] = None,
     ) -> Tuple[
         Tuple[
             Float[Array, "beam_width latent_dim"],
@@ -175,12 +215,24 @@ class BeamSearchPlanner(eqx.Module):
         ],
         None,
     ]:
-        # The carry maintains the necessary state and the per step
-        # output is not needed. None returned in that slot to prevent
-        # memory alloc for per step scores.
         beam_states, beam_actions = carry
         expand_wrapper = Partial(self._expand_beam, actions_to_try=actions_to_try)
         next_states, new_scores = jax.vmap(expand_wrapper)(beam_states)
+
+        if self.smoothness_weight > 0.0:
+            cost_matrix = self.smoothness_weight * UNIT_TRANSITION_COST_MATRIX
+            prev_actions = jnp.where(
+                step_idx > 0,
+                beam_actions[:, step_idx - 1],
+                prev_action if prev_action is not None else 0,
+            )
+            should_penalize = (step_idx > 0) | (prev_action is not None)
+            step_penalties = jnp.where(
+                should_penalize,
+                cost_matrix[prev_actions[:, None], actions_to_try[None, :]],
+                0.0,
+            )
+            new_scores = new_scores - step_penalties
 
         # At step 0, all beam states are identical (root state).
         # Mask out beams 1..beam_width-1 so we only expand beam 0
@@ -207,15 +259,25 @@ class BeamSearchPlanner(eqx.Module):
         init_states = jnp.repeat(current_latent_state[None, :], self.beam_width, axis=0)
         init_actions = jnp.zeros((self.beam_width, self.sequence_len), dtype=jnp.int32)
 
-        actions_to_try = jnp.arange(NUM_ACTIONS)
-        scan_step = Partial(self._step_fn, actions_to_try=actions_to_try)
+        prev_action: Optional[Int[Array, ""]] = kwargs.get("prev_action")
 
-        (_, final_actions), _ = jax.lax.scan(
+        actions_to_try = jnp.arange(NUM_ACTIONS)
+        scan_step = Partial(
+            self._step_fn, actions_to_try=actions_to_try, prev_action=prev_action
+        )
+
+        (final_states, final_actions), _ = jax.lax.scan(
             scan_step,
             (init_states, init_actions),
             jnp.arange(self.sequence_len),
         )
 
-        # the TopK xla primitive guarantees decreasing order
-        # unlike the torch variant which uses quick select
-        return final_actions[0]
+        final_scores = jax.vmap(self.objective_fn)(final_states)
+        if self.smoothness_weight > 0.0:
+            penalties = _compute_sequence_penalties(
+                final_actions, self.smoothness_weight, prev_action
+            )
+            final_scores = final_scores - penalties
+
+        best_idx = jnp.argmax(final_scores)
+        return final_actions[best_idx]

@@ -144,3 +144,20 @@ def to_continuous_action_np(
     brake = gb_pair[..., 1]
 
     return np.stack([gas, brake, steer], axis=-1)
+
+
+def _compute_unit_transition_cost_matrix() -> Float[Array, "35 35"]:
+    """Computes normalized cost of transition from action to action across time steps"""
+    all_actions = to_continuous_action(jnp.arange(35))
+    gas_brake = all_actions[:, 0:2]
+    steer = all_actions[:, 2]
+
+    norm_steer_sq = jnp.square((steer[:, None] - steer[None, :]) / 2.0)
+    norm_gb_sq = (
+        jnp.sum(jnp.square(gas_brake[:, None, :] - gas_brake[None, :, :]), axis=-1)
+        / 2.0
+    )
+    return 0.8 * norm_steer_sq + 0.2 * norm_gb_sq
+
+
+UNIT_TRANSITION_COST_MATRIX = _compute_unit_transition_cost_matrix()
