@@ -17,24 +17,17 @@ class RandomShootingPlanner(eqx.Module):
     """
 
     predictor: Predictor
-    objective_fn: Callable[
-        [Float[Array, ""], Float[Array, "latent_dim"]], Float[Array, ""]
-    ]
+    objective_fn: Callable[[Float[Array, "latent_dim"]], Float[Array, ""]]
     sequence_len: int
     num_samples: int
 
     def _step_fn(
         self,
-        carry: Tuple[Float[Array, ""], Float[Array, "latent_dim"]],
+        latent: Float[Array, "latent_dim"],
         action: Int[Array, ""],
-    ) -> Tuple[Tuple[Float[Array, ""], Float[Array, "latent_dim"]], None]:
-        # The carry maintains the necessary state and the per step
-        # output is not needed. None returned in that slot to prevent
-        # memory alloc for per step scores.
-        score, latent = carry
+    ) -> Tuple[Float[Array, "latent_dim"], None]:
         next_state = self.predictor(latent, action)
-        next_score = self.objective_fn(score, next_state)
-        return (next_score, next_state), None
+        return next_state, None
 
     def _rollout_fn(
         self,
@@ -42,10 +35,8 @@ class RandomShootingPlanner(eqx.Module):
         current_latent_state: Float[Array, "latent_dim"],
     ) -> Float[Array, ""]:
         scan_step = Partial(self._step_fn)
-        (final_score, _), _ = jax.lax.scan(
-            scan_step, (jnp.array(0.0), current_latent_state), actions
-        )
-        return final_score
+        final_latent, _ = jax.lax.scan(scan_step, current_latent_state, actions)
+        return self.objective_fn(final_latent)
 
     def __call__(
         self,
@@ -77,9 +68,7 @@ class CEMPlanner(eqx.Module):
     """
 
     predictor: Predictor
-    objective_fn: Callable[
-        [Float[Array, ""], Float[Array, "latent_dim"]], Float[Array, ""]
-    ]
+    objective_fn: Callable[[Float[Array, "latent_dim"]], Float[Array, ""]]
     sequence_len: int
     num_iters: int
     num_samples: int
@@ -88,16 +77,11 @@ class CEMPlanner(eqx.Module):
 
     def _step_fn(
         self,
-        carry: Tuple[Float[Array, ""], Float[Array, "latent_dim"]],
+        latent: Float[Array, "latent_dim"],
         action: Int[Array, ""],
-    ) -> Tuple[Tuple[Float[Array, ""], Float[Array, "latent_dim"]], None]:
-        # jax.lax.scan expects the step function to return (new_carry, output).
-        # We only care about the final accumulated score and state, so we return None
-        # for the per-step output to avoid unnecessary memory allocation.
-        score, latent = carry
+    ) -> Tuple[Float[Array, "latent_dim"], None]:
         next_state = self.predictor(latent, action)
-        next_score = self.objective_fn(score, next_state)
-        return (next_score, next_state), None
+        return next_state, None
 
     def _rollout_fn(
         self,
@@ -105,10 +89,8 @@ class CEMPlanner(eqx.Module):
         current_latent_state: Float[Array, "latent_dim"],
     ) -> Float[Array, ""]:
         scan_step = Partial(self._step_fn)
-        (final_score, _), _ = jax.lax.scan(
-            scan_step, (jnp.array(0.0), current_latent_state), actions
-        )
-        return final_score
+        final_latent, _ = jax.lax.scan(scan_step, current_latent_state, actions)
+        return self.objective_fn(final_latent)
 
     def _cem_iter_fn(
         self,
@@ -165,22 +147,17 @@ class BeamSearchPlanner(eqx.Module):
     """
 
     predictor: Predictor
-    objective_fn: Callable[
-        [Float[Array, ""], Float[Array, "latent_dim"]], Float[Array, ""]
-    ]
+    objective_fn: Callable[[Float[Array, "latent_dim"]], Float[Array, ""]]
     sequence_len: int
     beam_width: int
 
     def _expand_beam(
         self,
         state: Float[Array, "latent_dim"],
-        current_score: Float[Array, ""],
         actions_to_try: Int[Array, "num_actions"],
     ) -> Tuple[Float[Array, "num_actions latent_dim"], Float[Array, "num_actions"]]:
         next_states = jax.vmap(self.predictor, in_axes=(None, 0))(state, actions_to_try)
-        new_scores = jax.vmap(self.objective_fn, in_axes=(None, 0))(
-            current_score, next_states
-        )
+        new_scores = jax.vmap(self.objective_fn)(next_states)
         return next_states, new_scores
 
     def _step_fn(
@@ -188,7 +165,6 @@ class BeamSearchPlanner(eqx.Module):
         carry: Tuple[
             Float[Array, "beam_width latent_dim"],
             Int[Array, "beam_width sequence_len"],
-            Float[Array, "beam_width"],
         ],
         step_idx: Int[Array, ""],
         actions_to_try: Int[Array, "num_actions"],
@@ -196,19 +172,23 @@ class BeamSearchPlanner(eqx.Module):
         Tuple[
             Float[Array, "beam_width latent_dim"],
             Int[Array, "beam_width sequence_len"],
-            Float[Array, "beam_width"],
         ],
         None,
     ]:
         # The carry maintains the necessary state and the per step
         # output is not needed. None returned in that slot to prevent
         # memory alloc for per step scores.
-        beam_states, beam_actions, beam_scores = carry
+        beam_states, beam_actions = carry
         expand_wrapper = Partial(self._expand_beam, actions_to_try=actions_to_try)
-        next_states, new_scores = jax.vmap(expand_wrapper)(beam_states, beam_scores)
+        next_states, new_scores = jax.vmap(expand_wrapper)(beam_states)
+
+        # At step 0, all beam states are identical (root state).
+        # Mask out beams 1..beam_width-1 so we only expand beam 0
+        mask = jnp.where(step_idx == 0, jnp.arange(self.beam_width) > 0, False)
+        new_scores = jnp.where(mask[:, None], -jnp.inf, new_scores)
 
         flat_scores = new_scores.flatten()
-        topk_scores, topk_indices = jax.lax.top_k(flat_scores, self.beam_width)
+        _, topk_indices = jax.lax.top_k(flat_scores, self.beam_width)
 
         beam_indices = topk_indices // NUM_ACTIONS
         action_indices = topk_indices % NUM_ACTIONS
@@ -217,7 +197,7 @@ class BeamSearchPlanner(eqx.Module):
         new_beam_actions = beam_actions[beam_indices]
         new_beam_actions = new_beam_actions.at[:, step_idx].set(action_indices)
 
-        return (new_beam_states, new_beam_actions, topk_scores), None
+        return (new_beam_states, new_beam_actions), None
 
     def __call__(
         self,
@@ -226,17 +206,16 @@ class BeamSearchPlanner(eqx.Module):
     ) -> Int[Array, "sequence_len"]:
         init_states = jnp.repeat(current_latent_state[None, :], self.beam_width, axis=0)
         init_actions = jnp.zeros((self.beam_width, self.sequence_len), dtype=jnp.int32)
-        init_scores = jnp.full((self.beam_width,), -jnp.inf)
-        init_scores = init_scores.at[0].set(0.0)
 
         actions_to_try = jnp.arange(NUM_ACTIONS)
         scan_step = Partial(self._step_fn, actions_to_try=actions_to_try)
 
-        (final_states, final_actions, final_scores), _ = jax.lax.scan(
+        (_, final_actions), _ = jax.lax.scan(
             scan_step,
-            (init_states, init_actions, init_scores),
+            (init_states, init_actions),
             jnp.arange(self.sequence_len),
         )
 
-        best_beam_idx = jnp.argmax(final_scores)
-        return final_actions[best_beam_idx]
+        # the TopK xla primitive guarantees decreasing order
+        # unlike the torch variant which uses quick select
+        return final_actions[0]

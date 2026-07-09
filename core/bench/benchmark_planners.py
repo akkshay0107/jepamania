@@ -36,8 +36,8 @@ def main():
     val_cfg = ValueHeadConfig()
     value_head = MLPValueHead(val_cfg, key_val)
 
-    # Pure value-guided objective: just use the final predicted value
-    def objective_fn(score, latent):
+    # Pure value-guided objective: just use the predicted value
+    def objective_fn(latent):
         return value_head(latent)
 
     latent_state = jax.random.normal(key_plan, (pred_cfg.latent_dim,))

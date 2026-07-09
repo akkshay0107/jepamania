@@ -136,7 +136,8 @@ class MPCDriver:
             config_path=config_path,
             seed=cfg.mpc.seed,
         )
-        self.objective_fn = make_value_objective_fn(self.value_head)
+
+        self.objective_fn = self.value_head
 
         self.planner = self._build_planner()
         self.async_wrapper = AsyncPlannerWrapper(
