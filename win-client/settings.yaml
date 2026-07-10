@@ -18,7 +18,7 @@ agent:
 
 # Episode settings
 episode_monitor:
-  stuck_speed_kmh: 5.0 # If the car is below this speed for too long, reset
+  stuck_speed_kmh: 3.0 # If the car is below this speed for too long, reset
   stuck_window_frames: 80 # How many consecutive frames below stuck_speed_kmh (80 frames = 4s at 20Hz)
   max_frames_per_episode: 1800 # Hard reset limit per episode (1800 frames = 1.5 minutes at 20Hz)
   episodes_per_shard: 50 # Number of episodes to save per file shard before starting a new file

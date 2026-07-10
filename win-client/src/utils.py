@@ -1,3 +1,5 @@
+import platform
+
 import numpy as np
 from core.config import TELEMETRY_FEATURES
 
@@ -200,3 +202,32 @@ class AdaptiveActionFilter:
         return out_action
 
 
+def get_tmrl_env():
+    """Return the TMRL environment if running on Windows."""
+    if platform.system() != "Windows":
+        raise RuntimeError(
+            "TMRL gymnasium environment can only be instantiated on Windows systems."
+        )
+    import tmrl  # type: ignore[import-not-found]
+
+    return tmrl.get_environment()
+
+
+def get_tmrl_obs_preprocessor():
+    """Return the default TMRL observation preprocessor if running on Windows."""
+    if platform.system() != "Windows":
+        raise RuntimeError(
+            "TMRL observation preprocessor can only be accessed on Windows systems."
+        )
+    import tmrl.config.config_objects as cfg_obj  # type: ignore[import-not-found]
+
+    return cfg_obj.OBS_PREPROCESSOR
+
+
+def get_tmrl_policy_class():
+    """Return the default TMRL POLICY class if running on Windows."""
+    if platform.system() != "Windows":
+        raise RuntimeError("TMRL policy class can only be accessed on Windows systems.")
+    import tmrl.config.config_objects as cfg_obj  # type: ignore[import-not-found]
+
+    return cfg_obj.POLICY

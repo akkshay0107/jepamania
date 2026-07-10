@@ -14,7 +14,6 @@ from typing import Optional
 import equinox as eqx
 import jax
 import numpy as np
-import tmrl
 from core.actions import to_continuous_action_np
 from core.async_planner import AsyncPlannerWrapper
 from core.config import load_config
@@ -24,7 +23,7 @@ from core.interfaces import Encoder, Predictor
 from core.planners import BeamSearchPlanner, CEMPlanner, RandomShootingPlanner
 from src.data_writer import HDF5Writer
 from src.settings import cfg
-from src.utils import obs_to_dict
+from src.utils import get_tmrl_env, obs_to_dict
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -188,7 +187,7 @@ class MPCDriver:
         return Path(cfg.data_output_dir) / f"mpc_rollouts_{timestamp}.h5"
 
     def run(self) -> None:
-        env = tmrl.get_environment()
+        env = get_tmrl_env()
 
         if cfg.mpc.record_rollouts:
             self.writer = HDF5Writer(self._make_session_path(), obs_type=self.obs_type)

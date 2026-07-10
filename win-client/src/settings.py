@@ -29,7 +29,7 @@ _DEFAULTS = {
     },
     "episode_monitor": {
         # Speed (km/h) below which the car is considered stuck.
-        "stuck_speed_kmh": 5.0,
+        "stuck_speed_kmh": 3.0,
         # Consecutive frames all below stuck_speed_kmh required to trigger reset.
         "stuck_window_frames": 80,
         # Hard cap on frames per episode (~90 s at 20 Hz).

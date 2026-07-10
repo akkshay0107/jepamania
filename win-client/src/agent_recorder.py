@@ -4,11 +4,16 @@ from collections import deque
 from pathlib import Path
 
 import numpy as np
-import tmrl
-import tmrl.config.config_objects as cfg_obj
 from src.data_writer import HDF5Writer
 from src.settings import cfg
-from src.utils import AdaptiveActionFilter, OUNoise, obs_to_dict
+from src.utils import (
+    AdaptiveActionFilter,
+    OUNoise,
+    get_tmrl_env,
+    get_tmrl_obs_preprocessor,
+    get_tmrl_policy_class,
+    obs_to_dict,
+)
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -34,7 +39,7 @@ def load_actor(path_str: str | None, observation_space, action_space):
     #   - grayscale images  → SquashedGaussianVanillaCNNActor
     #   - color images      → SquashedGaussianVanillaColorCNNActor
     #   - lidar             → SquashedGaussianMLPActor
-    policy_cls = cfg_obj.POLICY
+    policy_cls = get_tmrl_policy_class()
     actor = policy_cls(observation_space=observation_space, action_space=action_space)
     actor = actor.load(str(path), device="cpu")
     logging.info(f"Policy: loaded {policy_cls.__name__} from {path.name}")
@@ -55,7 +60,7 @@ class AgentCollector:
         return Path(cfg.data_output_dir) / f"agent_{timestamp}.h5"
 
     def run(self) -> None:
-        env = tmrl.get_environment()
+        env = get_tmrl_env()
         writer = HDF5Writer(self._session_path())
 
         actor = load_actor(
@@ -64,9 +69,9 @@ class AgentCollector:
             env.action_space,
         )
 
-        # tmrl --test uses cfg_obj.OBS_PREPROCESSOR, which is
+        # tmrl --test uses OBS_PREPROCESSOR, which is
         # obs_preprocessor_tm_act_in_obs for the full (non-lidar) env.
-        obs_preprocessor = cfg_obj.OBS_PREPROCESSOR
+        obs_preprocessor = get_tmrl_obs_preprocessor()
 
         logging.info("Starting collection. Make sure you are loaded into the map.")
         raw_obs, _info = env.reset()
@@ -120,7 +125,12 @@ class AgentCollector:
 
                 reason = None
                 if done:
-                    reason = "done"
+                    if info.get("end_of_track", False):
+                        reason = "done"
+                    elif info.get("teleported", False):
+                        reason = "respawn"
+                    else:
+                        reason = "truncated"
                 elif (
                     warmup_counter >= cfg.episode_monitor.warmup_frames
                     and len(speed_window) == speed_window.maxlen

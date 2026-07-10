@@ -1,3 +1,5 @@
+from typing import Any, Mapping
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
@@ -185,7 +187,7 @@ class ViTEncoder(eqx.Module):
             key=key_pool,
         )
 
-    def __call__(self, observations: dict[str, Array]) -> Float[Array, "latent_dim"]:
+    def __call__(self, observations: Mapping[str, Any]) -> Float[Array, "latent_dim"]:
         screen = observations["screen"]
         telemetry = observations["telemetry"]
 
@@ -249,7 +251,7 @@ class ConvEncoder(eqx.Module):
 
     def __call__(
         self,
-        observations: dict[str, Array],
+        observations: Mapping[str, Any],
     ) -> Float[Array, "latent_dim"]:
         screen = observations["screen"]
         telemetry = observations["telemetry"]
@@ -305,7 +307,7 @@ class LidarEncoder(eqx.Module):
 
     def __call__(
         self,
-        observations: dict[str, Array],
+        observations: Mapping[str, Any],
     ) -> Float[Array, "latent_dim"]:
         lidar = observations.get("lidar")
         if lidar is None or lidar.size != IMG_HIST_LEN * LIDAR_BEAMS:

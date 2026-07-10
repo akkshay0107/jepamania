@@ -1,12 +1,12 @@
 import datetime
 import logging
+from collections import deque
 from pathlib import Path
 
 import numpy as np
-import tmrl
 from src.data_writer import HDF5Writer
 from src.settings import cfg
-from src.utils import obs_to_dict
+from src.utils import get_tmrl_env, obs_to_dict
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -39,7 +39,7 @@ class HumanRecorder:
         }
 
     def run(self) -> None:
-        env = tmrl.get_environment()
+        env = get_tmrl_env()
 
         self.writer = HDF5Writer(self._make_session_path())
         self.writer.new_episode(self._default_metadata())
@@ -48,7 +48,9 @@ class HumanRecorder:
         obs_dict = obs_to_dict(raw_obs)
 
         warmup_counter = 0
+        speed_window = deque(maxlen=cfg.episode_monitor.stuck_window_frames)
         frame_count = 0
+        completed_episodes = 0
         dummy_action = np.zeros(cfg.action_dim, dtype=np.float32)
 
         logging.info("Recording STARTED. Make inputs in-game. Press Ctrl-C to stop.")
@@ -58,6 +60,8 @@ class HumanRecorder:
                 raw_next, _reward, terminated, truncated, info = env.step(dummy_action)
                 next_obs_dict = obs_to_dict(raw_next)
                 done = terminated or truncated
+                speed = float(np.asarray(raw_next[0]).flat[0])
+                speed_window.append(speed)
 
                 # Validate Openplanet input streaming on the first captured step
                 if frame_count == 0 and warmup_counter == 0:
@@ -73,21 +77,35 @@ class HumanRecorder:
 
                 reason = None
                 if done:
-                    reason = "done"
+                    if info.get("end_of_track", False):
+                        reason = "done"
+                    elif info.get("teleported", False):
+                        reason = "respawn"
+                    else:
+                        reason = "truncated"
+                elif (
+                    warmup_counter >= cfg.episode_monitor.warmup_frames
+                    and len(speed_window) == speed_window.maxlen
+                    and max(speed_window) < cfg.episode_monitor.stuck_speed_kmh
+                ):
+                    reason = "stuck"
 
                 if reason:
+                    completed_episodes += 1
                     if self.writer is not None:
                         # Episode ended -> record boundary
                         # and continue in same session file.
                         self.writer.end_episode(termination=reason)
                         self.writer.new_episode(self._default_metadata())
-                        logging.info(
-                            "Episode ended. Starting new episode in same session."
-                        )
+                    logging.info(
+                        f"Episode {completed_episodes} completed ({reason}). "
+                        "Starting new episode."
+                    )
 
                     raw_obs, _info = env.reset()
                     obs_dict = obs_to_dict(raw_obs)
                     warmup_counter = 0
+                    speed_window.clear()
                     frame_count = 0
                     continue
 
