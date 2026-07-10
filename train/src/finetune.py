@@ -1,3 +1,4 @@
+"""RL fine-tuning pipeline for joint adaptation of Sub-JEPA models and value head."""
 # ruff: noqa: E402
 
 import argparse
@@ -212,6 +213,28 @@ def train_rl(
     seed: int = 42,
     obs_type: str = "screen",
 ) -> RLModels:
+    """Executes cyclic RL fine-tuning for Sub-JEPA models and value head.
+
+    Arguments:
+      data_dir: Path to rollout or bootstrap HDF5 dataset directory
+      ssl_checkpoint: Path to pretrained Sub-JEPA SSL Equinox checkpoint
+      output_dir: Destination path for saving fine-tuned checkpoints
+      value_head_checkpoint: Optional path to warm-started value head checkpoint
+      warmup_epochs: Number of value head warmup epochs before joint fine-tuning
+      joint_epochs: Number of epochs for joint encoder-predictor-value fine-tuning
+      gamma: Discount factor for K-step return value estimation
+      lr_warmup: Learning rate for value head warmup phase
+      lr_enc: Learning rate for Sub-JEPA encoder and predictor during joint tuning
+      lr_val: Learning rate for value head during joint tuning
+      value_weight: Loss weighting factor applied to value head Huber loss
+      batch_size: Transition batch size for dataloader
+      num_workers: Background prefetching worker count
+      seed: Random seed for dataset shuffling and initialization
+      obs_type: Observation modality ('screen' or 'lidar')
+
+    Returns:
+      Tuple containing fine-tuned (encoder, predictor, value_head) Equinox models
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     key = jax.random.PRNGKey(seed)
 

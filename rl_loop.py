@@ -133,6 +133,7 @@ def main() -> None:
                 logging.info("[Iteration 0] Skipping bootstrap training step.")
                 current_subjepa = iter_ckpt_dir / "rl_joint_latest_subjepa.eqx"
                 current_valhead = iter_ckpt_dir / "rl_joint_latest_value_head.eqx"
+                assert current_valhead is not None
                 if not args.dry_run and (
                     not current_subjepa.exists() or not current_valhead.exists()
                 ):

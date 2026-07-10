@@ -12,6 +12,7 @@ Act as an adversarial logic tracer to find flaws, performance issues, and logica
 - **Assumption Checking:** Challenge design and implementation assumptions (e.g., edge cases in action-conditioning, latency assumptions).
 - **Static Profiling:** Spot potential performance bottlenecks (e.g., unnecessary data copies, missing `jax.vmap`, blocking I/O). Benchmarking can be done by running a test script in the `scratch` directory using `uv`.
 - **Inconsistency Detection:** Ensure consistency across modules (e.g., action space definitions/dimensions shared between `core` and `win-client`).
+- **Evidence-Based Verification:** Back all claims with verifiable evidence directly from the source code (file paths and line numbers), simple traces, or external references. Do not offer unverified claims.
 
 ## Expected Output
 Review without directly editing code. Generate a critical review report detailing:

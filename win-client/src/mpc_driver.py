@@ -112,6 +112,17 @@ class MPCDriver:
         output_dir: Optional[str | Path] = None,
         max_episodes: Optional[int] = None,
     ) -> None:
+        """Initializes real-time MPC driver with Sub-JEPA models and value head.
+
+        Arguments:
+          checkpoint_path: Path to Sub-JEPA pretrained Equinox checkpoint
+          value_head_path: Path to learned MLPValueHead Equinox checkpoint
+          config_path: Optional custom path to model configuration yaml
+          encoder_type: Encoder modality ('screen', 'lidar', or 'conv')
+          planner_type: Trajectory planning algorithm ('cem', 'beam', or 'random')
+          output_dir: Output directory for recorded rollout HDF5 files
+          max_episodes: Maximum number of rollout episodes to complete before stopping
+        """
         self.output_dir = (
             Path(output_dir) if output_dir else Path("win-client/data/rl/rollouts")
         )

@@ -220,23 +220,25 @@ class SlidingWindowDataset:
         telem_ds = f["observations/telemetry"]
         actions_ds = f["actions"]
 
-        obs_stack_t = self._get_history_stack(obs_ds, local_t, frame_start)  # type: ignore[arg-type]
+        obs_stack_t = self._get_history_stack(
+            obs_ds, local_t, frame_start  # pyright: ignore[reportArgumentType]
+        )
         obs_stack_target = self._get_history_stack(
-            obs_ds,
+            obs_ds,  # pyright: ignore[reportArgumentType]
             local_t + self.K,
-            frame_start,  # type: ignore[arg-type]
+            frame_start,
         )
 
         telem_slice = np.asarray(
-            telem_ds[local_t : local_t + self.K + 1],  # type: ignore[index]
+            telem_ds[local_t : local_t + self.K + 1],  # pyright: ignore[reportIndexIssue]
             dtype=np.float32,
         )
         telemetry_t = telem_slice[0]
         telemetry_target = telem_slice[-1]
 
         actions_seq = np.asarray(
-            actions_ds[local_t : local_t + self.K],
-            dtype=np.float32,  # type: ignore[index]
+            actions_ds[local_t : local_t + self.K],  # pyright: ignore[reportIndexIssue]
+            dtype=np.float32,
         )
         if self.discretize_actions:
             actions_seq = discretize_action_np(actions_seq)
@@ -251,9 +253,10 @@ class SlidingWindowDataset:
 
         if self.load_rewards:
             if "rewards" in f:
+                rewards_ds = f["rewards"]
                 sample["rewards_seq"] = np.asarray(
-                    f["rewards"][local_t : local_t + self.K],
-                    dtype=np.float32,  # type: ignore[index]
+                    rewards_ds[local_t : local_t + self.K],  # pyright: ignore[reportIndexIssue]
+                    dtype=np.float32,
                 )
             else:
                 sample["rewards_seq"] = np.zeros(self.K, dtype=np.float32)

@@ -1,3 +1,5 @@
+"""Visual (ViT and CNN) and LiDAR observation encoders for JEPA latent embeddings."""
+
 from typing import Any, Mapping
 
 import equinox as eqx

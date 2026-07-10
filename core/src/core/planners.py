@@ -215,6 +215,17 @@ class BeamSearchPlanner(eqx.Module):
         ],
         None,
     ]:
+        """Performs a single step of beam expansion and pruning across candidates.
+
+        Arguments:
+          carry: Tuple of current beam latent states and accumulated action sequences
+          step_idx: Current planning horizon step index
+          actions_to_try: Array of candidate discrete actions to evaluate
+          prev_action: Optional previous action for smoothness penalty calculation
+
+        Returns:
+          Updated (beam_states, beam_actions) carry tuple and empty scan output
+        """
         beam_states, beam_actions = carry
         expand_wrapper = Partial(self._expand_beam, actions_to_try=actions_to_try)
         next_states, new_scores = jax.vmap(expand_wrapper)(beam_states)

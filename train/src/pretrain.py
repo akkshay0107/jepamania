@@ -177,6 +177,23 @@ def train(
     With `resume=True`, weights, optimizer state, and projectors are restored
     from the rolling files and epoch numbering continues from the highest
     existing epoch checkpoint; `num_epochs` more epochs are then trained.
+
+    Arguments:
+      models: Tuple containing (encoder, predictor) Equinox modules
+      dataloader: Iterable yielding transition batches
+      latent_dim: Dimensionality of latent embedding representation
+      loss_cfg: Loss configuration specifying subspace and slice parameters
+      num_epochs: Total number of pretraining epochs to run
+      learning_rate: Optimizer learning rate
+      key: PRNG key for projector initialization
+      checkpoint_dir: Directory path for saving output checkpoints
+      log_every: Frequency of logging metrics to stdout and wandb
+      resume: Flag indicating whether to resume from existing checkpoints
+      val_dataloader: Optional validation dataloader for evaluation
+      config_dict: Optional dictionary of hyperparameters logged to wandb
+
+    Returns:
+      Trained (encoder, predictor) Equinox model tuple
     """
     checkpoint_dir = Path(checkpoint_dir)
 

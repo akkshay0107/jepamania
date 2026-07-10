@@ -32,19 +32,34 @@ NOTE: Do not apply this to any library source code that exists in the virtual en
   - Format code files: `uv run ruff format .`
 - **Type Checking (Pyright):** Use pyright to verify type annotations.
   - Run type checking: `uv run pyright .`
-  - Go over all the errors and warnings that it provides. If they are meaningful and can be fixed easily, make the necessary edits to fix them. If they are harmless and tedious to fix, prefer using comments to ignore them and note them down in your response in case the warning is relevant in the future.
+  - Go over all the errors and warnings that it provides. If they point to real logic or safety bugs, make the necessary code edits to fix them. For simple or harmless type checking issues (e.g., union return types from external libraries like `h5py` or minor attribute/indexing mismatches), prefer using `# pyright: ignore[...]` or `# type: ignore` comments instead of verbose runtime `typing.cast(...)` wrapper calls. Note ignored issues down in your response in case the warning is relevant in the future.
 
 ## 4. Commenting Style Guideline
 
-- **Do not explain the obvious**: Comments must provide non-trivial information or clarifications that are not directly observable from reading the code itself.
-- **Prefer self-documenting code**: Use descriptive variable/function/class names rather than comments explaining ambiguous naming conventions.
-- **Explain the "Why," not the "What"**: Comments must explain *why* a block of code exists or why a specific approach was taken, rather than *what* the code does. Writing comments detailing *what* the code does is only permitted if the implementation is highly complex/obscured.
-- **Structure code cleanly**: Avoid using numbered lists or markdown-style section headers inside comment blocks. The code structure must be self-explanatory without these markers.
-- **Purity & Non-discretion**: These rules are mandatory requirements of the codebase auditing process. Every audited file must be scanned specifically for comment-style violations.
+These rules are mandatory requirements of the codebase auditing process. Every audited file must be scanned specifically for comment-style violations.
+
+- **Do not explain the obvious:** Comments must provide non-trivial information or clarifications that are not directly observable from reading the code itself.
+- **Prefer self-documenting code:** Use descriptive variable/function/class names rather than comments explaining ambiguous naming conventions.
+- **Explain the "Why," not the "What":** Comments must explain *why* a block of code exists or why a specific approach was taken, rather than *what* the code does. Writing comments detailing *what* the code does is only permitted if the implementation is highly complex/obscured.
+- **Structure code cleanly:** Avoid using numbered lists or markdown-style section headers inside comment blocks. The code structure must be self-explanatory without these markers.
+- **Module Docstrings for Large Files:** Each large file (> 300 lines of code) that handles multiple functionalities must have a top-level module docstring briefly explaining the objective of the file and what it handles.
+- **Concise Docstrings for Small Functions:** Small functions should be named in a self-descriptive manner. If additional context is needed, include a brief one-line docstring.
+- **Structured Docstrings for Large Functions:** Every large function (> 50 lines of code) that accepts multiple parameters must include a structured docstring in the following format:
+
+```python
+"""<Brief Description of function>
+
+Arguments:
+  <one line brief for each argument>
+
+Returns:
+  <description of what the function returns>
+"""
+```
 
 ## Expected Workflow
 
-1. Target target files for audit.
+1. Identify target files for audit.
 2. Perform lint/type checks as specified in Section 3.
 3. Scan the code specifically for comment-style compliance against the strict rules in Section 4.
 4. Generate a comprehensive itemized list of JAX purity, Python performance, type safety, and commenting style violations.
