@@ -9,7 +9,6 @@ AsyncPlannerWrapper for delay-compensated asynchronous trajectory optimization.
 import argparse
 import datetime
 import logging
-from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -227,48 +226,41 @@ class MPCDriver:
         raw_obs, _info = env.reset()
         self.async_wrapper.start()
 
-        warmup_counter = 0
-        speed_window = deque(maxlen=cfg.episode_monitor.stuck_window_frames)
-        frame_count = 0
         completed_episodes = 0
 
         try:
             while True:
-                obs_dict = obs_to_dict(raw_obs, obs_type=self.obs_type)
-                discrete_action = self.async_wrapper.step(obs_dict)
+                planner_obs = obs_to_dict(
+                    raw_obs, obs_type=self.obs_type, keep_history=True
+                )
+                rec_obs = obs_to_dict(
+                    raw_obs, obs_type=self.obs_type, keep_history=False
+                )
+                discrete_action = self.async_wrapper.step(planner_obs)
                 continuous_action = to_continuous_action_np(discrete_action).astype(
                     np.float32
                 )
 
-                raw_next, _reward, terminated, truncated, _info = env.step(
+                raw_next, reward, terminated, truncated, info = env.step(
                     continuous_action
                 )
                 done = terminated or truncated
-                speed = float(np.asarray(raw_next[0]).flat[0])
-                if warmup_counter >= cfg.episode_monitor.warmup_frames:
-                    speed_window.append(speed)
 
-                reason = None
+                if self.writer is not None:
+                    self.writer.append(rec_obs, continuous_action, reward=float(reward))
+
+                raw_obs = raw_next
+
                 if done:
-                    reason = "done"
-                elif (
-                    warmup_counter >= cfg.episode_monitor.warmup_frames
-                    and len(speed_window) == speed_window.maxlen
-                    and max(speed_window) < cfg.episode_monitor.stuck_speed_kmh
-                ):
-                    reason = "stuck"
-                elif (
-                    warmup_counter >= cfg.episode_monitor.warmup_frames
-                    and frame_count >= cfg.episode_monitor.max_frames_per_episode
-                ):
-                    reason = "frame_budget"
-
-                if reason:
                     completed_episodes += 1
-                    logging.info(
-                        f"Episode {completed_episodes} ended via reason: {reason}"
+                    reason = info.get(
+                        "termination_reason", "truncated" if truncated else "done"
                     )
-                    if self.writer is not None and frame_count > 0:
+                    logging.info(
+                        f"Episode {completed_episodes} ended via reason: {reason} "
+                        f"(terminal reward: {float(reward):.2f})"
+                    )
+                    if self.writer is not None:
                         self.writer.end_episode(termination=reason)
 
                     if (
@@ -301,25 +293,8 @@ class MPCDriver:
                             }
                         )
 
-                    warmup_counter = 0
-                    frame_count = 0
-                    speed_window.clear()
                     raw_obs, _info = env.reset()
                     self.async_wrapper.reset()
-                    continue
-
-                if warmup_counter < cfg.episode_monitor.warmup_frames:
-                    warmup_counter += 1
-                    raw_obs = raw_next
-                    continue
-
-                if self.writer is not None:
-                    self.writer.append(
-                        obs_dict, continuous_action, reward=float(_reward)
-                    )
-
-                raw_obs = raw_next
-                frame_count += 1
 
         except KeyboardInterrupt:
             logging.info("KeyboardInterrupt received. Shutting down MPC driver.")

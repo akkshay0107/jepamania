@@ -20,6 +20,11 @@ LIDAR_BEAMS: int = 19
 NUM_ACTIONS: int = 35
 LATENT_DIM: int = 192
 
+# In TMRL Trackmania (20 FPS), max progress reward per step is ~10.0 at top speed.
+# Fixed terminal penalty for getting stuck or exceeding max frames is 10x in negative.
+MAX_STEP_REWARD: float = 10.0
+FAILURE_PENALTY: float = -100.0
+
 
 @dataclass
 class TransformerConfig:

@@ -1,6 +1,5 @@
 import datetime
 import logging
-from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -105,9 +104,6 @@ class AgentCollector:
             }
         )
 
-        warmup_counter = 0
-        speed_window = deque(maxlen=cfg.episode_monitor.stuck_window_frames)
-        frame_count = 0
         completed_episodes = 0
 
         try:
@@ -119,40 +115,23 @@ class AgentCollector:
                 action = action_filter(action)
                 np.clip(action, [0.0, 0.0, -1.0], [1.0, 1.0, 1.0], out=action)
 
-                raw_next, _reward, terminated, truncated, info = env.step(action)
+                raw_next, reward, terminated, truncated, info = env.step(action)
                 done = terminated or truncated
-                speed = float(np.asarray(raw_next[0]).flat[0])
 
-                reason = None
+                obs_dict = obs_to_dict(raw_next)
+                writer.append(obs_dict, action, reward=float(reward))
+                raw_obs = raw_next
+
                 if done:
-                    if info.get("end_of_track", False):
-                        reason = "done"
-                    elif info.get("teleported", False):
-                        reason = "respawn"
-                    else:
-                        reason = "truncated"
-                elif (
-                    warmup_counter >= cfg.episode_monitor.warmup_frames
-                    and len(speed_window) == speed_window.maxlen
-                    and max(speed_window) < cfg.episode_monitor.stuck_speed_kmh
-                ):
-                    reason = "stuck"
-                elif (
-                    warmup_counter >= cfg.episode_monitor.warmup_frames
-                    and frame_count >= cfg.episode_monitor.max_frames_per_episode
-                ):
-                    reason = "frame_budget"
-
-                if reason:
+                    reason = info.get(
+                        "termination_reason", "truncated" if truncated else "done"
+                    )
                     writer.end_episode(termination=reason)
                     completed_episodes += 1
                     logging.info(
-                        f"Episode {completed_episodes} ended via reason: {reason}"
+                        f"Episode {completed_episodes} ended via reason: {reason} "
+                        f"(terminal reward: {float(reward):.2f})"
                     )
-
-                    frame_count = 0
-                    speed_window.clear()
-                    warmup_counter = 0
 
                     raw_obs, _info = env.reset()
                     noise.reset()
@@ -174,18 +153,6 @@ class AgentCollector:
                             "timestamp": datetime.datetime.now().isoformat(),
                         }
                     )
-                    continue
-
-                if warmup_counter < cfg.episode_monitor.warmup_frames:
-                    warmup_counter += 1
-                    raw_obs = raw_next
-                    continue
-
-                obs_dict = obs_to_dict(raw_next)
-                writer.append(obs_dict, action, reward=float(_reward))
-                raw_obs = raw_next
-                frame_count += 1
-                speed_window.append(speed)
 
         except KeyboardInterrupt:
             logging.info("Keyboard interrupt received.")

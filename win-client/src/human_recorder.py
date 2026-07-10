@@ -1,6 +1,5 @@
 import datetime
 import logging
-from collections import deque
 from pathlib import Path
 
 import numpy as np
@@ -45,11 +44,8 @@ class HumanRecorder:
         self.writer = HDF5Writer(self._make_session_path())
         self.writer.new_episode(self._default_metadata())
 
-        raw_obs, _info = env.reset()
-        obs_dict = obs_to_dict(raw_obs)
+        _raw_obs, _info = env.reset()
 
-        warmup_counter = 0
-        speed_window = deque(maxlen=cfg.episode_monitor.stuck_window_frames)
         frame_count = 0
         completed_episodes = 0
         dummy_action = np.zeros(cfg.action_dim, dtype=np.float32)
@@ -58,14 +54,12 @@ class HumanRecorder:
 
         try:
             while True:
-                raw_next, _reward, terminated, truncated, info = env.step(dummy_action)
+                raw_next, reward, terminated, truncated, info = env.step(dummy_action)
                 next_obs_dict = obs_to_dict(raw_next)
                 done = terminated or truncated
-                speed = float(np.asarray(raw_next[0]).flat[0])
-                speed_window.append(speed)
 
                 # Validate Openplanet input streaming on the first captured step
-                if frame_count == 0 and warmup_counter == 0:
+                if frame_count == 0:
                     if "action" not in info:
                         logging.warning(
                             "\n=====================================================\n"
@@ -76,26 +70,20 @@ class HumanRecorder:
                             "=====================================================\n"
                         )
 
-                reason = None
-                if done:
-                    if info.get("end_of_track", False):
-                        reason = "done"
-                    elif info.get("teleported", False):
-                        reason = "respawn"
-                    else:
-                        reason = "truncated"
-                elif (
-                    warmup_counter >= cfg.episode_monitor.warmup_frames
-                    and len(speed_window) == speed_window.maxlen
-                    and max(speed_window) < cfg.episode_monitor.stuck_speed_kmh
-                ):
-                    reason = "stuck"
+                actual_action = np.asarray(
+                    info.get("action", dummy_action), dtype=np.float32
+                )
+                if self.writer is not None:
+                    self.writer.append(
+                        next_obs_dict, actual_action, reward=float(reward)
+                    )
 
-                if reason:
+                if done:
                     completed_episodes += 1
+                    reason = info.get(
+                        "termination_reason", "truncated" if truncated else "done"
+                    )
                     if self.writer is not None:
-                        # Episode ended -> record boundary
-                        # and continue in same session file.
                         self.writer.end_episode(termination=reason)
                         self.writer.new_episode(self._default_metadata())
                     logging.info(
@@ -103,27 +91,11 @@ class HumanRecorder:
                         "Starting new episode."
                     )
 
-                    raw_obs, _info = env.reset()
-                    obs_dict = obs_to_dict(raw_obs)
-                    warmup_counter = 0
-                    speed_window.clear()
+                    _raw_obs, _info = env.reset()
                     frame_count = 0
                     continue
 
-                if warmup_counter < cfg.episode_monitor.warmup_frames:
-                    warmup_counter += 1
-                    obs_dict = next_obs_dict
-                    continue
-
-                if self.writer is not None:
-                    # The game sends the human's actual inputs back in info.
-                    actual_action = np.asarray(
-                        info.get("action", dummy_action), dtype=np.float32
-                    )
-                    self.writer.append(obs_dict, actual_action, reward=float(_reward))
-                    frame_count += 1
-
-                obs_dict = next_obs_dict
+                frame_count += 1
 
         except KeyboardInterrupt:
             logging.info("Exiting HumanRecorder. Stopping collection.")

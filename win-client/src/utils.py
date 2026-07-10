@@ -7,11 +7,15 @@ from core.config import TELEMETRY_FEATURES
 IMG_SIZE: int = 64
 
 
-def obs_to_dict(obs, obs_type: str = "screen") -> dict[str, np.ndarray]:
+def obs_to_dict(
+    obs, obs_type: str = "screen", keep_history: bool = False
+) -> dict[str, np.ndarray]:
     """
     Normalise the raw observation returned by the tmrl / rtgym environment
     into a dict: {screen, telemetry} or {lidar, telemetry}.
     """
+    from core.config import IMG_HIST_LEN
+
     if obs_type not in ("screen", "lidar"):
         raise ValueError("obs_type must be either 'screen' or 'lidar'.")
 
@@ -34,10 +38,20 @@ def obs_to_dict(obs, obs_type: str = "screen") -> dict[str, np.ndarray]:
             return {"lidar": lidar, "telemetry": telemetry}
         else:
             screen = np.asarray(obs["screen"], dtype=np.uint8)
-            if screen.ndim == 3:
-                screen = screen[-1:]
-            elif screen.ndim == 2:
-                screen = screen[np.newaxis, ...]
+            if not keep_history:
+                if screen.ndim == 3:
+                    screen = screen[-1:]
+                elif screen.ndim == 2:
+                    screen = screen[np.newaxis, ...]
+            else:
+                if screen.ndim == 2:
+                    screen = np.repeat(screen[np.newaxis, ...], IMG_HIST_LEN, axis=0)
+                elif screen.ndim == 3:
+                    if screen.shape[0] < IMG_HIST_LEN:
+                        pad = IMG_HIST_LEN - screen.shape[0]
+                        screen = np.pad(screen, ((pad, 0), (0, 0), (0, 0)), mode="edge")
+                    elif screen.shape[0] > IMG_HIST_LEN:
+                        screen = screen[-IMG_HIST_LEN:]
             return {"screen": screen, "telemetry": telemetry}
 
     if isinstance(obs, (tuple, list)) and len(obs) >= 1:
@@ -71,12 +85,30 @@ def obs_to_dict(obs, obs_type: str = "screen") -> dict[str, np.ndarray]:
                     telem_parts.append(arr.flatten().astype(np.float32))
 
             if screen is None:
-                screen = np.zeros((1, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
+                screen = (
+                    np.zeros((IMG_HIST_LEN, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
+                    if keep_history
+                    else np.zeros((1, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
+                )
             else:
-                if screen.ndim == 3:
-                    screen = screen[-1:]
-                elif screen.ndim == 2:
-                    screen = screen[np.newaxis, ...]
+                if not keep_history:
+                    if screen.ndim == 3:
+                        screen = screen[-1:]
+                    elif screen.ndim == 2:
+                        screen = screen[np.newaxis, ...]
+                else:
+                    if screen.ndim == 2:
+                        screen = np.repeat(
+                            screen[np.newaxis, ...], IMG_HIST_LEN, axis=0
+                        )
+                    elif screen.ndim == 3:
+                        if screen.shape[0] < IMG_HIST_LEN:
+                            pad = IMG_HIST_LEN - screen.shape[0]
+                            screen = np.pad(
+                                screen, ((pad, 0), (0, 0), (0, 0)), mode="edge"
+                            )
+                        elif screen.shape[0] > IMG_HIST_LEN:
+                            screen = screen[-IMG_HIST_LEN:]
 
         if telem_parts:
             telemetry = np.concatenate(telem_parts, axis=0)
@@ -114,12 +146,30 @@ def obs_to_dict(obs, obs_type: str = "screen") -> dict[str, np.ndarray]:
             "telemetry": np.zeros(TELEMETRY_FEATURES, dtype=np.float32),
         }
 
-    if arr.ndim >= 3:
-        screen = arr[-1:].astype(np.uint8)
-    elif arr.ndim == 2:
-        screen = arr[np.newaxis, ...].astype(np.uint8)
+    if not keep_history:
+        if arr.ndim >= 3:
+            screen = arr[-1:].astype(np.uint8)
+        elif arr.ndim == 2:
+            screen = arr[np.newaxis, ...].astype(np.uint8)
+        else:
+            screen = np.zeros((1, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
     else:
-        screen = np.zeros((1, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
+        if arr.ndim >= 3:
+            screen = (
+                arr[-IMG_HIST_LEN:].astype(np.uint8)
+                if arr.shape[0] >= IMG_HIST_LEN
+                else np.pad(
+                    arr.astype(np.uint8),
+                    ((IMG_HIST_LEN - arr.shape[0], 0), (0, 0), (0, 0)),
+                    mode="edge",
+                )
+            )
+        elif arr.ndim == 2:
+            screen = np.repeat(
+                arr[np.newaxis, ...].astype(np.uint8), IMG_HIST_LEN, axis=0
+            )
+        else:
+            screen = np.zeros((IMG_HIST_LEN, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
 
     return {
         "screen": screen,
