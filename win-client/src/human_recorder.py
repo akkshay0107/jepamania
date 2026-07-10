@@ -22,12 +22,13 @@ class HumanRecorder:
     Exiting via Ctrl+C closes the session file cleanly.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, output_dir: Path | None = None) -> None:
+        self.output_dir = output_dir or Path(cfg.data_output_dir)
         self.writer: HDF5Writer | None = None
 
     def _make_session_path(self) -> Path:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        return Path(cfg.data_output_dir) / f"human_session_{timestamp}.h5"
+        return self.output_dir / f"human_session_{timestamp}.h5"
 
     def _default_metadata(self) -> dict:
         return {
@@ -119,7 +120,9 @@ class HumanRecorder:
                     actual_action = np.asarray(
                         info.get("action", dummy_action), dtype=np.float32
                     )
-                    self.writer.append(obs_dict, actual_action)
+                    self.writer.append(
+                        obs_dict, actual_action, reward=float(_reward)
+                    )
                     frame_count += 1
 
                 obs_dict = next_obs_dict

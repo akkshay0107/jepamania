@@ -52,12 +52,12 @@ class AgentCollector:
     Runs the environment, records data, and handles episode resets.
     """
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, output_dir: Path | None = None) -> None:
+        self.output_dir = output_dir or Path(cfg.data_output_dir)
 
     def _session_path(self) -> Path:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        return Path(cfg.data_output_dir) / f"agent_{timestamp}.h5"
+        return self.output_dir / f"agent_{timestamp}.h5"
 
     def run(self) -> None:
         env = get_tmrl_env()
@@ -182,7 +182,7 @@ class AgentCollector:
                     continue
 
                 obs_dict = obs_to_dict(raw_next)
-                writer.append(obs_dict, action)
+                writer.append(obs_dict, action, reward=float(_reward))
                 raw_obs = raw_next
                 frame_count += 1
                 speed_window.append(speed)

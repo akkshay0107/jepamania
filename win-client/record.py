@@ -7,6 +7,7 @@ via a pretrained SAC policy.
 
 import argparse
 import logging
+from pathlib import Path
 
 from src.agent_recorder import AgentCollector
 from src.env_patches import apply_data_collection_patches
@@ -26,6 +27,11 @@ def parse_args() -> argparse.Namespace:
             "'agent' for trained RL policy rollout."
         ),
     )
+    parser.add_argument(
+        "--bootstrap",
+        action="store_true",
+        help="Record bootstrap episodes into data/rl/bootstrap.",
+    )
     return parser.parse_args()
 
 
@@ -37,13 +43,20 @@ def main() -> None:
 
     apply_data_collection_patches()
 
+    if args.bootstrap:
+        output_dir = Path("data/rl/bootstrap")
+        logging.info("Bootstrap recording enabled → writing to data/rl/bootstrap")
+    else:
+        output_dir = Path("data/ssl") / args.mode
+        logging.info(f"SSL recording enabled → writing to {output_dir}")
+
     if args.mode == "human":
         logging.info("Initializing Human Play Recorder...")
-        recorder = HumanRecorder()
+        recorder = HumanRecorder(output_dir=output_dir)
         recorder.run()
     elif args.mode == "agent":
         logging.info("Initializing Agent Policy Collector...")
-        collector = AgentCollector()
+        collector = AgentCollector(output_dir=output_dir)
         collector.run()
 
 

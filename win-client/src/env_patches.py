@@ -36,12 +36,14 @@ def _collection_get_obs_rew_terminated_info(self):
     gear = np.array([data[9]], dtype="float32")
     rpm = np.array([data[10]], dtype="float32")
 
+    curr_pos = np.array([data[2], data[3], data[4]], dtype=np.float32)
+    rew, _tmrl_terminated = self.reward_function.compute_reward(pos=curr_pos)
+
     self.img_hist.append(img)
     imgs = np.array(list(self.img_hist))
     obs = [speed, gear, rpm, imgs]
 
     end_of_track = bool(data[8])
-    curr_pos = np.array([data[2], data[3], data[4]], dtype=np.float32)
 
     teleported = False
     if hasattr(self, "prev_pos") and self.prev_pos is not None:
@@ -59,7 +61,11 @@ def _collection_get_obs_rew_terminated_info(self):
     terminated = end_of_track or teleported
     if terminated:
         self.prev_pos = None
-    rew = np.float32(1.0 if end_of_track else 0.0)
+
+    if end_of_track:
+        rew += getattr(self, "finish_reward", 0.0)
+    rew += getattr(self, "constant_penalty", 0.0)
+    rew = np.float32(rew)
     return obs, rew, terminated, info
 
 

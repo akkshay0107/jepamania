@@ -38,6 +38,7 @@ class HDF5Writer:
         self._obs_buf: list[np.ndarray] = []
         self._telemetry_buf: list[np.ndarray] = []
         self._action_buf: list[np.ndarray] = []
+        self._reward_buf: list[float] = []
         self._episode_id_buf: list[int] = []
 
         self.current_size: int = 0
@@ -85,6 +86,13 @@ class HDF5Writer:
             compression="gzip",
         )
         self._file.create_dataset(
+            "rewards",
+            shape=(0,),
+            maxshape=(None,),
+            chunks=(chunk_size,),
+            dtype=np.float32,
+        )
+        self._file.create_dataset(
             "episode_id",
             shape=(0,),
             maxshape=(None,),
@@ -125,7 +133,12 @@ class HDF5Writer:
             }
         )
 
-    def append(self, obs_dict: dict[str, np.ndarray], action: np.ndarray) -> None:
+    def append(
+        self,
+        obs_dict: dict[str, np.ndarray],
+        action: np.ndarray,
+        reward: float = 0.0,
+    ) -> None:
         """Queue a single frame for writing."""
         qsize = self._queue.qsize()
         if qsize > 500:
@@ -138,6 +151,7 @@ class HDF5Writer:
             "_type": "frame",
             "telemetry": np.copy(obs_dict["telemetry"]),
             "action": np.copy(action).astype(np.float32),
+            "reward": float(reward),
             "episode_id": self._current_episode_id,
         }
         if self.obs_type == "lidar":
@@ -208,6 +222,7 @@ class HDF5Writer:
                     self._obs_buf.append(token["screen"])
                 self._telemetry_buf.append(token["telemetry"])
                 self._action_buf.append(token["action"])
+                self._reward_buf.append(token["reward"])
                 self._episode_id_buf.append(token["episode_id"])
 
                 if len(self._obs_buf) >= self.chunk_size:
@@ -230,16 +245,21 @@ class HDF5Writer:
             obs_ds = cast(h5py.Dataset, obs["screen"])
         telem_ds = cast(h5py.Dataset, obs["telemetry"])
         actions_ds = cast(h5py.Dataset, self._file["actions"])
+        rewards_ds = cast(h5py.Dataset, self._file["rewards"])
         ep_id_ds = cast(h5py.Dataset, self._file["episode_id"])
 
         obs_ds.resize(new_size, axis=0)
         telem_ds.resize(new_size, axis=0)
         actions_ds.resize(new_size, axis=0)
+        rewards_ds.resize(new_size, axis=0)
         ep_id_ds.resize(new_size, axis=0)
 
         obs_ds[self.current_size : new_size] = np.stack(self._obs_buf)
         telem_ds[self.current_size : new_size] = np.stack(self._telemetry_buf)
         actions_ds[self.current_size : new_size] = np.stack(self._action_buf)
+        rewards_ds[self.current_size : new_size] = np.array(
+            self._reward_buf, dtype=np.float32
+        )
         ep_id_ds[self.current_size : new_size] = np.array(
             self._episode_id_buf, dtype=np.int32
         )
@@ -249,4 +269,5 @@ class HDF5Writer:
         self._obs_buf.clear()
         self._telemetry_buf.clear()
         self._action_buf.clear()
+        self._reward_buf.clear()
         self._episode_id_buf.clear()
