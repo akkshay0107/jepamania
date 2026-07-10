@@ -120,9 +120,7 @@ class HumanRecorder:
                     actual_action = np.asarray(
                         info.get("action", dummy_action), dtype=np.float32
                     )
-                    self.writer.append(
-                        obs_dict, actual_action, reward=float(_reward)
-                    )
+                    self.writer.append(obs_dict, actual_action, reward=float(_reward))
                     frame_count += 1
 
                 obs_dict = next_obs_dict

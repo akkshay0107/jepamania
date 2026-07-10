@@ -18,6 +18,7 @@ LIDAR_BEAMS: int = 19
 # Steering [-1.0, 1.0] -> discretized into 7 bins
 # so 35 distinct actions possible at any given moment of time
 NUM_ACTIONS: int = 35
+LATENT_DIM: int = 192
 
 
 @dataclass

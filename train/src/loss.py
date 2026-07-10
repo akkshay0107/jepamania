@@ -57,11 +57,7 @@ def _project_into_slices(
 
 
 def epps_pulley_1d(h: Float[Array, "batch"]) -> Float[Array, ""]:
-    """Epps-Pulley normality test statistic along a 1D projection slice.
-
-    Note: The trapezoidal integration grid and weights below depend only on
-    fixed constants and will be constant-folded by XLA during JIT compilation.
-    """
+    """Epps-Pulley normality test statistic along a 1D projection slice"""
     knots = 17
     t_max = 3.0
     t = jnp.linspace(0.0, t_max, knots)
@@ -103,7 +99,9 @@ def sub_jepa_loss(
     slice_projectors: Float[Array, "num_subspaces subspace_dim num_slices"],
     reg_weight: float = 1.0,
 ) -> Float[Array, ""]:
-    pred_loss = jnp.mean((predicted_latents - target_latents) ** 2)
+    pred_loss = jnp.mean(
+        (predicted_latents - jax.lax.stop_gradient(target_latents)) ** 2
+    )
     reg_loss = sub_jepa_regularization(
         target_latents, subspace_projectors, slice_projectors
     )

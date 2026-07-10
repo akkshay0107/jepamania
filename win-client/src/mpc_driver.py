@@ -274,9 +274,7 @@ class MPCDriver:
                         and completed_episodes % cfg.episode_monitor.episodes_per_shard
                         == 0
                     ):
-                        logging.info(
-                            "Sharding HDF5 file: closing current shard"
-                        )
+                        logging.info("Sharding HDF5 file: closing current shard")
                         self.writer.close()
                         self.writer = HDF5Writer(
                             self._make_session_path(), obs_type=self.obs_type
