@@ -6,8 +6,10 @@ with the live Trackmania (tmrl / rtgym) environment on Windows. Leverages
 AsyncPlannerWrapper for delay-compensated asynchronous trajectory optimization.
 """
 
+import argparse
 import datetime
 import logging
+from collections import deque
 from pathlib import Path
 from typing import Optional
 
@@ -22,6 +24,7 @@ from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder
 from core.interfaces import Encoder, Predictor
 from core.planners import BeamSearchPlanner, CEMPlanner, RandomShootingPlanner
 from src.data_writer import HDF5Writer
+from src.env_patches import apply_data_collection_patches
 from src.settings import cfg
 from src.utils import get_tmrl_env, obs_to_dict
 
@@ -106,7 +109,13 @@ class MPCDriver:
         config_path: Optional[str | Path] = None,
         encoder_type: Optional[str] = None,
         planner_type: Optional[str] = None,
+        output_dir: Optional[str | Path] = None,
+        max_episodes: Optional[int] = None,
     ) -> None:
+        self.output_dir = (
+            Path(output_dir) if output_dir else Path("win-client/data/rl/rollouts")
+        )
+        self.max_episodes = max_episodes
         self.checkpoint_path = checkpoint_path or cfg.mpc.checkpoint_path
         if not self.checkpoint_path:
             raise ValueError(
@@ -184,12 +193,13 @@ class MPCDriver:
 
     def _make_session_path(self) -> Path:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        return Path(cfg.data_output_dir) / f"mpc_rollouts_{timestamp}.h5"
+        out_dir = self.output_dir or Path("win-client/data/rl/rollouts")
+        return out_dir / f"mpc_rollouts_{timestamp}.h5"
 
     def run(self) -> None:
         env = get_tmrl_env()
 
-        if cfg.mpc.record_rollouts:
+        if cfg.mpc.record_rollouts or self.output_dir is not None:
             self.writer = HDF5Writer(self._make_session_path(), obs_type=self.obs_type)
             self.writer.new_episode(
                 {
@@ -207,17 +217,14 @@ class MPCDriver:
         self.async_wrapper.start()
 
         warmup_counter = 0
+        speed_window = deque(maxlen=cfg.episode_monitor.stuck_window_frames)
         frame_count = 0
+        completed_episodes = 0
 
         try:
             while True:
                 obs_dict = obs_to_dict(raw_obs, obs_type=self.obs_type)
-
-                # Get optimal discrete action index in O(1) time
                 discrete_action = self.async_wrapper.step(obs_dict)
-
-                # Map discrete token [0, 34] to continuous action [steer, gas, brake].
-                # Per user request, NO adaptive filter is applied on JEPA planner.
                 continuous_action = to_continuous_action_np(discrete_action).astype(
                     np.float32
                 )
@@ -226,15 +233,56 @@ class MPCDriver:
                     continuous_action
                 )
                 done = terminated or truncated
+                speed = float(np.asarray(raw_next[0]).flat[0])
+                if warmup_counter >= cfg.episode_monitor.warmup_frames:
+                    speed_window.append(speed)
 
-                if done or (
+                reason = None
+                if done:
+                    reason = "done"
+                elif (
+                    warmup_counter >= cfg.episode_monitor.warmup_frames
+                    and len(speed_window) == speed_window.maxlen
+                    and max(speed_window) < cfg.episode_monitor.stuck_speed_kmh
+                ):
+                    reason = "stuck"
+                elif (
                     warmup_counter >= cfg.episode_monitor.warmup_frames
                     and frame_count >= cfg.episode_monitor.max_frames_per_episode
                 ):
-                    reason = "done" if done else "frame_budget"
-                    logging.info(f"Episode ended via reason: {reason}")
-                    if self.writer is not None:
+                    reason = "frame_budget"
+
+                if reason:
+                    completed_episodes += 1
+                    logging.info(
+                        f"Episode {completed_episodes} ended via reason: {reason}"
+                    )
+                    if self.writer is not None and frame_count > 0:
                         self.writer.end_episode(termination=reason)
+
+                    if (
+                        self.max_episodes is not None
+                        and completed_episodes >= self.max_episodes
+                    ):
+                        logging.info(
+                            f"Target of {self.max_episodes} rollout episodes reached. "
+                        )
+                        break
+
+                    if (
+                        self.writer is not None
+                        and completed_episodes % cfg.episode_monitor.episodes_per_shard
+                        == 0
+                    ):
+                        logging.info(
+                            "Sharding HDF5 file: closing current shard"
+                        )
+                        self.writer.close()
+                        self.writer = HDF5Writer(
+                            self._make_session_path(), obs_type=self.obs_type
+                        )
+
+                    if self.writer is not None:
                         self.writer.new_episode(
                             {
                                 "source": "mpc_driver",
@@ -246,6 +294,7 @@ class MPCDriver:
 
                     warmup_counter = 0
                     frame_count = 0
+                    speed_window.clear()
                     raw_obs, _info = env.reset()
                     self.async_wrapper.reset()
                     continue
@@ -256,7 +305,9 @@ class MPCDriver:
                     continue
 
                 if self.writer is not None:
-                    self.writer.append(obs_dict, continuous_action)
+                    self.writer.append(
+                        obs_dict, continuous_action, reward=float(_reward)
+                    )
 
                 raw_obs = raw_next
                 frame_count += 1
@@ -270,3 +321,69 @@ class MPCDriver:
                 self.writer.close()
             env.close()
             logging.info("MPCDriver shut down cleanly.")
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run MPC trajectories and collect rollout data for online RL"
+    )
+    parser.add_argument(
+        "--checkpoint-path",
+        type=Path,
+        required=True,
+        help="Path to Sub-JEPA Equinox checkpoint (.eqx)",
+    )
+    parser.add_argument(
+        "--value-head-path",
+        type=Path,
+        required=True,
+        help="Path to MLPValueHead Equinox checkpoint (.eqx)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("win-client/data/rl/rollouts"),
+        help="Directory to record rollout HDF5 files",
+    )
+    parser.add_argument(
+        "--num-episodes",
+        type=int,
+        default=5,
+        help="Number of rollout episodes to record before stopping",
+    )
+    parser.add_argument(
+        "--encoder-type",
+        type=str,
+        default="screen",
+        choices=["screen", "lidar"],
+        help="Encoder modality",
+    )
+    parser.add_argument(
+        "--planner-type",
+        type=str,
+        default="cem",
+        choices=["cem", "beam", "random"],
+        help="Trajectory planner algorithm",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    logging.info(f"Rollout collector for {args.num_episodes} eps -> {args.output_dir}")
+
+    apply_data_collection_patches()
+
+    driver = MPCDriver(
+        checkpoint_path=args.checkpoint_path,
+        value_head_path=args.value_head_path,
+        encoder_type=args.encoder_type,
+        planner_type=args.planner_type,
+        output_dir=args.output_dir,
+        max_episodes=args.num_episodes,
+    )
+    driver.run()
+
+
+if __name__ == "__main__":
+    main()

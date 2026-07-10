@@ -26,6 +26,7 @@ class SlidingWindowDataset:
         rollout_len: int = 5,
         discretize_actions: bool = False,
         obs_type: str = "screen",
+        load_rewards: bool = False,
     ) -> None:
         if obs_type not in ("screen", "lidar"):
             raise ValueError("obs_type must be either 'screen' or 'lidar'.")
@@ -34,6 +35,7 @@ class SlidingWindowDataset:
         self.H = int(history_len)
         self.K = int(rollout_len)
         self.discretize_actions = bool(discretize_actions)
+        self.load_rewards = bool(load_rewards)
 
         self.shards: list[Dict[str, Any]] = []
         self.shard_indices_map: np.ndarray = np.empty(0, dtype=np.int32)
@@ -47,7 +49,7 @@ class SlidingWindowDataset:
         if not self.data_dir.exists():
             return
 
-        h5_files = sorted(self.data_dir.glob("*.h5"))
+        h5_files = sorted(self.data_dir.rglob("*.h5"))
         shard_indices: list[np.ndarray] = []
         local_indices: list[np.ndarray] = []
         episode_indices: list[np.ndarray] = []
@@ -180,6 +182,7 @@ class SlidingWindowDataset:
             ds.K = self.K
             ds.discretize_actions = self.discretize_actions
             ds.obs_type = self.obs_type
+            ds.load_rewards = self.load_rewards
             ds.shards = self.shards
             ds.shard_indices_map = self.shard_indices_map[mask]
             ds.local_indices_map = self.local_indices_map[mask]
@@ -209,45 +212,62 @@ class SlidingWindowDataset:
 
     def _read_sample(
         self,
-        obs_ds: h5py.Dataset,
-        telem_ds: h5py.Dataset,
-        actions_ds: h5py.Dataset,
+        f: h5py.File,
         local_t: int,
         frame_start: int,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        obs_stack_t = self._get_history_stack(obs_ds, local_t, frame_start)
+    ) -> Dict[str, np.ndarray]:
+        obs_ds = f[f"observations/{self.obs_type}"]
+        telem_ds = f["observations/telemetry"]
+        actions_ds = f["actions"]
+
+        obs_stack_t = self._get_history_stack(obs_ds, local_t, frame_start)  # type: ignore[arg-type]
         obs_stack_target = self._get_history_stack(
-            obs_ds, local_t + self.K, frame_start
+            obs_ds,
+            local_t + self.K,
+            frame_start,  # type: ignore[arg-type]
         )
 
         telem_slice = np.asarray(
-            telem_ds[local_t : local_t + self.K + 1],
+            telem_ds[local_t : local_t + self.K + 1],  # type: ignore[index]
             dtype=np.float32,
         )
         telemetry_t = telem_slice[0]
         telemetry_target = telem_slice[-1]
 
         actions_seq = np.asarray(
-            actions_ds[local_t : local_t + self.K], dtype=np.float32
+            actions_ds[local_t : local_t + self.K],
+            dtype=np.float32,  # type: ignore[index]
         )
         if self.discretize_actions:
             actions_seq = discretize_action_np(actions_seq)
 
-        return obs_stack_t, telemetry_t, actions_seq, obs_stack_target, telemetry_target
+        sample = {
+            "obs_stack_t": obs_stack_t,
+            "telemetry_t": telemetry_t,
+            "actions_seq": actions_seq,
+            "obs_stack_target": obs_stack_target,
+            "telemetry_target": telemetry_target,
+        }
 
-    def __getitem__(
-        self, idx: int
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        if self.load_rewards:
+            if "rewards" in f:
+                sample["rewards_seq"] = np.asarray(
+                    f["rewards"][local_t : local_t + self.K],
+                    dtype=np.float32,  # type: ignore[index]
+                )
+            else:
+                sample["rewards_seq"] = np.zeros(self.K, dtype=np.float32)
+
+        return sample
+
+    def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
         shard_idx = self.shard_indices_map[idx]
         local_t = self.local_indices_map[idx]
         frame_start = self.frame_starts_map[idx]
         shard = self.shards[shard_idx]
 
         with h5py.File(shard["file_path"], "r") as f:
-            obs_ds: h5py.Dataset = f[f"observations/{self.obs_type}"]  # type: ignore[assignment]
-            telem_ds: h5py.Dataset = f["observations/telemetry"]  # type: ignore[assignment]
-            actions_ds: h5py.Dataset = f["actions"]  # type: ignore[assignment]
-            return self._read_sample(obs_ds, telem_ds, actions_ds, local_t, frame_start)
+            return self._read_sample(f, local_t, frame_start)
 
 
 class DataLoader:
@@ -360,34 +380,21 @@ class DataLoader:
         group_starts = np.flatnonzero(change_mask)
         group_ends = np.append(group_starts[1:], batch_size)
 
-        samples: list[Tuple[np.ndarray, ...]] = [None] * batch_size  # type: ignore[list-item]
+        samples: list[Dict[str, np.ndarray]] = [None] * batch_size  # type: ignore[list-item]
 
         for g_start, g_end in zip(group_starts, group_ends):
             shard_idx = int(sorted_shard_ids[g_start])
             shard = ds.shards[shard_idx]
 
             with h5py.File(shard["file_path"], "r") as f:
-                obs_ds: h5py.Dataset = f[f"observations/{ds.obs_type}"]  # type: ignore[assignment]
-                telem_ds: h5py.Dataset = f["observations/telemetry"]  # type: ignore[assignment]
-                actions_ds: h5py.Dataset = f["actions"]  # type: ignore[assignment]
-
                 for pos in range(g_start, g_end):
                     ds_idx = sorted_indices[pos]
                     local_t = int(ds.local_indices_map[ds_idx])
                     frame_start = int(ds.frame_starts_map[ds_idx])
-                    samples[pos] = ds._read_sample(
-                        obs_ds, telem_ds, actions_ds, local_t, frame_start
-                    )
+                    samples[pos] = ds._read_sample(f, local_t, frame_start)
 
-        # Unsort into original batch order before stacking to avoid a
-        # stack-then-index double allocation.
         unsort_order = np.argsort(sort_order)
         ordered = [samples[i] for i in unsort_order]
 
-        return {
-            "obs_stack_t": np.stack([s[0] for s in ordered]),
-            "telemetry_t": np.stack([s[1] for s in ordered]),
-            "actions_seq": np.stack([s[2] for s in ordered]),
-            "obs_stack_target": np.stack([s[3] for s in ordered]),
-            "telemetry_target": np.stack([s[4] for s in ordered]),
-        }
+        keys = ordered[0].keys()
+        return {k: np.stack([s[k] for s in ordered]) for k in keys}
