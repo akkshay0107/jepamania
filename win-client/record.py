@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 
 from src.agent_recorder import AgentCollector
-from src.env_patches import apply_data_collection_patches
+from src.env_patches import apply_data_collection_patches, apply_online_rl_patches
 from src.human_recorder import HumanRecorder
 
 
@@ -41,12 +41,12 @@ def main() -> None:
         level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
     )
 
-    apply_data_collection_patches()
-
     if args.bootstrap:
+        apply_online_rl_patches()
         output_dir = Path("data/rl/bootstrap")
         logging.info("Bootstrap recording enabled → writing to data/rl/bootstrap")
     else:
+        apply_data_collection_patches()
         output_dir = Path("data/ssl") / args.mode
         logging.info(f"SSL recording enabled → writing to {output_dir}")
 

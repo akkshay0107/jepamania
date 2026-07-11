@@ -23,7 +23,7 @@ from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder
 from core.interfaces import Encoder, Predictor
 from core.planners import BeamSearchPlanner, CEMPlanner, RandomShootingPlanner
 from src.data_writer import HDF5Writer
-from src.env_patches import apply_data_collection_patches
+from src.env_patches import apply_online_rl_patches
 from src.settings import cfg
 from src.utils import get_tmrl_env, obs_to_dict
 
@@ -356,7 +356,7 @@ def main() -> None:
     args = parse_args()
     logging.info(f"Rollout collector for {args.num_episodes} eps -> {args.output_dir}")
 
-    apply_data_collection_patches()
+    apply_online_rl_patches()
 
     driver = MPCDriver(
         checkpoint_path=args.checkpoint_path,
