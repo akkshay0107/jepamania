@@ -31,7 +31,7 @@ class MLPPredictor(eqx.Module):
     ) -> Float[Array, "latent_dim"]:
         a_emb = self.action_embedding(action)
         x = jnp.concatenate([latent_state, a_emb], axis=0)
-        return self.predictor_mlp(x)
+        return latent_state + self.predictor_mlp(x)
 
 
 class MLPValueHead(eqx.Module):

@@ -221,20 +221,15 @@ class SlidingWindowDataset:
         actions_ds = f["actions"]
 
         obs_stack_t = self._get_history_stack(
-            obs_ds, local_t, frame_start  # pyright: ignore[reportArgumentType]
-        )
-        obs_stack_target = self._get_history_stack(
             obs_ds,  # pyright: ignore[reportArgumentType]
-            local_t + self.K,
-            frame_start,
+            local_t,
+            frame_start,  # pyright: ignore[reportArgumentType]
         )
-
         telem_slice = np.asarray(
             telem_ds[local_t : local_t + self.K + 1],  # pyright: ignore[reportIndexIssue]
             dtype=np.float32,
         )
         telemetry_t = telem_slice[0]
-        telemetry_target = telem_slice[-1]
 
         actions_seq = np.asarray(
             actions_ds[local_t : local_t + self.K],  # pyright: ignore[reportIndexIssue]
@@ -243,12 +238,20 @@ class SlidingWindowDataset:
         if self.discretize_actions:
             actions_seq = discretize_action_np(actions_seq)
 
+        obs_stack_targets = np.stack(
+            [
+                self._get_history_stack(obs_ds, local_t + k, frame_start)  # pyright: ignore[reportArgumentType]
+                for k in range(1, self.K + 1)
+            ]
+        )
+        telemetry_targets = telem_slice[1:]
+
         sample = {
             "obs_stack_t": obs_stack_t,
             "telemetry_t": telemetry_t,
             "actions_seq": actions_seq,
-            "obs_stack_target": obs_stack_target,
-            "telemetry_target": telemetry_target,
+            "obs_stack_targets": obs_stack_targets,
+            "telemetry_targets": telemetry_targets,
         }
 
         if self.load_rewards:

@@ -47,20 +47,32 @@ Batch = Mapping[str, Union[np.ndarray, Array]]
 CheckpointT = TypeVar("CheckpointT")
 
 
+def _rollout_latent_sequence(
+    predictor: Predictor,
+    z0: Float[Array, "latent_dim"],
+    actions: Int[Array, "K"],
+) -> Float[Array, "K latent_dim"]:
+    """Rolls a single latent forward through K action tokens, returning all
+    intermediate latents."""
+
+    def step(
+        z: Float[Array, "latent_dim"], action: Int[Array, ""]
+    ) -> Tuple[Float[Array, "latent_dim"], Float[Array, "latent_dim"]]:
+        next_z = predictor(z, action)
+        return next_z, next_z
+
+    _, z_seq = jax.lax.scan(step, z0, actions)
+    return z_seq
+
+
 def _rollout_latent(
     predictor: Predictor,
     z0: Float[Array, "latent_dim"],
     actions: Int[Array, "K"],
 ) -> Float[Array, "latent_dim"]:
     """Rolls a single latent forward through K action tokens."""
-
-    def step(
-        z: Float[Array, "latent_dim"], action: Int[Array, ""]
-    ) -> Tuple[Float[Array, "latent_dim"], None]:
-        return predictor(z, action), None
-
-    z_final, _ = jax.lax.scan(step, z0, actions)
-    return z_final
+    z_seq = _rollout_latent_sequence(predictor, z0, actions)
+    return z_seq[-1]
 
 
 def compute_loss(
@@ -77,10 +89,6 @@ def compute_loss(
             "lidar": batch["obs_stack_t"].astype(jnp.float32),
             "telemetry": batch["telemetry_t"],
         }
-        obs_target = {
-            "lidar": batch["obs_stack_target"].astype(jnp.float32),
-            "telemetry": batch["telemetry_target"],
-        }
     else:
         # uint8 -> float32 here so the cast runs on-device after the (4x smaller)
         # uint8 transfer, conserving PCIe bandwidth.
@@ -88,20 +96,32 @@ def compute_loss(
             "screen": batch["obs_stack_t"].astype(jnp.float32) / 255.0,
             "telemetry": batch["telemetry_t"],
         }
-        obs_target = {
-            "screen": batch["obs_stack_target"].astype(jnp.float32) / 255.0,
-            "telemetry": batch["telemetry_target"],
-        }
     actions = batch["actions_seq"].astype(jnp.int32)
-
     z_t = jax.vmap(encoder)(obs_t)
-    z_target = jax.vmap(encoder)(obs_target)
-    z_pred = jax.vmap(lambda z0, acts: _rollout_latent(predictor, z0, acts))(
-        z_t, actions
-    )
 
+    if isinstance(encoder, LidarEncoder):
+        obs_targets = {
+            "lidar": batch["obs_stack_targets"].astype(jnp.float32),
+            "telemetry": batch["telemetry_targets"],
+        }
+    else:
+        obs_targets = {
+            "screen": batch["obs_stack_targets"].astype(jnp.float32) / 255.0,
+            "telemetry": batch["telemetry_targets"],
+        }
+    z_target_seq = jax.vmap(jax.vmap(encoder))(obs_targets)
+    z_pred_seq = jax.vmap(
+        lambda z0, acts: _rollout_latent_sequence(predictor, z0, acts)
+    )(z_t, actions)
+
+    z_pred_flat = z_pred_seq.reshape(-1, z_pred_seq.shape[-1])
+    z_target_flat = z_target_seq.reshape(-1, z_target_seq.shape[-1])
     return sub_jepa_loss(
-        z_pred, z_target, subspace_projectors, slice_projectors, reg_weight
+        z_pred_flat,
+        z_target_flat,
+        subspace_projectors,
+        slice_projectors,
+        reg_weight,
     )
 
 
@@ -167,7 +187,8 @@ def train(
     val_dataloader: Optional[Iterable[Dict[str, np.ndarray]]] = None,
     config_dict: Optional[Dict[str, Any]] = None,
 ) -> Models:
-    """Runs offline pretraining and returns the trained (encoder, predictor).
+    """
+    Runs offline pretraining and returns the trained (encoder, predictor).
 
     Checkpoints are written to `checkpoint_dir` after every epoch as
     `subjepa_epoch_{n}.eqx` plus a rolling `subjepa_latest.eqx`, with the

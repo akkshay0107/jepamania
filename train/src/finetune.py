@@ -47,18 +47,22 @@ Batch = Mapping[str, Union[np.ndarray, Array]]
 def _extract_obs(
     encoder: Encoder, batch: Batch, is_target: bool = False
 ) -> Dict[str, Any]:
-    key = "obs_stack_target" if is_target else "obs_stack_t"
-    telem_key = "telemetry_target" if is_target else "telemetry_t"
+    if is_target:
+        obs_raw = batch["obs_stack_targets"][:, -1]
+        telem_raw = batch["telemetry_targets"][:, -1]
+    else:
+        obs_raw = batch["obs_stack_t"]
+        telem_raw = batch["telemetry_t"]
 
     if isinstance(encoder, LidarEncoder):
         return {
-            "lidar": batch[key].astype(jnp.float32),
-            "telemetry": batch[telem_key],
+            "lidar": obs_raw.astype(jnp.float32),
+            "telemetry": telem_raw,
         }
     else:
         return {
-            "screen": batch[key].astype(jnp.float32) / 255.0,
-            "telemetry": batch[telem_key],
+            "screen": obs_raw.astype(jnp.float32) / 255.0,
+            "telemetry": telem_raw,
         }
 
 
