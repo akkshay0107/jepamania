@@ -7,7 +7,7 @@ from jax.tree_util import Partial
 from jaxtyping import Array, Float, Int, PRNGKeyArray
 
 from core.actions import UNIT_TRANSITION_COST_MATRIX
-from core.config import NUM_ACTIONS
+from core.config import NUM_ACTIONS, PlannerConfig
 from core.interfaces import Predictor
 
 
@@ -292,3 +292,33 @@ class BeamSearchPlanner(eqx.Module):
 
         best_idx = jnp.argmax(final_scores)
         return final_actions[best_idx]
+
+
+def create_planner(
+    cfg: PlannerConfig,
+    predictor: Predictor,
+    objective_fn: Callable[[Float[Array, "latent_dim"]], Float[Array, ""]],
+) -> Any:
+    """Instantiates a trajectory planner from a PlannerConfig."""
+    common = dict(
+        predictor=predictor,
+        objective_fn=objective_fn,
+        sequence_len=cfg.sequence_len,
+        smoothness_weight=cfg.smoothness_weight,
+    )
+    if cfg.type in ("beam", "beam_search"):
+        return BeamSearchPlanner(beam_width=cfg.beam_width, **common)
+    elif cfg.type == "cem":
+        return CEMPlanner(
+            num_iters=cfg.cem_iters,
+            num_samples=cfg.cem_samples,
+            num_elites=cfg.cem_elites,
+            alpha=cfg.cem_alpha,
+            **common,
+        )
+    elif cfg.type in ("random", "random_shooting"):
+        return RandomShootingPlanner(num_samples=cfg.rs_samples, **common)
+    else:
+        raise ValueError(
+            f"Unsupported planner '{cfg.type}'. Choose from 'beam', 'cem', or 'random'."
+        )

@@ -52,10 +52,27 @@ class ValueHeadConfig:
 
 
 @dataclass
+class PlannerConfig:
+    type: str = "beam"  # "beam" | "cem" | "random"
+    sequence_len: int = 10
+    smoothness_weight: float = 0.5
+    # Beam Search
+    beam_width: int = 5
+    # Cross-Entropy Method (CEM)
+    cem_iters: int = 3
+    cem_samples: int = 100
+    cem_elites: int = 25
+    cem_alpha: float = 0.1
+    # Random Shooting
+    rs_samples: int = 500
+
+
+@dataclass
 class SubJepaConfig:
     encoder: EncoderConfig = field(default_factory=EncoderConfig)
     predictor: PredictorConfig = field(default_factory=PredictorConfig)
     value_head: ValueHeadConfig = field(default_factory=ValueHeadConfig)
+    planner: PlannerConfig = field(default_factory=PlannerConfig)
 
 
 def load_config(yaml_path: str = "config.yaml") -> SubJepaConfig:

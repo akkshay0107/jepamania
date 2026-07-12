@@ -17,11 +17,11 @@ import jax
 import numpy as np
 from core.actions import to_continuous_action_np
 from core.async_planner import AsyncPlannerWrapper
-from core.config import load_config
+from core.config import PlannerConfig, load_config
 from core.dynamics import MLPValueHead
 from core.encoders import load_models_auto
 from core.interfaces import Encoder, Predictor
-from core.planners import BeamSearchPlanner, CEMPlanner, RandomShootingPlanner
+from core.planners import create_planner
 from src.data_writer import HDF5Writer
 from src.env_patches import apply_online_rl_patches
 from src.settings import cfg
@@ -151,47 +151,24 @@ class MPCDriver:
         self.writer: Optional[HDF5Writer] = None
 
     def _build_planner(self):
-        seq_len = int(cfg.mpc.sequence_len)
-        if self.planner_type == "cem":
-            return CEMPlanner(
-                predictor=self.predictor,
-                objective_fn=self.objective_fn,
-                sequence_len=seq_len,
-                num_iters=int(cfg.mpc.num_iters),
-                num_samples=int(cfg.mpc.num_samples),
-                num_elites=int(cfg.mpc.num_elites),
-                alpha=0.25,
-            )
-        elif self.planner_type == "beam":
-            return BeamSearchPlanner(
-                predictor=self.predictor,
-                objective_fn=self.objective_fn,
-                sequence_len=seq_len,
-                beam_width=int(cfg.mpc.beam_width),
-            )
-        elif self.planner_type == "random":
-            return RandomShootingPlanner(
-                predictor=self.predictor,
-                objective_fn=self.objective_fn,
-                sequence_len=seq_len,
-                num_samples=int(cfg.mpc.num_samples),
-            )
-        else:
-            raise ValueError(
-                f"Unsupported planner '{self.planner_type}'; "
-                "choose from 'cem', 'beam', 'random'."
-            )
+        planner_cfg = PlannerConfig(
+            type=self.planner_type,
+            sequence_len=int(cfg.mpc.sequence_len),
+            beam_width=int(cfg.mpc.beam_width),
+            cem_iters=int(cfg.mpc.num_iters),
+            cem_samples=int(cfg.mpc.num_samples),
+            cem_elites=int(cfg.mpc.num_elites),
+            rs_samples=int(cfg.mpc.num_samples),
+        )
+        return create_planner(planner_cfg, self.predictor, self.objective_fn)
 
     def _make_session_path(self) -> Path:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         out_dir = self.output_dir or Path("win-client/data/rl/rollouts")
         return out_dir / f"mpc_rollouts_{timestamp}.h5"
 
-    def run(self) -> None:
-        env = get_tmrl_env()
-
-        if cfg.mpc.record_rollouts or self.output_dir is not None:
-            self.writer = HDF5Writer(self._make_session_path(), obs_type=self.obs_type)
+    def _start_episode_record(self) -> None:
+        if self.writer is not None:
             self.writer.new_episode(
                 {
                     "source": "mpc_driver",
@@ -202,6 +179,13 @@ class MPCDriver:
                     "timestamp": datetime.datetime.now().isoformat(),
                 }
             )
+
+    def run(self) -> None:
+        env = get_tmrl_env()
+
+        if cfg.mpc.record_rollouts or self.output_dir is not None:
+            self.writer = HDF5Writer(self._make_session_path(), obs_type=self.obs_type)
+            self._start_episode_record()
 
         logging.info("Starting real-time MPC control loop...")
         raw_obs, _info = env.reset()
@@ -249,7 +233,7 @@ class MPCDriver:
                         and completed_episodes >= self.max_episodes
                     ):
                         logging.info(
-                            f"Target of {self.max_episodes} rollout episodes reached. "
+                            f"Target of {self.max_episodes} rollout episodes reached."
                         )
                         break
 
@@ -264,16 +248,7 @@ class MPCDriver:
                             self._make_session_path(), obs_type=self.obs_type
                         )
 
-                    if self.writer is not None:
-                        self.writer.new_episode(
-                            {
-                                "source": "mpc_driver",
-                                "map_name": cfg.agent.map_name,
-                                "map_uid": cfg.agent.map_uid,
-                                "timestamp": datetime.datetime.now().isoformat(),
-                            }
-                        )
-
+                    self._start_episode_record()
                     raw_obs, _info = env.reset()
                     self.async_wrapper.reset()
 

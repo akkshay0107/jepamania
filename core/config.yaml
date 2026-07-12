@@ -10,3 +10,8 @@ predictor:
   action_embed_dim: 16
   hidden_dim: 256
 
+planner:
+  type: "beam"
+  sequence_len: 10
+  smoothness_weight: 0.0
+  beam_width: 6
