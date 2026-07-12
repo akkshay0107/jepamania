@@ -23,10 +23,16 @@ def run_cmd(cmd: list[str], dry_run: bool = False) -> None:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Cyclic Online RL Orchestrator")
     parser.add_argument(
-        "--ssl-checkpoint",
+        "--encoder-checkpoint",
         type=Path,
-        default=Path("checkpoints/pretrain/subjepa_latest.eqx"),
-        help="Pre-trained SSL Sub-JEPA Equinox checkpoint",
+        default=Path("checkpoints/pretrain/pretrain_encoder_latest.eqx"),
+        help="Pre-trained SSL Sub-JEPA encoder Equinox checkpoint",
+    )
+    parser.add_argument(
+        "--predictor-checkpoint",
+        type=Path,
+        default=Path("checkpoints/pretrain/pretrain_predictor_latest.eqx"),
+        help="Pre-trained SSL Sub-JEPA predictor Equinox checkpoint",
     )
     parser.add_argument(
         "--bootstrap-dir",
@@ -105,7 +111,8 @@ def main() -> None:
     args.checkpoints_dir.mkdir(parents=True, exist_ok=True)
     args.rollouts_dir.mkdir(parents=True, exist_ok=True)
 
-    current_subjepa = args.ssl_checkpoint
+    current_encoder = args.encoder_checkpoint
+    current_predictor = args.predictor_checkpoint
     current_valhead: Path | None = None
 
     for iter_idx in range(args.num_iterations):
@@ -123,8 +130,10 @@ def main() -> None:
                     finetune_script,
                     "--data-dir",
                     str(args.bootstrap_dir),
-                    "--ssl-checkpoint",
-                    str(args.ssl_checkpoint),
+                    "--encoder-checkpoint",
+                    str(current_encoder),
+                    "--predictor-checkpoint",
+                    str(current_predictor),
                     "--output-dir",
                     str(iter_ckpt_dir),
                     "--warmup-epochs",
@@ -135,17 +144,21 @@ def main() -> None:
                 run_cmd(train_cmd, dry_run=args.dry_run)
             else:
                 logging.info("[Iteration 0] Skipping bootstrap training step.")
-                current_subjepa = iter_ckpt_dir / "rl_joint_latest_subjepa.eqx"
-                current_valhead = iter_ckpt_dir / "rl_joint_latest_value_head.eqx"
+                current_encoder = iter_ckpt_dir / "ft_encoder_latest.eqx"
+                current_predictor = iter_ckpt_dir / "ft_predictor_latest.eqx"
+                current_valhead = iter_ckpt_dir / "ft_value_head_latest.eqx"
                 assert current_valhead is not None
                 if not args.dry_run and (
-                    not current_subjepa.exists() or not current_valhead.exists()
+                    not current_encoder.exists()
+                    or not current_predictor.exists()
+                    or not current_valhead.exists()
                 ):
                     raise FileNotFoundError(
                         f"Cannot skip bootstrap: checkpoints missing in {iter_ckpt_dir}"
                     )
-            current_subjepa = iter_ckpt_dir / "rl_joint_latest_subjepa.eqx"
-            current_valhead = iter_ckpt_dir / "rl_joint_latest_value_head.eqx"
+            current_encoder = iter_ckpt_dir / "ft_encoder_latest.eqx"
+            current_predictor = iter_ckpt_dir / "ft_predictor_latest.eqx"
+            current_valhead = iter_ckpt_dir / "ft_value_head_latest.eqx"
             continue
 
         assert current_valhead is not None, "Value head checkpoint is not set."
@@ -158,8 +171,10 @@ def main() -> None:
         rollout_cmd = [
             args.python_client,
             mpc_script,
-            "--checkpoint-path",
-            str(current_subjepa),
+            "--encoder-path",
+            str(current_encoder),
+            "--predictor-path",
+            str(current_predictor),
             "--value-head-path",
             str(current_valhead),
             "--output-dir",
@@ -176,8 +191,10 @@ def main() -> None:
             finetune_script,
             "--data-dir",
             str(iter_rollout_dir),
-            "--ssl-checkpoint",
-            str(current_subjepa),
+            "--encoder-checkpoint",
+            str(current_encoder),
+            "--predictor-checkpoint",
+            str(current_predictor),
             "--value-head-checkpoint",
             str(current_valhead),
             "--output-dir",
@@ -189,8 +206,9 @@ def main() -> None:
         ]
         run_cmd(train_cmd, dry_run=args.dry_run)
 
-        current_subjepa = iter_ckpt_dir / "rl_joint_latest_subjepa.eqx"
-        current_valhead = iter_ckpt_dir / "rl_joint_latest_value_head.eqx"
+        current_encoder = iter_ckpt_dir / "ft_encoder_latest.eqx"
+        current_predictor = iter_ckpt_dir / "ft_predictor_latest.eqx"
+        current_valhead = iter_ckpt_dir / "ft_value_head_latest.eqx"
 
     logging.info("=== RL Cyclic Orchestration Complete ===")
 

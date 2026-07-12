@@ -21,7 +21,19 @@ def parse_args() -> argparse.Namespace:
         "--checkpoint-path",
         type=str,
         default=None,
-        help="Path to pretrained Sub-JEPA .eqx checkpoint.",
+        help="Path to combined Sub-JEPA .eqx checkpoint.",
+    )
+    parser.add_argument(
+        "--encoder-path",
+        type=str,
+        default=None,
+        help="Path to Sub-JEPA encoder .eqx checkpoint.",
+    )
+    parser.add_argument(
+        "--predictor-path",
+        type=str,
+        default=None,
+        help="Path to Sub-JEPA predictor .eqx checkpoint.",
     )
     parser.add_argument(
         "--value-head-path",
@@ -63,6 +75,8 @@ def main() -> None:
 
     driver = MPCDriver(
         checkpoint_path=args.checkpoint_path,
+        encoder_path=args.encoder_path,
+        predictor_path=args.predictor_path,
         value_head_path=args.value_head_path,
         encoder_type=args.encoder_type,
         planner_type=args.planner_type,

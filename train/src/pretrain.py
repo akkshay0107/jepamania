@@ -167,8 +167,8 @@ def load_checkpoint(path: Union[str, Path], template: CheckpointT) -> Checkpoint
 def _last_epoch_index(checkpoint_dir: Path) -> int:
     """Highest epoch number among existing weight checkpoints, or 0."""
     indices = []
-    for path in checkpoint_dir.glob("subjepa_epoch_*.eqx"):
-        suffix = path.stem.removeprefix("subjepa_epoch_")
+    for path in checkpoint_dir.glob("pretrain_encoder_ep*.eqx"):
+        suffix = path.stem.removeprefix("pretrain_encoder_ep")
         if suffix.isdigit():
             indices.append(int(suffix))
     return max(indices, default=0)
@@ -245,21 +245,24 @@ def train(
     )
     opt_state = optimizer.init(eqx.filter(models, eqx.is_array))
 
-    projectors_path = checkpoint_dir / "subjepa_projectors.eqx"
+    projectors_path = checkpoint_dir / "pretrain_projectors.eqx"
     start_epoch = 0
     if resume:
-        latest_path = checkpoint_dir / "subjepa_latest.eqx"
-        latest_opt_path = checkpoint_dir / "subjepa_latest_optstate.eqx"
-        for path in (latest_path, latest_opt_path, projectors_path):
+        enc_path = checkpoint_dir / "pretrain_encoder_latest.eqx"
+        pred_path = checkpoint_dir / "pretrain_predictor_latest.eqx"
+        latest_opt_path = checkpoint_dir / "pretrain_latest_optstate.eqx"
+        for path in (enc_path, pred_path, latest_opt_path, projectors_path):
             if not path.exists():
                 raise FileNotFoundError(f"Cannot resume: missing {path}")
-        models = load_checkpoint(latest_path, models)
+        encoder = load_checkpoint(enc_path, models[0])
+        predictor = load_checkpoint(pred_path, models[1])
+        models = (encoder, predictor)
         opt_state = load_checkpoint(latest_opt_path, opt_state)
         subspace_projectors, slice_projectors = load_checkpoint(
             projectors_path, (subspace_projectors, slice_projectors)
         )
         start_epoch = _last_epoch_index(checkpoint_dir)
-        print(f"Resumed from {latest_path} at epoch {start_epoch}")
+        print(f"Resumed from {enc_path} and {pred_path} at epoch {start_epoch}")
     else:
         save_checkpoint(projectors_path, (subspace_projectors, slice_projectors))
 
@@ -356,17 +359,28 @@ def train(
 
             # Weights and optimizer state live in separate files so deployment
             # ships weights-only while resume can restore the Adam moments.
-            save_checkpoint(checkpoint_dir / f"subjepa_epoch_{epoch + 1}.eqx", models)
-            save_checkpoint(checkpoint_dir / "subjepa_latest.eqx", models)
             save_checkpoint(
-                checkpoint_dir / f"subjepa_epoch_{epoch + 1}_optstate.eqx", opt_state
+                checkpoint_dir / f"pretrain_encoder_ep{epoch + 1}.eqx", models[0]
             )
-            save_checkpoint(checkpoint_dir / "subjepa_latest_optstate.eqx", opt_state)
+            save_checkpoint(
+                checkpoint_dir / f"pretrain_predictor_ep{epoch + 1}.eqx", models[1]
+            )
+            save_checkpoint(checkpoint_dir / "pretrain_encoder_latest.eqx", models[0])
+            save_checkpoint(checkpoint_dir / "pretrain_predictor_latest.eqx", models[1])
+            save_checkpoint(
+                checkpoint_dir / f"pretrain_ep{epoch + 1}_optstate.eqx", opt_state
+            )
+            save_checkpoint(checkpoint_dir / "pretrain_latest_optstate.eqx", opt_state)
 
             if val_mean_loss is not None and val_mean_loss < best_val_loss:
                 best_val_loss = val_mean_loss
-                save_checkpoint(checkpoint_dir / "subjepa_best.eqx", models)
-                save_checkpoint(checkpoint_dir / "subjepa_best_optstate.eqx", opt_state)
+                save_checkpoint(checkpoint_dir / "pretrain_encoder_best.eqx", models[0])
+                save_checkpoint(
+                    checkpoint_dir / "pretrain_predictor_best.eqx", models[1]
+                )
+                save_checkpoint(
+                    checkpoint_dir / "pretrain_best_optstate.eqx", opt_state
+                )
     finally:
         wandb.finish()
 

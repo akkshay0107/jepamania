@@ -25,7 +25,7 @@ from core.config import (
     ValueHeadConfig,
 )
 from core.dynamics import MLPPredictor, MLPValueHead
-from core.encoders import ConvEncoder, LidarEncoder
+from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder, load_encoder_auto
 from jaxtyping import Array, Float
 from src.dataloader import DataLoader, SlidingWindowDataset
 from src.loss import generate_projectors, sub_jepa_loss
@@ -40,12 +40,15 @@ logging.basicConfig(
 )
 
 DEFAULT_DATA_DIR = TRAIN_ROOT.parent / "win-client" / "data"
-DEFAULT_SSL_CHECKPOINT = (
-    TRAIN_ROOT.parent / "checkpoints" / "pretrain" / "subjepa_latest.eqx"
+DEFAULT_ENCODER_CHECKPOINT = (
+    TRAIN_ROOT.parent / "checkpoints" / "pretrain" / "pretrain_encoder_latest.eqx"
+)
+DEFAULT_PREDICTOR_CHECKPOINT = (
+    TRAIN_ROOT.parent / "checkpoints" / "pretrain" / "pretrain_predictor_latest.eqx"
 )
 DEFAULT_OUTPUT_DIR = TRAIN_ROOT.parent / "checkpoints" / "finetune"
 
-Encoder = Union[ConvEncoder, LidarEncoder]
+Encoder = Union[ViTEncoder, ConvEncoder, LidarEncoder]
 RLModels = Tuple[Encoder, MLPPredictor, MLPValueHead]
 Batch = Mapping[str, Union[np.ndarray, Array]]
 
@@ -208,8 +211,10 @@ def make_joint_step(
 
 def train_rl(
     data_dir: Path,
-    ssl_checkpoint: Path,
     output_dir: Path,
+    ssl_checkpoint: Union[Path, None] = None,
+    encoder_checkpoint: Path = DEFAULT_ENCODER_CHECKPOINT,
+    predictor_checkpoint: Path = DEFAULT_PREDICTOR_CHECKPOINT,
     value_head_checkpoint: Union[Path, None] = None,
     warmup_epochs: int = 5,
     joint_epochs: int = 5,
@@ -221,14 +226,17 @@ def train_rl(
     batch_size: int = 64,
     num_workers: int = 2,
     seed: int = 42,
+    encoder_type: str = "vit",
     obs_type: str = "screen",
 ) -> RLModels:
     """Executes cyclic RL fine-tuning for Sub-JEPA models and value head.
 
     Arguments:
       data_dir: Path to rollout or bootstrap HDF5 dataset directory
-      ssl_checkpoint: Path to pretrained Sub-JEPA SSL Equinox checkpoint
       output_dir: Destination path for saving fine-tuned checkpoints
+      ssl_checkpoint: Optional legacy combined Sub-JEPA SSL Equinox checkpoint
+      encoder_checkpoint: Path to pretrained Sub-JEPA encoder Equinox checkpoint
+      predictor_checkpoint: Path to pretrained Sub-JEPA predictor Equinox checkpoint
       value_head_checkpoint: Optional path to warm-started value head checkpoint
       warmup_epochs: Number of value head warmup epochs before joint fine-tuning
       joint_epochs: Number of epochs for joint encoder-predictor-value fine-tuning
@@ -247,14 +255,32 @@ def train_rl(
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     key = jax.random.PRNGKey(seed)
+    key_enc, key_pred, key_val, key_proj = jax.random.split(key, 4)
 
-    logging.info(f"Loading dataset from {data_dir} (load_rewards=True)...")
+    encoder: Encoder
+    detected_type: str = encoder_type
+    if encoder_checkpoint.exists():
+        encoder, detected_type = load_encoder_auto(encoder_checkpoint, key_enc)
+        logging.info(
+            f"Auto-detected encoder architecture from checkpoint: {detected_type}"
+        )
+    elif encoder_type == "vit":
+        encoder = ViTEncoder(EncoderConfig(), key=key_enc)
+    elif encoder_type == "lidar":
+        encoder = LidarEncoder(EncoderConfig(), key=key_enc)
+    elif encoder_type == "conv":
+        encoder = ConvEncoder(EncoderConfig(), key=key_enc)
+    else:
+        raise ValueError(f"Unknown encoder_type: {encoder_type}")
+
+    effective_obs_type = "lidar" if detected_type == "lidar" else obs_type
+    logging.info(f"Loading dataset from {data_dir} (obs_type={effective_obs_type})...")
     dataset = SlidingWindowDataset(
         data_dir=data_dir,
         history_len=4,
         rollout_len=5,
         discretize_actions=True,
-        obs_type=obs_type,
+        obs_type=effective_obs_type,
         load_rewards=True,
     )
     if len(dataset) == 0:
@@ -269,16 +295,12 @@ def train_rl(
         seed=seed,
     )
 
-    logging.info(f"Loading pre-trained SSL models from {ssl_checkpoint}...")
-    key_enc, key_pred, key_val, key_proj = jax.random.split(key, 4)
-    if obs_type == "lidar":
-        encoder = LidarEncoder(EncoderConfig(), key=key_enc)
-    else:
-        encoder = ConvEncoder(EncoderConfig(), key=key_enc)
     predictor = MLPPredictor(PredictorConfig(), key=key_pred)
-
-    template = (encoder, predictor)
-    encoder, predictor = load_checkpoint(ssl_checkpoint, template)
+    if ssl_checkpoint is not None and Path(ssl_checkpoint).exists():
+        template = (encoder, predictor)
+        encoder, predictor = load_checkpoint(Path(ssl_checkpoint), template)
+    elif predictor_checkpoint.exists():
+        predictor = load_checkpoint(predictor_checkpoint, predictor)
 
     value_head = MLPValueHead(ValueHeadConfig(), key=key_val)
     if value_head_checkpoint is not None:
@@ -372,16 +394,16 @@ def train_rl(
                 f"Total: {mean_t:.6f} | JEPA: {mean_j:.6f} | Val: {mean_v:.6f} "
                 f"({time.time() - t0:.1f}s)"
             )
-            save_checkpoint(output_dir / f"rl_joint_epoch_{epoch + 1}.eqx", models)
-            save_checkpoint(output_dir / "rl_joint_latest.eqx", models)
-            save_checkpoint(
-                output_dir / "rl_joint_latest_subjepa.eqx", (models[0], models[1])
-            )
-            save_checkpoint(output_dir / "rl_joint_latest_value_head.eqx", models[2])
+            save_checkpoint(output_dir / f"ft_encoder_ep{epoch + 1}.eqx", models[0])
+            save_checkpoint(output_dir / f"ft_predictor_ep{epoch + 1}.eqx", models[1])
+            save_checkpoint(output_dir / f"ft_value_head_ep{epoch + 1}.eqx", models[2])
+            save_checkpoint(output_dir / "ft_encoder_latest.eqx", models[0])
+            save_checkpoint(output_dir / "ft_predictor_latest.eqx", models[1])
+            save_checkpoint(output_dir / "ft_value_head_latest.eqx", models[2])
 
-    save_checkpoint(output_dir / "rl_joint_latest.eqx", models)
-    save_checkpoint(output_dir / "rl_joint_latest_subjepa.eqx", (models[0], models[1]))
-    save_checkpoint(output_dir / "rl_joint_latest_value_head.eqx", models[2])
+    save_checkpoint(output_dir / "ft_encoder_latest.eqx", models[0])
+    save_checkpoint(output_dir / "ft_predictor_latest.eqx", models[1])
+    save_checkpoint(output_dir / "ft_value_head_latest.eqx", models[2])
 
     return models
 
@@ -397,8 +419,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ssl-checkpoint",
         type=Path,
-        default=DEFAULT_SSL_CHECKPOINT,
-        help="Pretrained SSL eqx checkpoint",
+        default=None,
+        help="Optional legacy combined SSL eqx checkpoint",
+    )
+    parser.add_argument(
+        "--encoder-checkpoint",
+        type=Path,
+        default=DEFAULT_ENCODER_CHECKPOINT,
+        help="Pretrained encoder eqx checkpoint",
+    )
+    parser.add_argument(
+        "--predictor-checkpoint",
+        type=Path,
+        default=DEFAULT_PREDICTOR_CHECKPOINT,
+        help="Pretrained predictor eqx checkpoint",
     )
     parser.add_argument(
         "--value-head-checkpoint",
@@ -414,9 +448,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--warmup-epochs", type=int, default=5, help="Warmup epochs")
     parser.add_argument("--joint-epochs", type=int, default=5, help="Joint epochs")
-    parser.add_argument(
-        "--obs-type", type=str, default="screen", choices=["screen", "lidar"]
-    )
     return parser.parse_args()
 
 
@@ -424,12 +455,13 @@ def main() -> None:
     args = parse_args()
     train_rl(
         data_dir=args.data_dir,
-        ssl_checkpoint=args.ssl_checkpoint,
-        value_head_checkpoint=args.value_head_checkpoint,
         output_dir=args.output_dir,
+        ssl_checkpoint=args.ssl_checkpoint,
+        encoder_checkpoint=args.encoder_checkpoint,
+        predictor_checkpoint=args.predictor_checkpoint,
+        value_head_checkpoint=args.value_head_checkpoint,
         warmup_epochs=args.warmup_epochs,
         joint_epochs=args.joint_epochs,
-        obs_type=args.obs_type,
     )
 
 

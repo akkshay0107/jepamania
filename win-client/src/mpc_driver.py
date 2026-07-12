@@ -19,7 +19,7 @@ from core.actions import to_continuous_action_np
 from core.async_planner import AsyncPlannerWrapper
 from core.config import load_config
 from core.dynamics import MLPPredictor, MLPValueHead
-from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder
+from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder, load_encoder_auto
 from core.interfaces import Encoder, Predictor
 from core.planners import BeamSearchPlanner, CEMPlanner, RandomShootingPlanner
 from src.data_writer import HDF5Writer
@@ -33,16 +33,14 @@ logging.basicConfig(
 
 
 def load_subjepa_checkpoint(
-    checkpoint_path: str | Path,
+    checkpoint_path: Optional[str | Path] = None,
+    encoder_path: Optional[str | Path] = None,
+    predictor_path: Optional[str | Path] = None,
     config_path: Optional[str | Path] = None,
     encoder_type: str = "vit",
     seed: int = 42,
 ) -> tuple[Encoder, Predictor]:
-    """Loads pretrained Encoder and MLPPredictor weights from an Equinox .eqx file."""
-    path = Path(checkpoint_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Sub-JEPA checkpoint not found: {path}")
-
+    """Loads pretrained Encoder and MLPPredictor weights from Equinox .eqx files."""
     if config_path is None:
         config_path = (
             Path(__file__).resolve().parent.parent.parent / "core" / "config.yaml"
@@ -52,20 +50,45 @@ def load_subjepa_checkpoint(
     key = jax.random.PRNGKey(seed)
     key_enc, key_pred = jax.random.split(key)
 
-    if encoder_type == "vit":
-        encoder = ViTEncoder(model_cfg.encoder, key_enc)
-    elif encoder_type == "lidar":
-        encoder = LidarEncoder(model_cfg.encoder, key_enc)
-    elif encoder_type == "conv":
-        encoder = ConvEncoder(model_cfg.encoder, key_enc)
-    else:
-        raise ValueError(f"Unknown encoder_type: {encoder_type}")
-
     predictor = MLPPredictor(model_cfg.predictor, key_pred)
-    loaded_encoder, loaded_predictor = eqx.tree_deserialise_leaves(
-        path, (encoder, predictor)
-    )
-    logging.info(f"Loaded Sub-JEPA models ({encoder_type} encoder) from {path.name}")
+
+    if checkpoint_path is not None:
+        path = Path(checkpoint_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Sub-JEPA checkpoint not found: {path}")
+        if encoder_type == "vit":
+            encoder = ViTEncoder(model_cfg.encoder, key_enc)
+        elif encoder_type == "lidar":
+            encoder = LidarEncoder(model_cfg.encoder, key_enc)
+        elif encoder_type == "conv":
+            encoder = ConvEncoder(model_cfg.encoder, key_enc)
+        else:
+            raise ValueError(f"Unknown encoder_type: {encoder_type}")
+        loaded_encoder, loaded_predictor = eqx.tree_deserialise_leaves(
+            path, (encoder, predictor)
+        )
+        logging.info(
+            f"Loaded Sub-JEPA models ({encoder_type} encoder) from {path.name}"
+        )
+    elif encoder_path is not None and predictor_path is not None:
+        ep = Path(encoder_path)
+        pp = Path(predictor_path)
+        if not ep.exists() or not pp.exists():
+            raise FileNotFoundError(
+                f"Missing encoder or predictor checkpoint: {ep}, {pp}"
+            )
+        loaded_encoder, detected_type = load_encoder_auto(
+            ep, key_enc, model_cfg.encoder
+        )
+        loaded_predictor = eqx.tree_deserialise_leaves(pp, predictor)
+        logging.info(
+            f"Loaded Sub-JEPA ({detected_type} encoder) from {ep.name} and {pp.name}"
+        )
+    else:
+        raise ValueError(
+            "Must specify checkpoint_path or both encoder_path and predictor_path"
+        )
+
     return loaded_encoder, loaded_predictor
 
 
@@ -104,6 +127,8 @@ class MPCDriver:
     def __init__(
         self,
         checkpoint_path: Optional[str | Path] = None,
+        encoder_path: Optional[str | Path] = None,
+        predictor_path: Optional[str | Path] = None,
         value_head_path: Optional[str | Path] = None,
         config_path: Optional[str | Path] = None,
         encoder_type: Optional[str] = None,
@@ -115,6 +140,8 @@ class MPCDriver:
 
         Arguments:
           checkpoint_path: Path to Sub-JEPA pretrained Equinox checkpoint
+          encoder_path: Path to Sub-JEPA encoder Equinox checkpoint
+          predictor_path: Path to Sub-JEPA predictor Equinox checkpoint
           value_head_path: Path to learned MLPValueHead Equinox checkpoint
           config_path: Optional custom path to model configuration yaml
           encoder_type: Encoder modality ('screen', 'lidar', or 'conv')
@@ -127,10 +154,12 @@ class MPCDriver:
         )
         self.max_episodes = max_episodes
         self.checkpoint_path = checkpoint_path or cfg.mpc.checkpoint_path
-        if not self.checkpoint_path:
+        self.encoder_path = encoder_path
+        self.predictor_path = predictor_path
+        has_enc_pred = self.encoder_path and self.predictor_path
+        if not self.checkpoint_path and not has_enc_pred:
             raise ValueError(
-                "A Sub-JEPA checkpoint path must be provided via arguments "
-                "or settings.yaml (mpc.checkpoint_path)."
+                "Must provide checkpoint_path or both encoder/predictor paths."
             )
 
         self.value_head_path = value_head_path or cfg.mpc.value_head_path
@@ -144,7 +173,9 @@ class MPCDriver:
         self.planner_type = planner_type or cfg.mpc.planner_type
 
         self.encoder, self.predictor = load_subjepa_checkpoint(
-            self.checkpoint_path,
+            checkpoint_path=self.checkpoint_path,
+            encoder_path=self.encoder_path,
+            predictor_path=self.predictor_path,
             config_path=config_path,
             encoder_type=self.encoder_type,
             seed=cfg.mpc.seed,
@@ -314,8 +345,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint-path",
         type=Path,
-        required=True,
-        help="Path to Sub-JEPA Equinox checkpoint (.eqx)",
+        default=None,
+        help="Path to combined Sub-JEPA Equinox checkpoint (.eqx)",
+    )
+    parser.add_argument(
+        "--encoder-path",
+        type=Path,
+        default=None,
+        help="Path to Sub-JEPA encoder Equinox checkpoint (.eqx)",
+    )
+    parser.add_argument(
+        "--predictor-path",
+        type=Path,
+        default=None,
+        help="Path to Sub-JEPA predictor Equinox checkpoint (.eqx)",
     )
     parser.add_argument(
         "--value-head-path",
@@ -338,9 +381,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--encoder-type",
         type=str,
-        default="screen",
-        choices=["screen", "lidar"],
-        help="Encoder modality",
+        default="vit",
+        choices=["vit", "conv", "lidar"],
+        help="Encoder modality ('vit', 'conv', or 'lidar')",
     )
     parser.add_argument(
         "--planner-type",
@@ -360,6 +403,8 @@ def main() -> None:
 
     driver = MPCDriver(
         checkpoint_path=args.checkpoint_path,
+        encoder_path=args.encoder_path,
+        predictor_path=args.predictor_path,
         value_head_path=args.value_head_path,
         encoder_type=args.encoder_type,
         planner_type=args.planner_type,

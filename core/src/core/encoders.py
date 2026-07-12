@@ -1,6 +1,7 @@
 """Visual (ViT and CNN) and LiDAR observation encoders for JEPA latent embeddings."""
 
-from typing import Any, Mapping
+from pathlib import Path
+from typing import Any, Mapping, Union
 
 import equinox as eqx
 import jax
@@ -324,3 +325,25 @@ class LidarEncoder(eqx.Module):
 
         x_fused = jnp.concatenate([x_lidar, x_telemetry], axis=0)
         return self.fusion_mlp(x_fused)
+
+
+def load_encoder_auto(
+    path: Union[str, Path],
+    key: PRNGKeyArray,
+    cfg: Union[EncoderConfig, None] = None,
+) -> tuple[Union[ViTEncoder, ConvEncoder, LidarEncoder], str]:
+    """Auto-detects and deserializes a ViTEncoder, ConvEncoder, or LidarEncoder."""
+    path = Path(path)
+    enc_cfg = cfg or EncoderConfig()
+    for enc_cls, enc_name in (
+        (ViTEncoder, "vit"),
+        (ConvEncoder, "conv"),
+        (LidarEncoder, "lidar"),
+    ):
+        try:
+            template = enc_cls(enc_cfg, key)
+            loaded = eqx.tree_deserialise_leaves(path, template)
+            return loaded, enc_name
+        except Exception:
+            continue
+    raise ValueError(f"Could not load encoder from {path} as ViT, Conv, or Lidar.")
