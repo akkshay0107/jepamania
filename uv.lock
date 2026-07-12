@@ -266,6 +266,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "h5py" },
     { name = "matplotlib" },
 ]
 
@@ -280,7 +281,10 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-dev = [{ name = "matplotlib", specifier = ">=3.11.0" }]
+dev = [
+    { name = "h5py", specifier = ">=3.11.0" },
+    { name = "matplotlib", specifier = ">=3.11.0" },
+]
 
 [[package]]
 name = "cryptography"

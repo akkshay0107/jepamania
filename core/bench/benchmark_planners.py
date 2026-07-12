@@ -49,10 +49,11 @@ def main():
     print("-" * 90)
 
     rs_configs = [
-        {"seq": 5, "samples": 100},
         {"seq": 10, "samples": 100},
+        {"seq": 10, "samples": 250},
         {"seq": 10, "samples": 500},
-        {"seq": 20, "samples": 500},
+        {"seq": 10, "samples": 1000},
+        {"seq": 10, "samples": 2000},
     ]
 
     for cfg in rs_configs:
@@ -75,10 +76,11 @@ def main():
         )
 
     beam_configs = [
-        {"seq": 5, "width": 5},
+        {"seq": 10, "width": 2},
+        {"seq": 10, "width": 3},
         {"seq": 10, "width": 5},
+        {"seq": 10, "width": 8},
         {"seq": 10, "width": 10},
-        {"seq": 20, "width": 10},
     ]
 
     for cfg in beam_configs:
@@ -101,10 +103,11 @@ def main():
         )
 
     cem_configs = [
-        {"seq": 5, "iters": 3, "samples": 50},
+        {"seq": 10, "iters": 2, "samples": 50},
+        {"seq": 10, "iters": 3, "samples": 50},
         {"seq": 10, "iters": 3, "samples": 100},
+        {"seq": 10, "iters": 3, "samples": 200},
         {"seq": 10, "iters": 5, "samples": 100},
-        {"seq": 20, "iters": 5, "samples": 200},
     ]
 
     for cfg in cem_configs:

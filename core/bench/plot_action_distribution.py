@@ -1,3 +1,4 @@
+import argparse
 import sys
 from pathlib import Path
 from typing import cast
@@ -5,6 +6,9 @@ from typing import cast
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+from core.actions import GAS_BRAKE_VALUES_NP, rescale_gas_np, to_continuous_action_np
+from matplotlib.colors import LogNorm
+from scipy.ndimage import gaussian_filter
 
 # Path-independent resolution based on file location
 # to support execution from any directory
@@ -22,23 +26,27 @@ OUTPUT_PLOT = SCRIPT_DIR.parent / "out" / "action_distributions.png"
 TELEM_ACT1_SLICE = slice(3, 6)
 
 
-def load_gamepad_actions(data_dir: Path):
-    """Loads all actions and telemetry inputs from HDF5 files in the data directory.
+def load_gamepad_actions(data_path: Path):
+    """Loads all actions and telemetry inputs from HDF5 files in data_path.
 
     Returns:
         tuple: (actions, telemetry_actions) both as NumPy arrays,
                or (None, None) if no data.
     """
-    if not data_dir.exists():
-        print(f"Data directory does not exist: {data_dir}")
+    if not data_path.exists():
+        print(f"Data path does not exist: {data_path}")
         return None, None
 
-    h5_files = list(data_dir.glob("*.h5"))
+    if data_path.is_file():
+        h5_files = [data_path] if data_path.suffix == ".h5" else []
+    else:
+        h5_files = sorted(data_path.rglob("*.h5"))
+
     if not h5_files:
-        print(f"No HDF5 files (*.h5) found in data directory: {data_dir}")
+        print(f"No HDF5 files (*.h5) found in: {data_path}")
         return None, None
 
-    print(f"Found {len(h5_files)} HDF5 files in {data_dir}")
+    print(f"Found {len(h5_files)} HDF5 files in {data_path}")
 
     all_actions = []
     all_telemetry_actions = []
@@ -49,20 +57,28 @@ def load_gamepad_actions(data_dir: Path):
                 if "actions" in f:
                     actions_ds = cast(h5py.Dataset, f["actions"])
                     actions = cast(np.ndarray, actions_ds[:])
+                    if actions.ndim == 1 or (
+                        actions.ndim == 2 and actions.shape[-1] != 3
+                    ):
+                        actions = to_continuous_action_np(actions)
+                    actions = rescale_gas_np(actions.astype(np.float32))
                     all_actions.append(actions)
                 else:
                     print(f"Warning: 'actions' dataset not found in {file_path.name}")
 
-                if "observations" in f:
+                telemetry = None
+                if "observations/telemetry" in f:
+                    telemetry = cast(np.ndarray, f["observations/telemetry"][:])
+                elif "observations" in f:
                     obs_grp = cast(h5py.Group, f["observations"])
                     if "telemetry" in obs_grp:
                         telemetry_ds = cast(h5py.Dataset, obs_grp["telemetry"])
                         telemetry = cast(np.ndarray, telemetry_ds[:])
-                        # act1 (most recent previous action) is at indices 3:6
-                        # within the 9-float telemetry vector.
-                        if telemetry.shape[1] >= 6:
-                            telemetry_actions = telemetry[:, TELEM_ACT1_SLICE]
-                            all_telemetry_actions.append(telemetry_actions)
+
+                if telemetry is not None and telemetry.shape[1] >= 6:
+                    telemetry_actions = telemetry[:, TELEM_ACT1_SLICE]
+                    telemetry_actions = rescale_gas_np(telemetry_actions)
+                    all_telemetry_actions.append(telemetry_actions)
         except Exception as e:
             print(f"Error reading {file_path.name}: {e}")
 
@@ -78,7 +94,7 @@ def load_gamepad_actions(data_dir: Path):
 
 
 def print_statistics(name: str, actions: np.ndarray):
-    """Prints basic summary statistics for gas, brake, and steering actions."""
+    """Prints summary statistics for gas, brake, and steering actions."""
     print(f"\nSummary Statistics for {name} (Total Frames: {len(actions)}):")
     headers = ["Input Channel", "Min", "Max", "Mean", "Std Dev"]
     h0, h1, h2, h3, h4 = headers
@@ -95,27 +111,83 @@ def print_statistics(name: str, actions: np.ndarray):
 
 
 def plot_distributions(actions: np.ndarray, output_path: Path):
-    """Plots the histograms of gas, brake, and steering actions."""
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4.5), sharey=False)
+    """Plots the 2D joint distribution of gas/brake and 1D histograms."""
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
-    axes[0].hist(actions[:, 0], bins=30, color="#3bba5c", edgecolor="black", alpha=0.7)
-    axes[0].set_title("Gas Pedal Distribution")
-    axes[0].set_xlabel("Gas Value [0.0, 1.0]")
-    axes[0].set_ylabel("Frequency")
-    axes[0].grid(True, linestyle="--", alpha=0.6)
+    # Top-Left: Gas vs Brake 2D Joint Distribution (Heatmap + Contours)
+    ax_2d = axes[0, 0]
+    counts, xedges, yedges = np.histogram2d(
+        actions[:, 0], actions[:, 1], bins=45, range=[[0.0, 1.0], [0.0, 1.0]]
+    )
+    counts_t = counts.T
+    X, Y = np.meshgrid(
+        (xedges[:-1] + xedges[1:]) / 2.0, (yedges[:-1] + yedges[1:]) / 2.0
+    )
 
-    axes[1].hist(actions[:, 1], bins=30, color="#f05454", edgecolor="black", alpha=0.7)
-    axes[1].set_title("Braking Distribution")
-    axes[1].set_xlabel("Brake Value [0.0, 1.0]")
-    axes[1].grid(True, linestyle="--", alpha=0.6)
+    mesh = ax_2d.pcolormesh(
+        xedges,
+        yedges,
+        np.maximum(counts_t, 1),
+        cmap="inferno",
+        norm=LogNorm(vmin=1.0, vmax=max(counts_t.max(), 10.0)),
+    )
+    fig.colorbar(mesh, ax=ax_2d, label="Frame Count (Log Scale)")
 
-    axes[2].hist(actions[:, 2], bins=50, color="#2cb0c5", edgecolor="black", alpha=0.7)
-    axes[2].set_title("Steering Distribution")
-    axes[2].set_xlabel("Steer Value [-1.0, 1.0]")
-    axes[2].grid(True, linestyle="--", alpha=0.6)
+    smoothed = gaussian_filter(counts_t, sigma=1.0)
+    ax_2d.contour(
+        X,
+        Y,
+        smoothed,
+        levels=7,
+        colors="white",
+        alpha=0.45,
+        linewidths=0.9,
+    )
+
+    ax_2d.scatter(
+        GAS_BRAKE_VALUES_NP[:, 0],
+        GAS_BRAKE_VALUES_NP[:, 1],
+        color="#00ffff",
+        edgecolor="black",
+        s=120,
+        marker="*",
+        label="Discrete Targets (6 pairs)",
+        zorder=10,
+    )
+    ax_2d.set_title("Gas vs. Brake 2D Joint Distribution")
+    ax_2d.set_xlabel("Gas Value [0.0, 1.0]")
+    ax_2d.set_ylabel("Brake Value [0.0, 1.0]")
+    ax_2d.legend(loc="upper left")
+    ax_2d.grid(True, linestyle="--", alpha=0.4)
+
+    # Top-Right: Steering Distribution
+    ax_steer = axes[0, 1]
+    ax_steer.hist(actions[:, 2], bins=50, color="#2cb0c5", edgecolor="black", alpha=0.7)
+    ax_steer.set_title("Steering Distribution")
+    ax_steer.set_xlabel("Steer Value [-1.0, 1.0]")
+    ax_steer.set_ylabel("Frequency")
+    ax_steer.grid(True, linestyle="--", alpha=0.6)
+
+    # Bottom-Left: Gas Pedal Distribution
+    ax_gas = axes[1, 0]
+    ax_gas.hist(actions[:, 0], bins=35, color="#3bba5c", edgecolor="black", alpha=0.7)
+    ax_gas.set_title("Gas Pedal 1D Distribution")
+    ax_gas.set_xlabel("Gas Value [0.0, 1.0]")
+    ax_gas.set_ylabel("Frequency")
+    ax_gas.grid(True, linestyle="--", alpha=0.6)
+
+    # Bottom-Right: Braking Distribution
+    ax_brake = axes[1, 1]
+    ax_brake.hist(actions[:, 1], bins=35, color="#f05454", edgecolor="black", alpha=0.7)
+    ax_brake.set_title("Braking 1D Distribution")
+    ax_brake.set_xlabel("Brake Value [0.0, 1.0]")
+    ax_brake.set_ylabel("Frequency")
+    ax_brake.grid(True, linestyle="--", alpha=0.6)
 
     plt.suptitle(
-        "Trackmania Gamepad Input Distributions", fontsize=14, fontweight="bold"
+        "Trackmania Gamepad Input Distributions & Discretization Factorization",
+        fontsize=14,
+        fontweight="bold",
     )
     plt.tight_layout()
 
@@ -125,9 +197,29 @@ def plot_distributions(actions: np.ndarray, output_path: Path):
     plt.close()
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Analyze and plot gamepad action distributions from HDF5 datasets."
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=DATA_DIR,
+        help=f"Path to data directory or dataset file (default: {DATA_DIR})",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=OUTPUT_PLOT,
+        help=f"Output path for saved plot (default: {OUTPUT_PLOT})",
+    )
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
     print("Scanning for gamepad action datasets...")
-    actions, telem_actions = load_gamepad_actions(DATA_DIR)
+    actions, telem_actions = load_gamepad_actions(args.data_dir)
 
     if actions is None:
         print(
@@ -155,7 +247,7 @@ def main():
             "(telemetry dataset not found or incomplete)."
         )
 
-    plot_distributions(actions, OUTPUT_PLOT)
+    plot_distributions(actions, args.output)
 
 
 if __name__ == "__main__":

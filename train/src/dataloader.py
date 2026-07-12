@@ -13,7 +13,7 @@ from typing import Any, Dict, Generator, Optional, Tuple, Union
 
 import h5py
 import numpy as np
-from core.actions import discretize_action_np
+from core.actions import discretize_action_np, rescale_gas_np
 
 
 class SlidingWindowDataset:
@@ -235,6 +235,7 @@ class SlidingWindowDataset:
             actions_ds[local_t : local_t + self.K],  # pyright: ignore[reportIndexIssue]
             dtype=np.float32,
         )
+        actions_seq = rescale_gas_np(actions_seq)
         if self.discretize_actions:
             actions_seq = discretize_action_np(actions_seq)
 

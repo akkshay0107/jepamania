@@ -13,10 +13,10 @@ TELEMETRY_FEATURES: int = 9
 # Fixed TMRL Constants (TM2020LIDAR)
 LIDAR_BEAMS: int = 19
 
-# Gas / Brake -> discretized into 5 bins
-# Steering [-1.0, 1.0] -> discretized into 7 bins
-# so 35 distinct actions possible at any given moment of time
-NUM_ACTIONS: int = 35
+# Gas / Brake -> discretized into 6 bins
+# Steering [-1.0, 1.0] -> discretized into 9 bins
+# so 54 distinct actions possible at any given moment of time
+NUM_ACTIONS: int = 54
 LATENT_DIM: int = 192
 
 # In TMRL Trackmania (20 FPS), max progress reward per step is ~10.0 at top speed.
