@@ -42,7 +42,6 @@ _DEFAULTS = {
     "mpc": {
         "checkpoint_path": None,
         "value_head_path": None,
-        "encoder_type": "vit",
         "planner_type": "cem",
         "sequence_len": 10,
         "num_samples": 128,

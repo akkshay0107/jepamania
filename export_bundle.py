@@ -18,18 +18,17 @@ ROOT_DIR = Path(__file__).resolve().parent
 
 DEFAULT_CONFIGS = [
     Path("core/config.yaml"),
+    Path("train/config.yaml"),
     Path("win-client/settings.yaml"),
 ]
 
 DEFAULT_CHECKPOINTS = [
-    Path("checkpoints/finetune/ft_encoder_latest.eqx"),
-    Path("checkpoints/finetune/ft_predictor_latest.eqx"),
+    Path("checkpoints/finetune/ft_model_latest.eqx"),
     Path("checkpoints/finetune/ft_value_head_latest.eqx"),
 ]
 
 FALLBACK_CHECKPOINTS = [
-    Path("checkpoints/pretrain/pretrain_encoder_latest.eqx"),
-    Path("checkpoints/pretrain/pretrain_predictor_latest.eqx"),
+    Path("checkpoints/pretrain/pretrain_model_latest.eqx"),
 ]
 
 

@@ -13,7 +13,9 @@ from core.config import (
     LIDAR_BEAMS,
     TELEMETRY_FEATURES,
     EncoderConfig,
+    PredictorConfig,
 )
+from core.dynamics import MLPPredictor
 
 
 def get_2d_sincos_pos_embed(
@@ -327,23 +329,35 @@ class LidarEncoder(eqx.Module):
         return self.fusion_mlp(x_fused)
 
 
-def load_encoder_auto(
+def load_models_auto(
     path: Union[str, Path],
     key: PRNGKeyArray,
-    cfg: Union[EncoderConfig, None] = None,
-) -> tuple[Union[ViTEncoder, ConvEncoder, LidarEncoder], str]:
-    """Auto-detects and deserializes a ViTEncoder, ConvEncoder, or LidarEncoder."""
+    encoder_cfg: Union[EncoderConfig, None] = None,
+    predictor_cfg: Union[PredictorConfig, None] = None,
+) -> tuple[tuple[Union[ViTEncoder, ConvEncoder, LidarEncoder], MLPPredictor], str]:
+    """Auto-detects and deserializes a combined (encoder, predictor) checkpoint.
+
+    Tries each encoder architecture in turn; the differing PyTree structures
+    make deserialization fail for every class except the one the checkpoint
+    was written with.
+    """
     path = Path(path)
-    enc_cfg = cfg or EncoderConfig()
+    if not path.exists():
+        raise FileNotFoundError(f"Model checkpoint not found: {path}")
+    enc_cfg = encoder_cfg or EncoderConfig()
+    pred_cfg = predictor_cfg or PredictorConfig()
+    key_enc, key_pred = jax.random.split(key)
     for enc_cls, enc_name in (
         (ViTEncoder, "vit"),
         (ConvEncoder, "conv"),
         (LidarEncoder, "lidar"),
     ):
         try:
-            template = enc_cls(enc_cfg, key)
+            template = (enc_cls(enc_cfg, key_enc), MLPPredictor(pred_cfg, key_pred))
             loaded = eqx.tree_deserialise_leaves(path, template)
             return loaded, enc_name
         except Exception:
             continue
-    raise ValueError(f"Could not load encoder from {path} as ViT, Conv, or Lidar.")
+    raise ValueError(
+        f"Could not load (encoder, predictor) pair from {path} as ViT, Conv, or Lidar."
+    )

@@ -1,3 +1,9 @@
+"""Cyclic online RL orchestrator: alternate rollout collection and fine-tuning.
+
+Pure orchestration — all training hyperparameters live in train/config.yaml
+and are read by the fine-tuning script itself.
+"""
+
 import argparse
 import logging
 import subprocess
@@ -15,24 +21,16 @@ def run_cmd(cmd: list[str], dry_run: bool = False) -> None:
     if dry_run:
         logging.info("[Dry Run] Command skipped.")
         return
-    res = subprocess.run(cmd, check=True)
-    if res.returncode != 0:
-        raise RuntimeError(f"Command failed with exit code {res.returncode}: {cmd_str}")
+    subprocess.run(cmd, check=True)
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Cyclic Online RL Orchestrator")
     parser.add_argument(
-        "--encoder-checkpoint",
+        "--pretrain-checkpoint",
         type=Path,
-        default=Path("checkpoints/pretrain/pretrain_encoder_latest.eqx"),
-        help="Pre-trained SSL Sub-JEPA encoder Equinox checkpoint",
-    )
-    parser.add_argument(
-        "--predictor-checkpoint",
-        type=Path,
-        default=Path("checkpoints/pretrain/pretrain_predictor_latest.eqx"),
-        help="Pre-trained SSL Sub-JEPA predictor Equinox checkpoint",
+        default=Path("checkpoints/pretrain/pretrain_model_latest.eqx"),
+        help="Combined (encoder, predictor) Sub-JEPA checkpoint to start from",
     )
     parser.add_argument(
         "--bootstrap-dir",
@@ -50,7 +48,7 @@ def parse_args() -> argparse.Namespace:
         "--checkpoints-dir",
         type=Path,
         default=Path("checkpoints/rl"),
-        help="Base directory for RL checkpoints",
+        help="Shared fine-tune output directory for RL checkpoints",
     )
     parser.add_argument(
         "--num-iterations",
@@ -63,18 +61,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=5,
         help="Number of rollout episodes to collect per iteration",
-    )
-    parser.add_argument(
-        "--warmup-epochs",
-        type=int,
-        default=5,
-        help="Value head warmup epochs on initial bootstrap training",
-    )
-    parser.add_argument(
-        "--joint-epochs",
-        type=int,
-        default=5,
-        help="Joint fine-tuning epochs per iteration",
     )
     parser.add_argument(
         "--python-train",
@@ -93,11 +79,6 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Print commands without executing them",
     )
-    parser.add_argument(
-        "--skip-bootstrap",
-        action="store_true",
-        help="Skip bootstrap iteration 0 if already trained",
-    )
     return parser.parse_args()
 
 
@@ -111,104 +92,68 @@ def main() -> None:
     args.checkpoints_dir.mkdir(parents=True, exist_ok=True)
     args.rollouts_dir.mkdir(parents=True, exist_ok=True)
 
-    current_encoder = args.encoder_checkpoint
-    current_predictor = args.predictor_checkpoint
-    current_valhead: Path | None = None
+    model_ckpt = args.checkpoints_dir / "ft_model_latest.eqx"
+    valhead_ckpt = args.checkpoints_dir / "ft_value_head_latest.eqx"
 
     for iter_idx in range(args.num_iterations):
         logging.info(f"=== Starting RL Cycle Iteration {iter_idx} ===")
 
-        iter_ckpt_dir = args.checkpoints_dir / f"iter_{iter_idx}"
+        # A missing value head means no fine-tuning has completed yet: start
+        # fresh from the pretrained model on bootstrap data. Otherwise collect
+        # rollouts with the current models and continue fine-tuning from them.
+        fresh = not valhead_ckpt.exists()
 
-        if iter_idx == 0:
-            if not args.skip_bootstrap:
-                logging.info(
-                    f"[Iter 0] Fine-tuning on bootstrap data ({args.bootstrap_dir})..."
-                )
-                train_cmd = [
-                    args.python_train,
-                    finetune_script,
-                    "--data-dir",
-                    str(args.bootstrap_dir),
-                    "--encoder-checkpoint",
-                    str(current_encoder),
-                    "--predictor-checkpoint",
-                    str(current_predictor),
-                    "--output-dir",
-                    str(iter_ckpt_dir),
-                    "--warmup-epochs",
-                    str(args.warmup_epochs),
-                    "--joint-epochs",
-                    str(args.joint_epochs),
-                ]
-                run_cmd(train_cmd, dry_run=args.dry_run)
-            else:
-                logging.info("[Iteration 0] Skipping bootstrap training step.")
-                current_encoder = iter_ckpt_dir / "ft_encoder_latest.eqx"
-                current_predictor = iter_ckpt_dir / "ft_predictor_latest.eqx"
-                current_valhead = iter_ckpt_dir / "ft_value_head_latest.eqx"
-                assert current_valhead is not None
-                if not args.dry_run and (
-                    not current_encoder.exists()
-                    or not current_predictor.exists()
-                    or not current_valhead.exists()
-                ):
-                    raise FileNotFoundError(
-                        f"Cannot skip bootstrap: checkpoints missing in {iter_ckpt_dir}"
-                    )
-            current_encoder = iter_ckpt_dir / "ft_encoder_latest.eqx"
-            current_predictor = iter_ckpt_dir / "ft_predictor_latest.eqx"
-            current_valhead = iter_ckpt_dir / "ft_value_head_latest.eqx"
-            continue
+        if fresh:
+            logging.info(
+                f"[Iter {iter_idx}] Bootstrapping on {args.bootstrap_dir}..."
+            )
+            data_dir = args.bootstrap_dir
+            train_cmd = [
+                args.python_train,
+                finetune_script,
+                "--data-dir",
+                str(data_dir),
+                "--checkpoint",
+                str(args.pretrain_checkpoint),
+                "--output-dir",
+                str(args.checkpoints_dir),
+            ]
+        else:
+            iter_rollout_dir = args.rollouts_dir / f"iter_{iter_idx}"
+            iter_rollout_dir.mkdir(parents=True, exist_ok=True)
 
-        assert current_valhead is not None, "Value head checkpoint is not set."
+            logging.info(
+                f"[Iter {iter_idx}] Collecting {args.episodes_per_iter} rollout eps..."
+            )
+            rollout_cmd = [
+                args.python_client,
+                mpc_script,
+                "--checkpoint-path",
+                str(model_ckpt),
+                "--value-head-path",
+                str(valhead_ckpt),
+                "--output-dir",
+                str(iter_rollout_dir),
+                "--num-episodes",
+                str(args.episodes_per_iter),
+            ]
+            run_cmd(rollout_cmd, dry_run=args.dry_run)
 
-        iter_rollout_dir = args.rollouts_dir / f"iter_{iter_idx}"
-        iter_rollout_dir.mkdir(parents=True, exist_ok=True)
+            logging.info(f"[Iter {iter_idx}] Fine-tuning on collected rollouts...")
+            train_cmd = [
+                args.python_train,
+                finetune_script,
+                "--data-dir",
+                str(iter_rollout_dir),
+                "--checkpoint",
+                str(model_ckpt),
+                "--value-head",
+                str(valhead_ckpt),
+                "--output-dir",
+                str(args.checkpoints_dir),
+            ]
 
-        msg = f"[Iter {iter_idx}] Collecting {args.episodes_per_iter} rollout eps..."
-        logging.info(msg)
-        rollout_cmd = [
-            args.python_client,
-            mpc_script,
-            "--encoder-path",
-            str(current_encoder),
-            "--predictor-path",
-            str(current_predictor),
-            "--value-head-path",
-            str(current_valhead),
-            "--output-dir",
-            str(iter_rollout_dir),
-            "--num-episodes",
-            str(args.episodes_per_iter),
-        ]
-        run_cmd(rollout_cmd, dry_run=args.dry_run)
-
-        msg2 = f"[Iter {iter_idx}] Fine-tuning Sub-JEPA + Val Head on rollouts..."
-        logging.info(msg2)
-        train_cmd = [
-            args.python_train,
-            finetune_script,
-            "--data-dir",
-            str(iter_rollout_dir),
-            "--encoder-checkpoint",
-            str(current_encoder),
-            "--predictor-checkpoint",
-            str(current_predictor),
-            "--value-head-checkpoint",
-            str(current_valhead),
-            "--output-dir",
-            str(iter_ckpt_dir),
-            "--warmup-epochs",
-            "0",  # No warmup needed after iteration 0
-            "--joint-epochs",
-            str(args.joint_epochs),
-        ]
         run_cmd(train_cmd, dry_run=args.dry_run)
-
-        current_encoder = iter_ckpt_dir / "ft_encoder_latest.eqx"
-        current_predictor = iter_ckpt_dir / "ft_predictor_latest.eqx"
-        current_valhead = iter_ckpt_dir / "ft_value_head_latest.eqx"
 
     logging.info("=== RL Cyclic Orchestration Complete ===")
 

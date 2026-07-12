@@ -25,9 +25,8 @@ episode_monitor:
 
 # Online MPC Deployment settings
 mpc:
-  checkpoint_path: null # Path to pretrained Sub-JEPA checkpoint (.eqx) e.g., checkpoints/subjepa_best.eqx
+  checkpoint_path: null # Path to combined (encoder, predictor) checkpoint (.eqx) e.g., checkpoints/finetune/ft_model_latest.eqx
   value_head_path: null # Optional path to pretrained MLPValueHead checkpoint (.eqx)
-  encoder_type: "vit"   # "vit", "conv", or "lidar"
   planner_type: "cem"   # "cem", "beam", or "random"
   sequence_len: 10
   num_samples: 128

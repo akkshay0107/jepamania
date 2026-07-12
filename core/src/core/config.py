@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from typing import Optional
 
 from omegaconf import OmegaConf
 
@@ -53,19 +52,10 @@ class ValueHeadConfig:
 
 
 @dataclass
-class LossConfig:
-    num_subspaces: int = 16
-    subspace_dim: Optional[int] = None  # Will default to latent_dim // num_subspaces
-    num_slices: int = 16
-    reg_weight: float = 1.0
-
-
-@dataclass
 class SubJepaConfig:
     encoder: EncoderConfig = field(default_factory=EncoderConfig)
     predictor: PredictorConfig = field(default_factory=PredictorConfig)
     value_head: ValueHeadConfig = field(default_factory=ValueHeadConfig)
-    loss: LossConfig = field(default_factory=LossConfig)
 
 
 def load_config(yaml_path: str = "config.yaml") -> SubJepaConfig:

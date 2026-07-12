@@ -10,8 +10,3 @@ predictor:
   action_embed_dim: 16
   hidden_dim: 256
 
-loss:
-  num_subspaces: 16
-  subspace_dim: null
-  num_slices: 16
-  reg_weight: 1.0

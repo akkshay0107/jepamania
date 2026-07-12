@@ -9,32 +9,35 @@ rolled-out latent against the target latent while regularizing the target
 distribution to prevent collapse.
 """
 
+import argparse
 import sys
 import time
 from pathlib import Path
+from typing import Any, Dict, Iterable, Mapping, Optional, Tuple, TypeVar, Union
 
 TRAIN_ROOT = Path(__file__).resolve().parent.parent
 if str(TRAIN_ROOT) not in sys.path:
     sys.path.insert(0, str(TRAIN_ROOT))
-import argparse
-from typing import Any, Dict, Iterable, Mapping, Optional, Tuple, TypeVar, Union
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import wandb
-from core.config import IMG_HIST_LEN, LossConfig, load_config
+from core.config import IMG_HIST_LEN, load_config
 from core.dynamics import MLPPredictor
 from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder
 from core.interfaces import Encoder, Predictor
 from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree
 from omegaconf import OmegaConf
+from src.config import LossConfig, load_train_config
 from src.dataloader import DataLoader, SlidingWindowDataset
 from src.loss import generate_projectors, sub_jepa_loss
 
-DEFAULT_CONFIG = TRAIN_ROOT / "core" / "config.yaml"
+import wandb
+
+DEFAULT_CONFIG = TRAIN_ROOT.parent / "core" / "config.yaml"
+DEFAULT_TRAIN_CONFIG = TRAIN_ROOT / "config.yaml"
 DEFAULT_DATA_DIR = TRAIN_ROOT.parent / "win-client" / "data"
 DEFAULT_CHECKPOINT_DIR = TRAIN_ROOT.parent / "checkpoints" / "pretrain"
 
@@ -167,8 +170,8 @@ def load_checkpoint(path: Union[str, Path], template: CheckpointT) -> Checkpoint
 def _last_epoch_index(checkpoint_dir: Path) -> int:
     """Highest epoch number among existing weight checkpoints, or 0."""
     indices = []
-    for path in checkpoint_dir.glob("pretrain_encoder_ep*.eqx"):
-        suffix = path.stem.removeprefix("pretrain_encoder_ep")
+    for path in checkpoint_dir.glob("pretrain_model_ep*.eqx"):
+        suffix = path.stem.removeprefix("pretrain_model_ep")
         if suffix.isdigit():
             indices.append(int(suffix))
     return max(indices, default=0)
@@ -192,10 +195,11 @@ def train(
     """
     Runs offline pretraining and returns the trained (encoder, predictor).
 
-    Checkpoints are written to `checkpoint_dir` after every epoch as
-    `subjepa_epoch_{n}.eqx` plus a rolling `subjepa_latest.eqx`, with the
-    optimizer state alongside in matching `*_optstate.eqx` files and the
-    frozen loss projectors in `subjepa_projectors.eqx`.
+    The combined (encoder, predictor) pair is written to `checkpoint_dir`
+    after every epoch as `pretrain_model_ep{n}.eqx` plus a rolling
+    `pretrain_model_latest.eqx` (and `pretrain_model_best.eqx` on validation
+    improvement), with the optimizer state in `pretrain_optstate_latest.eqx`
+    and the frozen loss projectors in `projectors.eqx`.
 
     With `resume=True`, weights, optimizer state, and projectors are restored
     from the rolling files and epoch numbering continues from the highest
@@ -245,24 +249,21 @@ def train(
     )
     opt_state = optimizer.init(eqx.filter(models, eqx.is_array))
 
-    projectors_path = checkpoint_dir / "pretrain_projectors.eqx"
+    projectors_path = checkpoint_dir / "projectors.eqx"
     start_epoch = 0
     if resume:
-        enc_path = checkpoint_dir / "pretrain_encoder_latest.eqx"
-        pred_path = checkpoint_dir / "pretrain_predictor_latest.eqx"
-        latest_opt_path = checkpoint_dir / "pretrain_latest_optstate.eqx"
-        for path in (enc_path, pred_path, latest_opt_path, projectors_path):
+        model_path = checkpoint_dir / "pretrain_model_latest.eqx"
+        latest_opt_path = checkpoint_dir / "pretrain_optstate_latest.eqx"
+        for path in (model_path, latest_opt_path, projectors_path):
             if not path.exists():
                 raise FileNotFoundError(f"Cannot resume: missing {path}")
-        encoder = load_checkpoint(enc_path, models[0])
-        predictor = load_checkpoint(pred_path, models[1])
-        models = (encoder, predictor)
+        models = load_checkpoint(model_path, models)
         opt_state = load_checkpoint(latest_opt_path, opt_state)
         subspace_projectors, slice_projectors = load_checkpoint(
             projectors_path, (subspace_projectors, slice_projectors)
         )
         start_epoch = _last_epoch_index(checkpoint_dir)
-        print(f"Resumed from {enc_path} and {pred_path} at epoch {start_epoch}")
+        print(f"Resumed from {model_path} at epoch {start_epoch}")
     else:
         save_checkpoint(projectors_path, (subspace_projectors, slice_projectors))
 
@@ -285,7 +286,7 @@ def train(
 
     best_val_loss = float("inf")
     if resume and val_dataloader is not None:
-        best_path = checkpoint_dir / "subjepa_best.eqx"
+        best_path = checkpoint_dir / "pretrain_model_best.eqx"
         if best_path.exists():
             best_models = load_checkpoint(best_path, models)
             val_losses = [eval_step(best_models, b) for b in val_dataloader]
@@ -360,27 +361,14 @@ def train(
             # Weights and optimizer state live in separate files so deployment
             # ships weights-only while resume can restore the Adam moments.
             save_checkpoint(
-                checkpoint_dir / f"pretrain_encoder_ep{epoch + 1}.eqx", models[0]
+                checkpoint_dir / f"pretrain_model_ep{epoch + 1}.eqx", models
             )
-            save_checkpoint(
-                checkpoint_dir / f"pretrain_predictor_ep{epoch + 1}.eqx", models[1]
-            )
-            save_checkpoint(checkpoint_dir / "pretrain_encoder_latest.eqx", models[0])
-            save_checkpoint(checkpoint_dir / "pretrain_predictor_latest.eqx", models[1])
-            save_checkpoint(
-                checkpoint_dir / f"pretrain_ep{epoch + 1}_optstate.eqx", opt_state
-            )
-            save_checkpoint(checkpoint_dir / "pretrain_latest_optstate.eqx", opt_state)
+            save_checkpoint(checkpoint_dir / "pretrain_model_latest.eqx", models)
+            save_checkpoint(checkpoint_dir / "pretrain_optstate_latest.eqx", opt_state)
 
             if val_mean_loss is not None and val_mean_loss < best_val_loss:
                 best_val_loss = val_mean_loss
-                save_checkpoint(checkpoint_dir / "pretrain_encoder_best.eqx", models[0])
-                save_checkpoint(
-                    checkpoint_dir / "pretrain_predictor_best.eqx", models[1]
-                )
-                save_checkpoint(
-                    checkpoint_dir / "pretrain_best_optstate.eqx", opt_state
-                )
+                save_checkpoint(checkpoint_dir / "pretrain_model_best.eqx", models)
     finally:
         wandb.finish()
 
@@ -395,21 +383,13 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_DATA_DIR,
         help="Directory of HDF5 shards",
     )
-    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument(
         "--encoder",
         choices=["vit", "conv", "lidar"],
         default="vit",
-        help="Encoder backbone",
+        help="Encoder backbone (must match the checkpoint when resuming)",
     )
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=256)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--rollout-len", type=int, default=5)
-    parser.add_argument("--num-workers", type=int, default=1)
     parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument(
         "--resume",
         action="store_true",
@@ -420,17 +400,33 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    if args.config.exists():
-        print(f"Loading config from {args.config}")
+    if DEFAULT_CONFIG.exists():
+        print(f"Loading model config from {DEFAULT_CONFIG}")
     else:
-        print(f"Warning: config {args.config} not found; using structured defaults")
-    cfg = load_config(str(args.config))
+        print(
+            f"Warning: model config {DEFAULT_CONFIG} not found; "
+            "using structured defaults"
+        )
+    cfg = load_config(str(DEFAULT_CONFIG))
+
+    if DEFAULT_TRAIN_CONFIG.exists():
+        print(f"Loading train config from {DEFAULT_TRAIN_CONFIG}")
+    else:
+        print(
+            f"Warning: train config {DEFAULT_TRAIN_CONFIG} not found; using defaults"
+        )
+    train_cfg = load_train_config(str(DEFAULT_TRAIN_CONFIG))
+
+    epochs = train_cfg.pretrain.epochs
+    batch_size = train_cfg.pretrain.batch_size
+    lr = train_cfg.pretrain.lr
+    seed = train_cfg.pretrain.seed
 
     obs_type = "lidar" if args.encoder == "lidar" else "screen"
     dataset = SlidingWindowDataset(
         data_dir=args.data_dir,
         history_len=IMG_HIST_LEN,
-        rollout_len=args.rollout_len,
+        rollout_len=train_cfg.pretrain.rollout_len,
         discretize_actions=True,
         obs_type=obs_type,
     )
@@ -438,7 +434,9 @@ def main() -> None:
         raise SystemExit(f"No valid transitions found in {args.data_dir}")
     print(f"Indexed {len(dataset)} transitions across {len(dataset.shards)} shards")
 
-    train_dataset, val_dataset = dataset.split(val_ratio=0.1, seed=args.seed)
+    train_dataset, val_dataset = dataset.split(
+        val_ratio=train_cfg.pretrain.val_ratio, seed=seed
+    )
     print(
         f"Dataset split by episode: {len(train_dataset)} train transitions, "
         f"{len(val_dataset)} validation transitions"
@@ -446,22 +444,22 @@ def main() -> None:
 
     train_dataloader = DataLoader(
         train_dataset,
-        batch_size=args.batch_size,
+        batch_size=batch_size,
         shuffle=True,
         drop_last=True,
-        num_workers=args.num_workers,
-        seed=args.seed,
+        num_workers=train_cfg.pretrain.num_workers,
+        seed=seed,
     )
     val_dataloader = DataLoader(
         val_dataset,
-        batch_size=args.batch_size,
+        batch_size=batch_size,
         shuffle=False,
         drop_last=False,
-        num_workers=args.num_workers,
-        seed=args.seed,
+        num_workers=train_cfg.pretrain.num_workers,
+        seed=seed,
     )
 
-    key = jax.random.PRNGKey(args.seed)
+    key = jax.random.PRNGKey(seed)
     key_enc, key_pred, key_train = jax.random.split(key, 3)
 
     if args.encoder == "vit":
@@ -474,6 +472,7 @@ def main() -> None:
 
     config_dict = {
         "cfg": OmegaConf.to_container(cfg, resolve=True),
+        "train_cfg": OmegaConf.to_container(train_cfg, resolve=True),
         "args": {
             k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
         },
@@ -483,12 +482,12 @@ def main() -> None:
         (encoder, predictor),
         train_dataloader,
         latent_dim=cfg.encoder.latent_dim,
-        loss_cfg=cfg.loss,
-        num_epochs=args.epochs,
-        learning_rate=args.lr,
+        loss_cfg=train_cfg.loss,
+        num_epochs=epochs,
+        learning_rate=lr,
         key=key_train,
         checkpoint_dir=args.checkpoint_dir,
-        log_every=args.log_every,
+        log_every=train_cfg.pretrain.log_every,
         resume=args.resume,
         val_dataloader=val_dataloader,
         config_dict=config_dict,
