@@ -39,6 +39,12 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
+DEFAULT_DATA_DIR = TRAIN_ROOT.parent / "win-client" / "data"
+DEFAULT_SSL_CHECKPOINT = (
+    TRAIN_ROOT.parent / "checkpoints" / "pretrain" / "subjepa_latest.eqx"
+)
+DEFAULT_OUTPUT_DIR = TRAIN_ROOT.parent / "checkpoints" / "finetune"
+
 Encoder = Union[ConvEncoder, LidarEncoder]
 RLModels = Tuple[Encoder, MLPPredictor, MLPValueHead]
 Batch = Mapping[str, Union[np.ndarray, Array]]
@@ -247,7 +253,7 @@ def train_rl(
         data_dir=data_dir,
         history_len=4,
         rollout_len=5,
-        discretize_actions=False,
+        discretize_actions=True,
         obs_type=obs_type,
         load_rewards=True,
     )
@@ -382,11 +388,16 @@ def train_rl(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Sub-JEPA RL Fine-Tuner")
-    parser.add_argument("--data-dir", type=Path, required=True, help="HDF5 shards dir")
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=DEFAULT_DATA_DIR,
+        help="HDF5 shards dir",
+    )
     parser.add_argument(
         "--ssl-checkpoint",
         type=Path,
-        required=True,
+        default=DEFAULT_SSL_CHECKPOINT,
         help="Pretrained SSL eqx checkpoint",
     )
     parser.add_argument(
@@ -398,7 +409,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("checkpoints/rl"),
+        default=DEFAULT_OUTPUT_DIR,
         help="Output checkpoints directory",
     )
     parser.add_argument("--warmup-epochs", type=int, default=5, help="Warmup epochs")

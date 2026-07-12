@@ -35,6 +35,8 @@ from src.dataloader import DataLoader, SlidingWindowDataset
 from src.loss import generate_projectors, sub_jepa_loss
 
 DEFAULT_CONFIG = TRAIN_ROOT / "core" / "config.yaml"
+DEFAULT_DATA_DIR = TRAIN_ROOT.parent / "win-client" / "data"
+DEFAULT_CHECKPOINT_DIR = TRAIN_ROOT.parent / "checkpoints" / "pretrain"
 
 
 # (encoder, predictor) — both are Equinox modules, so the tuple is a PyTree.
@@ -374,7 +376,10 @@ def train(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Offline Sub-JEPA pretraining")
     parser.add_argument(
-        "--data-dir", type=Path, required=True, help="Directory of HDF5 shards"
+        "--data-dir",
+        type=Path,
+        default=DEFAULT_DATA_DIR,
+        help="Directory of HDF5 shards",
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument(
@@ -388,7 +393,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--rollout-len", type=int, default=5)
     parser.add_argument("--num-workers", type=int, default=1)
-    parser.add_argument("--checkpoint-dir", type=Path, default=Path("checkpoints"))
+    parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument(

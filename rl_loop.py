@@ -25,19 +25,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--ssl-checkpoint",
         type=Path,
-        required=True,
+        default=Path("checkpoints/pretrain/subjepa_latest.eqx"),
         help="Pre-trained SSL Sub-JEPA Equinox checkpoint",
     )
     parser.add_argument(
         "--bootstrap-dir",
         type=Path,
-        default=Path("data/rl/bootstrap"),
+        default=Path("win-client/data/rl/bootstrap"),
         help="Path to initial reward-labeled bootstrap HDF5 data",
     )
     parser.add_argument(
         "--rollouts-dir",
         type=Path,
-        default=Path("data/rl/rollouts"),
+        default=Path("win-client/data/rl/rollouts"),
         help="Base directory for online rollout HDF5 files",
     )
     parser.add_argument(
@@ -98,6 +98,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
+    root_dir = Path(__file__).resolve().parent
+    finetune_script = str(root_dir / "train" / "src" / "finetune.py")
+    mpc_script = str(root_dir / "win-client" / "src" / "mpc_driver.py")
+
     args.checkpoints_dir.mkdir(parents=True, exist_ok=True)
     args.rollouts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -116,7 +120,7 @@ def main() -> None:
                 )
                 train_cmd = [
                     args.python_train,
-                    "train/src/finetune.py",
+                    finetune_script,
                     "--data-dir",
                     str(args.bootstrap_dir),
                     "--ssl-checkpoint",
@@ -144,7 +148,6 @@ def main() -> None:
             current_valhead = iter_ckpt_dir / "rl_joint_latest_value_head.eqx"
             continue
 
-        # --- Iteration > 0: Rollout + Train ---
         assert current_valhead is not None, "Value head checkpoint is not set."
 
         iter_rollout_dir = args.rollouts_dir / f"iter_{iter_idx}"
@@ -154,7 +157,7 @@ def main() -> None:
         logging.info(msg)
         rollout_cmd = [
             args.python_client,
-            "win-client/src/mpc_driver.py",
+            mpc_script,
             "--checkpoint-path",
             str(current_subjepa),
             "--value-head-path",
@@ -170,7 +173,7 @@ def main() -> None:
         logging.info(msg2)
         train_cmd = [
             args.python_train,
-            "train/src/finetune.py",
+            finetune_script,
             "--data-dir",
             str(iter_rollout_dir),
             "--ssl-checkpoint",

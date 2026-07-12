@@ -41,13 +41,14 @@ def main() -> None:
         level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
     )
 
+    client_root = Path(__file__).resolve().parent
     if args.bootstrap:
         apply_online_rl_patches()
-        output_dir = Path("data/rl/bootstrap")
-        logging.info("Bootstrap recording enabled → writing to data/rl/bootstrap")
+        output_dir = client_root / "data" / "rl" / "bootstrap"
+        logging.info(f"Bootstrap recording enabled → writing to {output_dir}")
     else:
         apply_data_collection_patches()
-        output_dir = Path("data/ssl") / args.mode
+        output_dir = client_root / "data" / "ssl" / args.mode
         logging.info(f"SSL recording enabled → writing to {output_dir}")
 
     if args.mode == "human":
