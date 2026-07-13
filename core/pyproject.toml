@@ -2,7 +2,6 @@
 name = "core"
 version = "0.1.0"
 description = "Add your description here"
-readme = "README.md"
 authors = [
     { name = "Akkshay Sundara Rajan", email = "sundar57@purdue.edu" }
 ]
