@@ -1,19 +1,36 @@
-"""HDF5-backed sliding-window dataset and prefetching dataloader.
+"""HDF5-backed sliding-window dataset and prefetching dataloader."""
 
-Indexes observation/telemetry/action transitions from sharded HDF5 files and
-serves samples using a thread-safe bounded LRU RAM shard cache with fallback
-to lazy contiguous file reads.
-"""
-
-import collections
 import queue
 import threading
 from pathlib import Path
-from typing import Any, Dict, Generator, Optional, Tuple, Union
+from typing import Any, Dict, Generator, Optional, Sequence, Tuple, Union
 
 import h5py
 import numpy as np
 from core.actions import discretize_action_np, rescale_gas_np
+
+
+class _ShardPool:
+    """Thread-safe byte-budgeted store of fully materialized shard arrays.
+
+    Shards are pinned by refcount while a loader window consumes them.
+    Entries whose refcount drops to zero stay soft-resident and are evicted
+    (oldest first) only when a later acquisition needs the budget, so a
+    dataset that fits in RAM stays warm across epochs. Shared by reference
+    across dataset splits so a shard containing both train and validation
+    episodes is only materialized once.
+    """
+
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = int(max_bytes)
+        self.cache: Dict[int, Dict[str, Any]] = {}
+        self.refcounts: Dict[int, int] = {}
+        self.bytes_used: int = 0
+        self.lock = threading.Lock()
+
+    def peek(self, shard_idx: int) -> Optional[Dict[str, Any]]:
+        with self.lock:
+            return self.cache.get(shard_idx)
 
 
 class SlidingWindowDataset:
@@ -27,7 +44,7 @@ class SlidingWindowDataset:
         discretize_actions: bool = True,
         obs_type: str = "screen",
         load_rewards: bool = False,
-        max_cache_bytes: int = 4 * 1024**3,  # 4 GB LRU shard pool
+        max_cache_bytes: int = 4 * 1024**3,  # 4 GB RAM shard pool
     ) -> None:
         if obs_type not in ("screen", "lidar"):
             raise ValueError("obs_type must be either 'screen' or 'lidar'.")
@@ -39,11 +56,7 @@ class SlidingWindowDataset:
         self.load_rewards = bool(load_rewards)
         self.max_cache_bytes = int(max_cache_bytes)
 
-        self._shard_cache: collections.OrderedDict[int, Dict[str, Any]] = (
-            collections.OrderedDict()
-        )
-        self._current_cache_bytes: int = 0
-        self._cache_lock = threading.Lock()
+        self._pool = _ShardPool(self.max_cache_bytes)
 
         self.shards: list[Dict[str, Any]] = []
         self.shard_indices_map: np.ndarray = np.empty(0, dtype=np.int32)
@@ -88,6 +101,7 @@ class SlidingWindowDataset:
                     shard_data = {
                         "file_path": file_path,
                         "episode_boundaries": episode_boundaries,
+                        "ram_bytes": self._estimate_shard_bytes(f),
                     }
                     self.shards.append(shard_data)
 
@@ -192,9 +206,7 @@ class SlidingWindowDataset:
             ds.obs_type = self.obs_type
             ds.load_rewards = self.load_rewards
             ds.max_cache_bytes = self.max_cache_bytes
-            ds._shard_cache = collections.OrderedDict()
-            ds._current_cache_bytes = 0
-            ds._cache_lock = threading.Lock()
+            ds._pool = self._pool
             ds.shards = self.shards
             ds.shard_indices_map = self.shard_indices_map[mask]
             ds.local_indices_map = self.local_indices_map[mask]
@@ -217,7 +229,9 @@ class SlidingWindowDataset:
         actions_ds = f["actions"]
 
         slice_start = max(local_t - self.H + 1, frame_start)
-        raw_chunk: np.ndarray = obs_ds[slice_start : local_t + self.K + 1]
+        raw_chunk: np.ndarray = obs_ds[  # pyright: ignore[reportIndexIssue, reportAssignmentType]
+            slice_start : local_t + self.K + 1
+        ]
 
         is_screen = self.obs_type == "screen"
         if is_screen and raw_chunk.ndim >= 3 and raw_chunk.shape[1] == 1:
@@ -271,15 +285,22 @@ class SlidingWindowDataset:
 
         return sample
 
-    def _get_shard_data(self, shard_idx: int) -> Optional[Dict[str, Any]]:
-        """Retrieve shard arrays from LRU cache, evicting oldest shards when full."""
-        if self.max_cache_bytes <= 0:
-            return None
-        with self._cache_lock:
-            if shard_idx in self._shard_cache:
-                self._shard_cache.move_to_end(shard_idx)
-                return self._shard_cache[shard_idx]
+    def _estimate_shard_bytes(self, f: h5py.File) -> int:
+        """Predicted in-RAM footprint of a shard from HDF5 metadata alone.
 
+        Telemetry/actions/rewards are stored as float32 in the cache, so their
+        footprint is element count times four bytes regardless of on-disk dtype.
+        """
+        obs_ds = f[f"observations/{self.obs_type}"]
+        total = int(np.prod(obs_ds.shape)) * obs_ds.dtype.itemsize  # pyright: ignore[reportAttributeAccessIssue]
+        for name in ("observations/telemetry", "actions"):
+            total += int(np.prod(f[name].shape)) * 4  # pyright: ignore[reportAttributeAccessIssue]
+        if self.load_rewards and "rewards" in f:
+            total += int(np.prod(f["rewards"].shape)) * 4  # pyright: ignore[reportAttributeAccessIssue]
+        return total
+
+    def _materialize_shard(self, shard_idx: int) -> Dict[str, Any]:
+        """Read a whole shard from disk into the array layout the pool serves."""
         shard = self.shards[shard_idx]
         with h5py.File(shard["file_path"], "r") as f:
             obs_ds = f[f"observations/{self.obs_type}"]
@@ -306,44 +327,85 @@ class SlidingWindowDataset:
                 if self.load_rewards and "rewards" in f
                 else None
             )
+        return {
+            "obs": raw_obs,
+            "telem": telem,
+            "actions": actions,
+            "rewards": rewards,
+            "nbytes": int(shard["ram_bytes"]),
+        }
 
-        new_bytes = int(
-            raw_obs.nbytes  # pyright: ignore[reportAttributeAccessIssue]
-            + telem.nbytes
-            + actions.nbytes
-        )
-        if rewards is not None:
-            new_bytes += int(rewards.nbytes)
+    def load_shards(self, shard_ids: Sequence[int]) -> list[int]:
+        """Pin shards into the shared RAM pool, evicting idle entries if needed.
 
-        with self._cache_lock:
-            if shard_idx in self._shard_cache:
-                self._shard_cache.move_to_end(shard_idx)
-                return self._shard_cache[shard_idx]
+        Budget for each shard is reserved under the lock before the slow disk
+        read so concurrent loaders cannot jointly overshoot it. Shards that
+        still don't fit are skipped and stream from file instead.
 
-            while (
-                self._current_cache_bytes + new_bytes > self.max_cache_bytes
-                and len(self._shard_cache) > 0
-            ):
-                _, old_data = self._shard_cache.popitem(last=False)
-                old_bytes = int(
-                    old_data["obs"].nbytes
-                    + old_data["telem"].nbytes
-                    + old_data["actions"].nbytes
-                )
-                if old_data["rewards"] is not None:
-                    old_bytes += int(old_data["rewards"].nbytes)
-                self._current_cache_bytes = max(
-                    0, self._current_cache_bytes - old_bytes
-                )
+        Returns the shard ids actually pinned; the caller must hand exactly
+        that list back to `release_shards` when done with the window.
+        """
+        pool = self._pool
+        pinned: list[int] = []
+        to_load: list[int] = []
+        for shard_idx in shard_ids:
+            nbytes = int(self.shards[shard_idx]["ram_bytes"])
+            with pool.lock:
+                if shard_idx in pool.refcounts:
+                    pool.refcounts[shard_idx] += 1
+                    pinned.append(shard_idx)
+                    continue
+                if shard_idx in pool.cache:
+                    pool.refcounts[shard_idx] = 1
+                    pinned.append(shard_idx)
+                    continue
+                if pool.max_bytes <= 0:
+                    continue
+                idle = [i for i in pool.cache if i not in pool.refcounts]
+                for victim in idle:
+                    if pool.bytes_used + nbytes <= pool.max_bytes:
+                        break
+                    evicted = pool.cache.pop(victim)
+                    pool.bytes_used -= int(evicted["nbytes"])
+                if pool.bytes_used + nbytes > pool.max_bytes:
+                    continue
+                pool.bytes_used += nbytes
+                pool.refcounts[shard_idx] = 1
+            pinned.append(shard_idx)
+            to_load.append(shard_idx)
 
-            self._shard_cache[shard_idx] = {
-                "obs": raw_obs,
-                "telem": telem,
-                "actions": actions,
-                "rewards": rewards,
-            }
-            self._current_cache_bytes += new_bytes
-            return self._shard_cache[shard_idx]
+        for shard_idx in to_load:
+            try:
+                entry = self._materialize_shard(shard_idx)
+            except (OSError, KeyError) as e:
+                print(f"Warning: failed to load shard {shard_idx} into RAM: {e}")
+                with pool.lock:
+                    del pool.refcounts[shard_idx]
+                    pool.bytes_used -= int(self.shards[shard_idx]["ram_bytes"])
+                pinned.remove(shard_idx)
+                continue
+            with pool.lock:
+                pool.cache[shard_idx] = entry
+        return pinned
+
+    def release_shards(self, shard_ids: Sequence[int]) -> None:
+        """Unpin shards previously returned by `load_shards`.
+
+        Entries stay soft-resident after their last unpin; they are only
+        dropped when a later `load_shards` call needs the budget.
+        """
+        pool = self._pool
+        with pool.lock:
+            for shard_idx in shard_ids:
+                rc = pool.refcounts.get(shard_idx)
+                if rc is None:
+                    continue
+                if rc <= 1:
+                    del pool.refcounts[shard_idx]
+                    if shard_idx not in pool.cache:
+                        pool.bytes_used -= int(self.shards[shard_idx]["ram_bytes"])
+                else:
+                    pool.refcounts[shard_idx] = rc - 1
 
     def _read_sample_ram(
         self, cached: Dict[str, Any], local_t: int, frame_start: int
@@ -398,7 +460,7 @@ class SlidingWindowDataset:
         local_t = int(self.local_indices_map[idx])
         frame_start = int(self.frame_starts_map[idx])
 
-        cached = self._get_shard_data(shard_idx)
+        cached = self._pool.peek(shard_idx)
         if cached is not None:
             return self._read_sample_ram(cached, local_t, frame_start)
 
@@ -407,8 +469,20 @@ class SlidingWindowDataset:
             return self._read_sample(f, local_t, frame_start)
 
 
+# One window's worth of an epoch: sample indices to serve, in order, and the
+# shard ids that must be RAM-resident while serving them.
+Window = Tuple[np.ndarray, list[int]]
+
+
 class DataLoader:
-    """Prefetches batches of transitions in a background thread."""
+    """Prefetches batches of transitions in a background thread.
+
+    Each epoch is split into shard windows sized to half the dataset's RAM
+    budget; a window is served entirely from RAM while the next one loads in
+    the background, then released. With `shuffle`, shard order is permuted
+    across windows and sample order within each window (not globally), and
+    `drop_last` drops the remainder of each window.
+    """
 
     def __init__(
         self,
@@ -428,39 +502,80 @@ class DataLoader:
         # advances across epochs.
         self.rng = np.random.default_rng(seed)
 
-        self.indices = np.arange(len(self.dataset))
         self.queue: queue.Queue[Optional[Dict[str, np.ndarray]]] = queue.Queue(
             maxsize=8
         )
         self.thread: Optional[threading.Thread] = None
         self.shutdown_event = threading.Event()
 
+    def _num_batches(self, num_samples: int) -> int:
+        num_batches = num_samples // self.batch_size
+        if not self.drop_last and num_samples % self.batch_size != 0:
+            num_batches += 1
+        return num_batches
+
+    def _plan_windows(self) -> list[Window]:
+        """Partition the epoch into shard windows fitting half the RAM budget.
+
+        Half so the next window can prefetch while the current one is being
+        consumed; the two resident windows together respect the full budget.
+        A zero/negative budget yields a single window that streams from file.
+        """
+        ds = self.dataset
+        shard_of = ds.shard_indices_map
+        order = np.argsort(shard_of, kind="mergesort")
+        unique_shards, starts = np.unique(shard_of[order], return_index=True)
+        ends = np.append(starts[1:], len(order))
+        groups = {int(s): order[a:b] for s, a, b in zip(unique_shards, starts, ends)}
+
+        shard_order = [int(s) for s in unique_shards]
+        if self.shuffle:
+            perm = self.rng.permutation(len(shard_order))
+            shard_order = [shard_order[i] for i in perm]
+
+        def finish_window(shard_ids: list[int]) -> Window:
+            indices = np.concatenate([groups[sid] for sid in shard_ids])
+            if self.shuffle:
+                self.rng.shuffle(indices)
+            else:
+                indices = np.sort(indices)
+            return indices, shard_ids
+
+        window_budget = ds._pool.max_bytes // 2
+        windows: list[Window] = []
+        current_ids: list[int] = []
+        current_bytes = 0
+        for sid in shard_order:
+            nbytes = int(ds.shards[sid]["ram_bytes"])
+            if current_ids and 0 < window_budget < current_bytes + nbytes:
+                windows.append(finish_window(current_ids))
+                current_ids, current_bytes = [], 0
+            current_ids.append(sid)
+            current_bytes += nbytes
+        if current_ids:
+            windows.append(finish_window(current_ids))
+        return windows
+
     def __iter__(self) -> Generator[Dict[str, np.ndarray], None, None]:
         if len(self.dataset) == 0:
             return
 
-        indices = np.copy(self.indices)
-        if self.shuffle:
-            self.rng.shuffle(indices)
-
-        num_batches = len(indices) // self.batch_size
-        if not self.drop_last and len(indices) % self.batch_size != 0:
-            num_batches += 1
-
-        if num_batches == 0:
+        windows = self._plan_windows()
+        total_batches = sum(self._num_batches(len(idx)) for idx, _ in windows)
+        if total_batches == 0:
             return
 
         if self.num_workers > 0:
             self.shutdown_event.clear()
             self.thread = threading.Thread(
                 target=self._prefetch_loop,
-                args=(indices, num_batches),
+                args=(windows,),
                 daemon=True,
             )
             self.thread.start()
 
             try:
-                for _ in range(num_batches):
+                for _ in range(total_batches):
                     batch = self.queue.get()
                     if batch is None:
                         break
@@ -475,9 +590,15 @@ class DataLoader:
                     except queue.Empty:
                         break
         else:
-            for i in range(num_batches):
-                batch_indices = indices[i * self.batch_size : (i + 1) * self.batch_size]
-                yield self._collate(batch_indices)
+            for win_indices, shard_ids in windows:
+                pinned = self.dataset.load_shards(shard_ids)
+                try:
+                    for i in range(self._num_batches(len(win_indices))):
+                        yield self._collate(
+                            win_indices[i * self.batch_size : (i + 1) * self.batch_size]
+                        )
+                finally:
+                    self.dataset.release_shards(pinned)
 
     def _put_blocking(self, item: Optional[Dict[str, np.ndarray]]) -> bool:
         while not self.shutdown_event.is_set():
@@ -488,44 +609,81 @@ class DataLoader:
                 continue
         return False
 
-    def _prefetch_loop(self, indices: np.ndarray, num_batches: int) -> None:
+    def _prefetch_loop(self, windows: list[Window]) -> None:
         from concurrent.futures import ThreadPoolExecutor
 
+        ds = self.dataset
         workers = max(1, self.num_workers)
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            prefetch_count = max(4, workers * 2)
-            futures = []
-            next_submit_idx = 0
+        prefetch_count = max(4, workers * 2)
 
-            while next_submit_idx < min(num_batches, prefetch_count):
+        pinned: Dict[int, list[int]] = {}
+
+        def load_window(w: int) -> None:
+            pinned[w] = ds.load_shards(windows[w][1])
+
+        loader: Optional[threading.Thread] = None
+        load_window(0)
+        try:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                for w, (win_indices, _) in enumerate(windows):
+                    if self.shutdown_event.is_set():
+                        break
+
+                    loader = None
+                    if w + 1 < len(windows):
+                        loader = threading.Thread(
+                            target=load_window, args=(w + 1,), daemon=True
+                        )
+                        loader.start()
+
+                    window_ok = self._emit_window(executor, win_indices, prefetch_count)
+
+                    if loader is not None:
+                        loader.join()
+                    ds.release_shards(pinned.pop(w, []))
+                    if not window_ok:
+                        break
+        finally:
+            if loader is not None and loader.is_alive():
+                loader.join()
+            for held in pinned.values():
+                ds.release_shards(held)
+            self._put_blocking(None)
+
+    def _emit_window(self, executor, indices: np.ndarray, prefetch_count: int) -> bool:
+        """Collates and enqueues one window's batches; False aborts the epoch."""
+        num_batches = self._num_batches(len(indices))
+        futures = []
+        next_submit_idx = 0
+
+        while next_submit_idx < min(num_batches, prefetch_count):
+            batch_indices = indices[
+                next_submit_idx * self.batch_size : (next_submit_idx + 1)
+                * self.batch_size
+            ]
+            futures.append(executor.submit(self._collate, batch_indices))
+            next_submit_idx += 1
+
+        for _ in range(num_batches):
+            if self.shutdown_event.is_set():
+                return False
+            try:
+                batch = futures.pop(0).result()
+            except Exception as e:
+                print(f"Warning: DataLoader worker failed to collate batch: {e}")
+                return False
+
+            if not self._put_blocking(batch):
+                return False
+
+            if next_submit_idx < num_batches:
                 batch_indices = indices[
                     next_submit_idx * self.batch_size : (next_submit_idx + 1)
                     * self.batch_size
                 ]
                 futures.append(executor.submit(self._collate, batch_indices))
                 next_submit_idx += 1
-
-            for i in range(num_batches):
-                if self.shutdown_event.is_set():
-                    break
-                try:
-                    batch = futures.pop(0).result()
-                except Exception as e:
-                    print(f"Warning: DataLoader worker failed to collate batch: {e}")
-                    break
-
-                if not self._put_blocking(batch):
-                    break
-
-                if next_submit_idx < num_batches:
-                    batch_indices = indices[
-                        next_submit_idx * self.batch_size : (next_submit_idx + 1)
-                        * self.batch_size
-                    ]
-                    futures.append(executor.submit(self._collate, batch_indices))
-                    next_submit_idx += 1
-
-        self._put_blocking(None)
+        return True
 
     def _collate(self, batch_indices: np.ndarray) -> Dict[str, np.ndarray]:
         ds = self.dataset
@@ -546,8 +704,17 @@ class DataLoader:
 
         for g_start, g_end in zip(group_starts, group_ends):
             shard_idx = int(sorted_shard_ids[g_start])
-            shard = ds.shards[shard_idx]
 
+            cached = ds._pool.peek(shard_idx)
+            if cached is not None:
+                for pos in range(g_start, g_end):
+                    ds_idx = sorted_indices[pos]
+                    local_t = int(ds.local_indices_map[ds_idx])
+                    frame_start = int(ds.frame_starts_map[ds_idx])
+                    samples[pos] = ds._read_sample_ram(cached, local_t, frame_start)
+                continue
+
+            shard = ds.shards[shard_idx]
             with h5py.File(shard["file_path"], "r") as f:
                 for pos in range(g_start, g_end):
                     ds_idx = sorted_indices[pos]
