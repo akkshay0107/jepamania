@@ -293,6 +293,7 @@ def train_rl(
         discretize_actions=True,
         obs_type=obs_type,
         load_rewards=True,
+        max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
     )
     if len(dataset) == 0:
         raise RuntimeError(f"No valid transitions found in {data_dir}")

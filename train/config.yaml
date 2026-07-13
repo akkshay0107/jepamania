@@ -2,17 +2,18 @@ loss:
   num_subspaces: 16
   subspace_dim: null
   num_slices: 16
-  reg_weight: 0.5
+  reg_weight: 0.02
 
 pretrain:
   epochs: 10
   batch_size: 256
   lr: 3.0e-4
   rollout_len: 5
-  num_workers: 1
+  num_workers: 4
   seed: 42
   log_every: 50
   val_ratio: 0.1
+  max_cache_gb: 4.0
 
 finetune:
   warmup_epochs: 3
@@ -23,7 +24,8 @@ finetune:
   lr_val: 3.0e-4
   value_weight: 0.5
   batch_size: 64
-  num_workers: 2
+  num_workers: 4
   seed: 42
   rollout_len: 5
   log_every: 50
+  max_cache_gb: 1.0

@@ -311,7 +311,7 @@ def train(
                 epoch_losses.append(loss)
                 global_step += 1
 
-                if global_step % log_every == 0:
+                if global_step == 1 or global_step % log_every == 0:
                     print(
                         f"epoch {epoch + 1}/{last_epoch} | step {global_step} | "
                         f"loss {float(loss):.6f}"
@@ -429,6 +429,7 @@ def main() -> None:
         rollout_len=train_cfg.pretrain.rollout_len,
         discretize_actions=True,
         obs_type=obs_type,
+        max_cache_bytes=int(train_cfg.pretrain.max_cache_gb * 1024**3),
     )
     if len(dataset) == 0:
         raise SystemExit(f"No valid transitions found in {args.data_dir}")

@@ -1,11 +1,11 @@
-"""
-HDF5-backed sliding-window dataset and prefetching dataloader.
+"""HDF5-backed sliding-window dataset and prefetching dataloader.
 
-Reads observation/telemetry/action transitions from sharded HDF5 files
-without preloading into RAM.  The dataset builds a flat index at init time
-and serves individual samples via lazy file reads.
+Indexes observation/telemetry/action transitions from sharded HDF5 files and
+serves samples using a thread-safe bounded LRU RAM shard cache with fallback
+to lazy contiguous file reads.
 """
 
+import collections
 import queue
 import threading
 from pathlib import Path
@@ -24,9 +24,10 @@ class SlidingWindowDataset:
         data_dir: Union[str, Path],
         history_len: int = 4,
         rollout_len: int = 5,
-        discretize_actions: bool = False,
+        discretize_actions: bool = True,
         obs_type: str = "screen",
         load_rewards: bool = False,
+        max_cache_bytes: int = 4 * 1024**3,  # 4 GB LRU shard pool
     ) -> None:
         if obs_type not in ("screen", "lidar"):
             raise ValueError("obs_type must be either 'screen' or 'lidar'.")
@@ -36,6 +37,13 @@ class SlidingWindowDataset:
         self.K = int(rollout_len)
         self.discretize_actions = bool(discretize_actions)
         self.load_rewards = bool(load_rewards)
+        self.max_cache_bytes = int(max_cache_bytes)
+
+        self._shard_cache: collections.OrderedDict[int, Dict[str, Any]] = (
+            collections.OrderedDict()
+        )
+        self._current_cache_bytes: int = 0
+        self._cache_lock = threading.Lock()
 
         self.shards: list[Dict[str, Any]] = []
         self.shard_indices_map: np.ndarray = np.empty(0, dtype=np.int32)
@@ -183,6 +191,10 @@ class SlidingWindowDataset:
             ds.discretize_actions = self.discretize_actions
             ds.obs_type = self.obs_type
             ds.load_rewards = self.load_rewards
+            ds.max_cache_bytes = self.max_cache_bytes
+            ds._shard_cache = collections.OrderedDict()
+            ds._current_cache_bytes = 0
+            ds._cache_lock = threading.Lock()
             ds.shards = self.shards
             ds.shard_indices_map = self.shard_indices_map[mask]
             ds.local_indices_map = self.local_indices_map[mask]
@@ -194,22 +206,6 @@ class SlidingWindowDataset:
     def __len__(self) -> int:
         return len(self.shard_indices_map)
 
-    def _get_history_stack(
-        self, obs_ds: h5py.Dataset, idx: int, frame_start: int
-    ) -> np.ndarray:
-        slice_start = max(idx - self.H + 1, frame_start)
-        raw_slice: np.ndarray = obs_ds[slice_start : idx + 1]
-
-        is_screen = self.obs_type == "screen"
-        if is_screen and raw_slice.ndim >= 3 and raw_slice.shape[1] == 1:
-            raw_slice = raw_slice[:, 0]
-
-        pad_len = self.H - len(raw_slice)
-        if pad_len > 0:
-            pad_widths = [(pad_len, 0)] + [(0, 0)] * (raw_slice.ndim - 1)
-            return np.pad(raw_slice, pad_widths, mode="edge")
-        return raw_slice
-
     def _read_sample(
         self,
         f: h5py.File,
@@ -220,11 +216,25 @@ class SlidingWindowDataset:
         telem_ds = f["observations/telemetry"]
         actions_ds = f["actions"]
 
-        obs_stack_t = self._get_history_stack(
-            obs_ds,  # pyright: ignore[reportArgumentType]
-            local_t,
-            frame_start,  # pyright: ignore[reportArgumentType]
+        slice_start = max(local_t - self.H + 1, frame_start)
+        raw_chunk: np.ndarray = obs_ds[slice_start : local_t + self.K + 1]
+
+        is_screen = self.obs_type == "screen"
+        if is_screen and raw_chunk.ndim >= 3 and raw_chunk.shape[1] == 1:
+            raw_chunk = raw_chunk[:, 0]
+
+        pad_len = self.H - ((local_t + 1) - slice_start)
+        if pad_len > 0:
+            pad_widths = [(pad_len, 0)] + [(0, 0)] * (raw_chunk.ndim - 1)
+            padded_chunk = np.pad(raw_chunk, pad_widths, mode="edge")
+        else:
+            padded_chunk = raw_chunk
+
+        obs_stack_t = padded_chunk[0 : self.H]
+        obs_stack_targets = np.stack(
+            [padded_chunk[k : k + self.H] for k in range(1, self.K + 1)]
         )
+
         telem_slice = np.asarray(
             telem_ds[local_t : local_t + self.K + 1],  # pyright: ignore[reportIndexIssue]
             dtype=np.float32,
@@ -239,12 +249,6 @@ class SlidingWindowDataset:
         if self.discretize_actions:
             actions_seq = discretize_action_np(actions_seq)
 
-        obs_stack_targets = np.stack(
-            [
-                self._get_history_stack(obs_ds, local_t + k, frame_start)  # pyright: ignore[reportArgumentType]
-                for k in range(1, self.K + 1)
-            ]
-        )
         telemetry_targets = telem_slice[1:]
 
         sample = {
@@ -267,12 +271,138 @@ class SlidingWindowDataset:
 
         return sample
 
-    def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
-        shard_idx = self.shard_indices_map[idx]
-        local_t = self.local_indices_map[idx]
-        frame_start = self.frame_starts_map[idx]
-        shard = self.shards[shard_idx]
+    def _get_shard_data(self, shard_idx: int) -> Optional[Dict[str, Any]]:
+        """Retrieve shard arrays from LRU cache, evicting oldest shards when full."""
+        if self.max_cache_bytes <= 0:
+            return None
+        with self._cache_lock:
+            if shard_idx in self._shard_cache:
+                self._shard_cache.move_to_end(shard_idx)
+                return self._shard_cache[shard_idx]
 
+        shard = self.shards[shard_idx]
+        with h5py.File(shard["file_path"], "r") as f:
+            obs_ds = f[f"observations/{self.obs_type}"]
+            raw_obs = obs_ds[:]  # pyright: ignore[reportIndexIssue]
+            if (
+                self.obs_type == "screen"
+                and raw_obs.ndim >= 3  # pyright: ignore[reportAttributeAccessIssue]
+                and raw_obs.shape[1] == 1  # pyright: ignore[reportAttributeAccessIssue]
+            ):
+                raw_obs = raw_obs[:, 0]  # pyright: ignore[reportIndexIssue]
+            telem = np.asarray(
+                f["observations/telemetry"][:],  # pyright: ignore[reportIndexIssue]
+                dtype=np.float32,
+            )
+            actions = np.asarray(
+                f["actions"][:],  # pyright: ignore[reportIndexIssue]
+                dtype=np.float32,
+            )
+            rewards = (
+                np.asarray(
+                    f["rewards"][:],  # pyright: ignore[reportIndexIssue]
+                    dtype=np.float32,
+                )
+                if self.load_rewards and "rewards" in f
+                else None
+            )
+
+        new_bytes = int(
+            raw_obs.nbytes  # pyright: ignore[reportAttributeAccessIssue]
+            + telem.nbytes
+            + actions.nbytes
+        )
+        if rewards is not None:
+            new_bytes += int(rewards.nbytes)
+
+        with self._cache_lock:
+            if shard_idx in self._shard_cache:
+                self._shard_cache.move_to_end(shard_idx)
+                return self._shard_cache[shard_idx]
+
+            while (
+                self._current_cache_bytes + new_bytes > self.max_cache_bytes
+                and len(self._shard_cache) > 0
+            ):
+                _, old_data = self._shard_cache.popitem(last=False)
+                old_bytes = int(
+                    old_data["obs"].nbytes
+                    + old_data["telem"].nbytes
+                    + old_data["actions"].nbytes
+                )
+                if old_data["rewards"] is not None:
+                    old_bytes += int(old_data["rewards"].nbytes)
+                self._current_cache_bytes = max(
+                    0, self._current_cache_bytes - old_bytes
+                )
+
+            self._shard_cache[shard_idx] = {
+                "obs": raw_obs,
+                "telem": telem,
+                "actions": actions,
+                "rewards": rewards,
+            }
+            self._current_cache_bytes += new_bytes
+            return self._shard_cache[shard_idx]
+
+    def _read_sample_ram(
+        self, cached: Dict[str, Any], local_t: int, frame_start: int
+    ) -> Dict[str, np.ndarray]:
+        """Slice contiguous transition stack directly from cached RAM arrays."""
+        obs_arr = cached["obs"]
+        telem_arr = cached["telem"]
+        actions_arr = cached["actions"]
+
+        slice_start = max(local_t - self.H + 1, frame_start)
+        raw_chunk: np.ndarray = obs_arr[slice_start : local_t + self.K + 1]
+
+        pad_len = self.H - ((local_t + 1) - slice_start)
+        if pad_len > 0:
+            pad_widths = [(pad_len, 0)] + [(0, 0)] * (raw_chunk.ndim - 1)
+            padded_chunk = np.pad(raw_chunk, pad_widths, mode="edge")
+        else:
+            padded_chunk = raw_chunk
+
+        obs_stack_t = padded_chunk[0 : self.H]
+        obs_stack_targets = np.stack(
+            [padded_chunk[k : k + self.H] for k in range(1, self.K + 1)]
+        )
+
+        telem_slice = telem_arr[local_t : local_t + self.K + 1]
+        telemetry_t = telem_slice[0]
+        telemetry_targets = telem_slice[1:]
+
+        actions_seq = actions_arr[local_t : local_t + self.K]
+        actions_seq = rescale_gas_np(actions_seq)
+        if self.discretize_actions:
+            actions_seq = discretize_action_np(actions_seq)
+
+        sample = {
+            "obs_stack_t": obs_stack_t,
+            "telemetry_t": telemetry_t,
+            "actions_seq": actions_seq,
+            "obs_stack_targets": obs_stack_targets,
+            "telemetry_targets": telemetry_targets,
+        }
+
+        if self.load_rewards:
+            if cached["rewards"] is not None:
+                sample["rewards_seq"] = cached["rewards"][local_t : local_t + self.K]
+            else:
+                sample["rewards_seq"] = np.zeros(self.K, dtype=np.float32)
+
+        return sample
+
+    def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
+        shard_idx = int(self.shard_indices_map[idx])
+        local_t = int(self.local_indices_map[idx])
+        frame_start = int(self.frame_starts_map[idx])
+
+        cached = self._get_shard_data(shard_idx)
+        if cached is not None:
+            return self._read_sample_ram(cached, local_t, frame_start)
+
+        shard = self.shards[shard_idx]
         with h5py.File(shard["file_path"], "r") as f:
             return self._read_sample(f, local_t, frame_start)
 
@@ -359,17 +489,42 @@ class DataLoader:
         return False
 
     def _prefetch_loop(self, indices: np.ndarray, num_batches: int) -> None:
-        for i in range(num_batches):
-            if self.shutdown_event.is_set():
-                break
-            batch_indices = indices[i * self.batch_size : (i + 1) * self.batch_size]
-            try:
-                batch = self._collate(batch_indices)
-            except Exception as e:
-                print(f"Warning: DataLoader worker failed to collate batch: {e}")
-                break
-            if not self._put_blocking(batch):
-                break
+        from concurrent.futures import ThreadPoolExecutor
+
+        workers = max(1, self.num_workers)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            prefetch_count = max(4, workers * 2)
+            futures = []
+            next_submit_idx = 0
+
+            while next_submit_idx < min(num_batches, prefetch_count):
+                batch_indices = indices[
+                    next_submit_idx * self.batch_size : (next_submit_idx + 1)
+                    * self.batch_size
+                ]
+                futures.append(executor.submit(self._collate, batch_indices))
+                next_submit_idx += 1
+
+            for i in range(num_batches):
+                if self.shutdown_event.is_set():
+                    break
+                try:
+                    batch = futures.pop(0).result()
+                except Exception as e:
+                    print(f"Warning: DataLoader worker failed to collate batch: {e}")
+                    break
+
+                if not self._put_blocking(batch):
+                    break
+
+                if next_submit_idx < num_batches:
+                    batch_indices = indices[
+                        next_submit_idx * self.batch_size : (next_submit_idx + 1)
+                        * self.batch_size
+                    ]
+                    futures.append(executor.submit(self._collate, batch_indices))
+                    next_submit_idx += 1
+
         self._put_blocking(None)
 
     def _collate(self, batch_indices: np.ndarray) -> Dict[str, np.ndarray]:
