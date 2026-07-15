@@ -35,3 +35,6 @@ checkpoints/
 # Data collection
 data/
 win-client/data
+
+# Zip archives of training checkpoints
+zips/

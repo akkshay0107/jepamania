@@ -99,7 +99,7 @@ Fine-tune the pretrained Sub-JEPA latent model and train a discounted return val
 # Bootstrap value head on frozen encoder, then fine-tune jointly
 uv run --package train python train/src/finetune.py \
   --data-dir win-client/data/rl \
-  --checkpoint checkpoints/pretrain/pretrain_model_latest.eqx \
+  --checkpoint checkpoints/pretrain/pretrain_model_best.eqx \
   --output-dir checkpoints/finetune
 ```
 
@@ -121,7 +121,7 @@ Orchestrate alternating phases of MPC rollout collection and joint model fine-tu
 
 ```bash
 uv run python rl_loop.py \
-  --pretrain-checkpoint checkpoints/pretrain/pretrain_model_latest.eqx \
+  --pretrain-checkpoint checkpoints/pretrain/pretrain_model_best.eqx \
   --bootstrap-dir win-client/data/rl/bootstrap \
   --rollouts-dir win-client/data/rl/rollouts \
   --checkpoints-dir checkpoints/rl \
@@ -129,15 +129,15 @@ uv run python rl_loop.py \
   --episodes-per-iter 5
 ```
 
-### Step 6: Inference Asset Bundling (`export_bundle.py`)
-Package all required configs and checkpoints into a clean archive for deployment across machines:
+### Step 6: Checkpoint Export (`tar`)
+Package required configs and model checkpoints into a compressed archive for deployment across machines:
 
 ```bash
-# Export deployable bundle
-uv run python export_bundle.py --mode export --bundle jepamania_inference_bundle.tar.gz
+# Export checkpoints and configs into a compressed tar archive
+tar -czvf train_checkpoints.tar.gz checkpoints/ core/config.yaml train/config.yaml win-client/settings.yaml
 
-# Extract bundle on target deployment host
-uv run python export_bundle.py --mode extract --bundle jepamania_inference_bundle.tar.gz
+# Extract checkpoint archive on target deployment host
+tar -xzvf train_checkpoints.tar.gz
 ```
 
 ---
