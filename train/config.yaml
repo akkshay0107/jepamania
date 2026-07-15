@@ -5,25 +5,25 @@ loss:
   reg_weight: 0.02
 
 pretrain:
-  epochs: 10
+  epochs: 20
   batch_size: 256
-  lr: 3.0e-4
+  lr: 1.0e-4
   rollout_len: 5
   num_workers: 4
   seed: 42
-  log_every: 50
+  log_every: 250
   val_ratio: 0.1
   max_cache_gb: 4.0
 
 finetune:
   warmup_epochs: 3
-  joint_epochs: 5
+  joint_epochs: 7
   gamma: 0.990
   lr_warmup: 5.0e-4
-  lr_enc: 1.0e-5
-  lr_val: 3.0e-4
+  lr_enc: 5.0e-6
+  lr_val: 1.0e-4
   value_weight: 0.5
-  batch_size: 64
+  batch_size: 128
   num_workers: 4
   seed: 42
   rollout_len: 5
