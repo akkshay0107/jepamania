@@ -83,8 +83,9 @@ def compute_value_loss(
     batch: Batch,
     gamma: float,
     stop_grad_encoder: bool = True,
+    predictor: Optional[MLPPredictor] = None,
 ) -> Float[Array, ""]:
-    """Computes K-step discounted return value loss."""
+    """Computes K-step discounted return value loss on z_t and predicted states."""
     obs_t = _extract_obs(encoder, batch, is_target=False)
     obs_target = _extract_obs(encoder, batch, is_target=True)
 
@@ -102,7 +103,18 @@ def compute_value_loss(
     disc_reward = jnp.sum(rewards * discounts, axis=1)
 
     target_return = disc_reward + (gamma**k_steps) * v_target
-    return jnp.mean(optax.huber_loss(v_t, target_return))
+    loss_t = jnp.mean(optax.huber_loss(v_t, target_return))
+
+    if predictor is not None and "actions_seq" in batch:
+        actions = batch["actions_seq"].astype(jnp.int32)
+        z_pred = jax.vmap(lambda z0, acts: _rollout_latent(predictor, z0, acts))(
+            z_t, actions
+        )
+        v_pred = jax.vmap(value_head)(jax.lax.stop_gradient(z_pred))
+        loss_pred = jnp.mean(optax.huber_loss(v_pred, v_target))
+        return 0.5 * loss_t + 0.5 * loss_pred
+
+    return loss_t
 
 
 def make_warmup_step(optimizer: optax.GradientTransformation, gamma: float):
@@ -110,11 +122,12 @@ def make_warmup_step(optimizer: optax.GradientTransformation, gamma: float):
     def warmup_step(
         value_head: MLPValueHead,
         frozen_encoder: Encoder,
+        frozen_predictor: Optional[MLPPredictor],
         opt_state: optax.OptState,
         batch: Batch,
     ) -> Tuple[MLPValueHead, optax.OptState, Float[Array, ""]]:
         loss, grads = eqx.filter_value_and_grad(compute_value_loss)(
-            value_head, frozen_encoder, batch, gamma, True
+            value_head, frozen_encoder, batch, gamma, True, frozen_predictor
         )
         params = eqx.filter(value_head, eqx.is_array)
         updates, new_opt_state = optimizer.update(grads, opt_state, params)
@@ -161,7 +174,10 @@ def compute_joint_loss(
     disc_reward = jnp.sum(rewards * discounts, axis=1)
     target_return = disc_reward + (gamma**k_steps) * v_target
 
-    val_loss = jnp.mean(optax.huber_loss(v_t, target_return))
+    v_pred = jax.vmap(value_head)(jax.lax.stop_gradient(z_pred))
+    val_loss = 0.5 * jnp.mean(optax.huber_loss(v_t, target_return)) + 0.5 * jnp.mean(
+        optax.huber_loss(v_pred, v_target)
+    )
 
     total_loss = jepa_loss + value_weight * val_loss
     return total_loss, (jepa_loss, val_loss)
@@ -351,7 +367,7 @@ def train_rl(
                 losses = []
                 for batch in dataloader:
                     value_head, warmup_opt_state, loss = warmup_step(
-                        value_head, encoder, warmup_opt_state, batch
+                        value_head, encoder, predictor, warmup_opt_state, batch
                     )
                     losses.append(loss)
                     global_step += 1
