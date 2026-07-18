@@ -264,6 +264,7 @@ def train_rl(
     model_cfg: SubJepaConfig,
     train_cfg: TrainConfig,
     step_offset: int = 0,
+    use_importance_sampling: bool = False,
 ) -> tuple[RLModels, int]:
     """Runs one stateless RL fine-tuning pass over the given dataset.
 
@@ -282,6 +283,8 @@ def train_rl(
         bootstrap warmup phase is skipped
       model_cfg: Model architecture configuration
       train_cfg: Training configuration (finetune and loss sections are used)
+      step_offset: Global step offset from prior iterations
+      use_importance_sampling: Whether to use Option 2 priority sampling
 
     Returns:
       Tuple containing fine-tuned (encoder, predictor, value_head) models
@@ -307,16 +310,38 @@ def train_rl(
         output_dir / "projectors.eqx", (subspace_projectors, slice_projectors)
     )
 
-    logging.info(f"Loading dataset from {data_dir} (obs_type={obs_type})...")
-    dataset = SlidingWindowDataset(
-        data_dir=data_dir,
-        history_len=IMG_HIST_LEN,
-        rollout_len=ft_cfg.rollout_len,
-        discretize_actions=True,
-        obs_type=obs_type,
-        load_rewards=True,
-        max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
+    logging.info(
+        f"Loading dataset from {data_dir} (obs_type={obs_type}, "
+        f"importance_sampling={use_importance_sampling})..."
     )
+    if use_importance_sampling:
+        from train.priority_dataloader import PrioritySlidingWindowDataset
+
+        dataset = PrioritySlidingWindowDataset(
+            data_dir=data_dir,
+            history_len=IMG_HIST_LEN,
+            rollout_len=ft_cfg.rollout_len,
+            discretize_actions=True,
+            obs_type=obs_type,
+            load_rewards=True,
+            max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
+            max_sampled_episodes=ft_cfg.importance_max_episodes,
+            beta=2.0,
+            alpha=2.0,
+            recency_decay=ft_cfg.importance_recency_decay,
+            seed=ft_cfg.seed,
+        )
+    else:
+        dataset = SlidingWindowDataset(
+            data_dir=data_dir,
+            history_len=IMG_HIST_LEN,
+            rollout_len=ft_cfg.rollout_len,
+            discretize_actions=True,
+            obs_type=obs_type,
+            load_rewards=True,
+            max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
+        )
+
     if len(dataset) == 0:
         raise RuntimeError(f"No valid transitions found in {data_dir}")
 

@@ -159,9 +159,20 @@ class MPCDriver:
         return create_planner(self.model_cfg.planner, self.predictor, self.objective_fn)
 
     def _make_session_path(self) -> Path:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         out_dir = self.output_dir or Path("win-client/data/rl/rollouts")
-        return out_dir / f"mpc_rollouts_{timestamp}.h5"
+        if out_dir.is_file() or out_dir.suffix == ".h5":
+            return out_dir
+        out_dir.mkdir(parents=True, exist_ok=True)
+        max_shard_bytes = 256 * 1024**2  # 256 MB shard threshold
+        base_h5 = out_dir / "online_rollouts.h5"
+        if not base_h5.exists() or base_h5.stat().st_size < max_shard_bytes:
+            return base_h5
+        k = 1
+        while True:
+            shard_h5 = out_dir / f"online_rollouts_shard_{k}.h5"
+            if not shard_h5.exists() or shard_h5.stat().st_size < max_shard_bytes:
+                return shard_h5
+            k += 1
 
     def _start_episode_record(self) -> None:
         if self.writer is not None:
@@ -180,7 +191,9 @@ class MPCDriver:
         env = get_tmrl_env()
 
         if cfg.mpc.record_rollouts or self.output_dir is not None:
-            self.writer = HDF5Writer(self._make_session_path(), obs_type=self.obs_type)
+            self.writer = HDF5Writer(
+                self._make_session_path(), obs_type=self.obs_type, append=True
+            )
             self._start_episode_record()
 
         logging.info("Starting real-time MPC control loop...")
@@ -203,9 +216,7 @@ class MPCDriver:
                 elif "screen" in planner_obs and np.issubdtype(
                     planner_obs["screen"].dtype, np.floating
                 ):
-                    planner_obs["screen"] = planner_obs["screen"].astype(
-                        np.float32
-                    )
+                    planner_obs["screen"] = planner_obs["screen"].astype(np.float32)
                 for k in ("telemetry", "lidar"):
                     if k in planner_obs and planner_obs[k] is not None:
                         planner_obs[k] = planner_obs[k].astype(np.float32)

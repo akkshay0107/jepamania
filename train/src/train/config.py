@@ -41,6 +41,8 @@ class FinetuneConfig:
     rollout_len: int = 5
     log_every: int = 50
     max_cache_gb: float = 4.0
+    importance_max_episodes: int = 32
+    importance_recency_decay: float = 0.95
 
 
 @dataclass

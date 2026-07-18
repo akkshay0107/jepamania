@@ -11,14 +11,14 @@ predictor:
   hidden_dim: 256
 
 planner:
-  type: "beam"
-  sequence_len: 10
-  smoothness_weight: 0.5
+  type: "cem"
+  sequence_len: 5
+  smoothness_weight: 0.0
   # Beam Search
   beam_width: 5
   # Cross-Entropy Method (CEM)
-  cem_iters: 3
-  cem_samples: 100
+  cem_iters: 4
+  cem_samples: 128
   cem_elites: 25
   cem_alpha: 0.1
   # Random Shooting

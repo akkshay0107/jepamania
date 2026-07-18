@@ -16,7 +16,7 @@ pretrain:
   max_cache_gb: 4.0
 
 finetune:
-  warmup_epochs: 3
+  warmup_epochs: 6
   joint_epochs: 4
   gamma: 0.990
   lr_warmup: 5.0e-4
@@ -29,3 +29,5 @@ finetune:
   rollout_len: 5
   log_every: 50
   max_cache_gb: 1.0
+  importance_max_episodes: 32
+  importance_recency_decay: 0.95

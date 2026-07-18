@@ -25,6 +25,7 @@ class HDF5Writer:
         filepath: Path,
         chunk_size: int = cfg.hdf5_chunk_size,
         obs_type: str = "screen",
+        append: bool = False,
     ) -> None:
         if obs_type not in ("screen", "lidar"):
             raise ValueError("obs_type must be either 'screen' or 'lidar'.")
@@ -49,62 +50,86 @@ class HDF5Writer:
         self._closed: bool = False
 
         filepath.parent.mkdir(parents=True, exist_ok=True)
-        self._file = h5py.File(filepath, "w")
+        if append and filepath.exists():
+            self._file = h5py.File(filepath, "a")
+            if "episode_id" in self._file:
+                ep_id_ds = self._file["episode_id"]
+                self.current_size = int(ep_id_ds.shape[0])  # pyright: ignore[reportAttributeAccessIssue]
+            else:
+                self.current_size = 0
 
-        obs_grp = self._file.create_group("observations")
-        if self.obs_type == "lidar":
-            from core.config import LIDAR_BEAMS
+            if "metadata" in self._file and len(self._file["metadata"]) > 0:  # pyright: ignore[reportArgumentType]
+                meta_grp = self._file["metadata"]
+                valid_eps = [
+                    int(k.split("_")[1])
+                    for k in meta_grp.keys()  # pyright: ignore[reportAttributeAccessIssue]
+                    if k.startswith("episode_") and k.split("_")[1].isdigit()
+                ]
+                self._current_episode_id = max(valid_eps) if valid_eps else -1
+            elif self.current_size > 0:
+                self._current_episode_id = int(np.max(self._file["episode_id"][:]))
+            else:
+                self._current_episode_id = -1
+        else:
+            self._file = h5py.File(filepath, "w")
 
+            obs_grp = self._file.create_group("observations")
+            if self.obs_type == "lidar":
+                from core.config import LIDAR_BEAMS
+
+                obs_grp.create_dataset(
+                    "lidar",
+                    shape=(0, LIDAR_BEAMS),
+                    maxshape=(None, LIDAR_BEAMS),
+                    chunks=(chunk_size, LIDAR_BEAMS),
+                    dtype=np.float32,
+                )
+            else:
+                obs_grp.create_dataset(
+                    "screen",
+                    shape=(0, 1, IMG_SIZE, IMG_SIZE),
+                    maxshape=(None, 1, IMG_SIZE, IMG_SIZE),
+                    chunks=(chunk_size, 1, IMG_SIZE, IMG_SIZE),
+                    dtype=np.uint8,
+                    compression="gzip",
+                )
             obs_grp.create_dataset(
-                "lidar",
-                shape=(0, LIDAR_BEAMS),
-                maxshape=(None, LIDAR_BEAMS),
-                chunks=(chunk_size, LIDAR_BEAMS),
+                "telemetry",
+                shape=(0, TELEMETRY_FEATURES),
+                maxshape=(None, TELEMETRY_FEATURES),
+                chunks=(chunk_size, TELEMETRY_FEATURES),
                 dtype=np.float32,
             )
-        else:
-            obs_grp.create_dataset(
-                "screen",
-                shape=(0, 1, IMG_SIZE, IMG_SIZE),
-                maxshape=(None, 1, IMG_SIZE, IMG_SIZE),
-                chunks=(chunk_size, 1, IMG_SIZE, IMG_SIZE),
-                dtype=np.uint8,
+            self._file.create_dataset(
+                "actions",
+                shape=(0, cfg.action_dim),
+                maxshape=(None, cfg.action_dim),
+                chunks=(chunk_size, cfg.action_dim),
+                dtype=np.float32,
                 compression="gzip",
             )
-        obs_grp.create_dataset(
-            "telemetry",
-            shape=(0, TELEMETRY_FEATURES),
-            maxshape=(None, TELEMETRY_FEATURES),
-            chunks=(chunk_size, TELEMETRY_FEATURES),
-            dtype=np.float32,
-        )
-        self._file.create_dataset(
-            "actions",
-            shape=(0, cfg.action_dim),
-            maxshape=(None, cfg.action_dim),
-            chunks=(chunk_size, cfg.action_dim),
-            dtype=np.float32,
-            compression="gzip",
-        )
-        self._file.create_dataset(
-            "rewards",
-            shape=(0,),
-            maxshape=(None,),
-            chunks=(chunk_size,),
-            dtype=np.float32,
-        )
-        self._file.create_dataset(
-            "episode_id",
-            shape=(0,),
-            maxshape=(None,),
-            chunks=(chunk_size,),
-            dtype=np.int32,
-        )
-        self._file.create_group("metadata")
+            self._file.create_dataset(
+                "rewards",
+                shape=(0,),
+                maxshape=(None,),
+                chunks=(chunk_size,),
+                dtype=np.float32,
+            )
+            self._file.create_dataset(
+                "episode_id",
+                shape=(0,),
+                maxshape=(None,),
+                chunks=(chunk_size,),
+                dtype=np.int32,
+            )
+            self._file.create_group("metadata")
 
         self._thread = threading.Thread(target=self._writer_loop, daemon=True)
         self._thread.start()
-        logging.info(f"HDF5Writer started → {filepath}")
+        logging.info(
+            f"HDF5Writer started → {filepath} (append={append}, "
+            f"resumed_ep={self._current_episode_id}, size={self.current_size})"
+        )
 
     def new_episode(self, metadata: dict[str, Any]) -> None:
         """Signal the start of a new episode."""
