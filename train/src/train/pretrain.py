@@ -412,9 +412,7 @@ def main() -> None:
     if DEFAULT_TRAIN_CONFIG.exists():
         print(f"Loading train config from {DEFAULT_TRAIN_CONFIG}")
     else:
-        print(
-            f"Warning: train config {DEFAULT_TRAIN_CONFIG} not found; using defaults"
-        )
+        print(f"Warning: train config {DEFAULT_TRAIN_CONFIG} not found; using defaults")
     train_cfg = load_train_config(str(DEFAULT_TRAIN_CONFIG))
 
     epochs = train_cfg.pretrain.epochs

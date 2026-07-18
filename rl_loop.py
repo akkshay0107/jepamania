@@ -55,13 +55,9 @@ def run_mpc_phase(
     value_head_path: Path,
     output_dir: Path,
     num_episodes: int,
-    planner_type: str,
     dry_run: bool = False,
 ) -> None:
-    logging.info(
-        f"MPC rollout collection ({num_episodes} eps, "
-        f"planner={planner_type}) -> {output_dir}"
-    )
+    logging.info(f"MPC rollout collection ({num_episodes} eps) -> {output_dir}")
     if dry_run:
         logging.info("[Dry Run] Rollout collection skipped.")
         return
@@ -70,7 +66,6 @@ def run_mpc_phase(
     driver = MPCDriver(
         checkpoint_path=checkpoint_path,
         value_head_path=value_head_path,
-        planner_type=planner_type,
         output_dir=output_dir,
         max_episodes=num_episodes,
     )
@@ -103,12 +98,6 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--num-iterations", type=int, default=5)
     parser.add_argument("--episodes-per-iter", type=int, default=5)
-    parser.add_argument(
-        "--planner-type",
-        type=str,
-        default="cem",
-        choices=["cem", "beam", "random"],
-    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -145,7 +134,6 @@ def main() -> None:
                 value_head_path=valhead_ckpt,
                 output_dir=iter_rollout_dir,
                 num_episodes=args.episodes_per_iter,
-                planner_type=args.planner_type,
                 dry_run=args.dry_run,
             )
             logging.info(f"[Iter {iter_idx}] Fine-tuning on collected rollouts...")

@@ -194,10 +194,7 @@ Manages real-time telemetry filtering, exploration noise, stuck reset monitoring
 | `episode_monitor.stuck_speed_kmh` | `3.0` | Speed threshold below which the car is considered stuck. |
 | `episode_monitor.stuck_window_frames`| `80` | Frames below `stuck_speed_kmh` before triggering an automatic episode reset (`80` frames ≈ 4s at 20 Hz). |
 | `episode_monitor.max_frames_per_episode`| `1800` | Hard reset limit per episode (`1800` frames = 1.5 minutes at 20 Hz). |
-| `mpc.planner_type` | `"cem"` | Online MPC algorithm (`"cem"`, `"beam"`, or `"random"`). |
-| `mpc.num_samples` | `128` | Number of candidate action trajectories sampled per CEM iteration. |
-| `mpc.num_iters` | `3` | Number of distribution refinement iterations in CEM. |
-| `mpc.num_elites` | `16` | Top-performing trajectories averaged to update sampling distributions in CEM. |
+| `mpc.checkpoint_path` | `null` | Path to combined Sub-JEPA checkpoint (`.eqx`). Trajectory planning algorithm and hyperparameters live in `core/config.yaml`. |
 
 ---
 

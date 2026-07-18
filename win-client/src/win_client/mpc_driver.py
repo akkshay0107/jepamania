@@ -23,7 +23,7 @@ import jax
 import numpy as np
 from core.actions import to_continuous_action_np
 from core.async_planner import AsyncPlannerWrapper
-from core.config import PlannerConfig, load_config
+from core.config import SubJepaConfig, load_config
 from core.dynamics import MLPValueHead
 from core.encoders import load_models_auto
 from core.interfaces import Encoder, Predictor
@@ -43,7 +43,7 @@ def load_subjepa_checkpoint(
     checkpoint_path: str | Path,
     config_path: Optional[str | Path] = None,
     seed: int = 42,
-) -> tuple[Encoder, Predictor, str]:
+) -> tuple[Encoder, Predictor, str, SubJepaConfig]:
     """Loads a combined (encoder, predictor) Equinox checkpoint with auto-detection."""
     if config_path is None:
         config_path = (
@@ -58,7 +58,7 @@ def load_subjepa_checkpoint(
         path, key, model_cfg.encoder, model_cfg.predictor
     )
     logging.info(f"Loaded Sub-JEPA models ({detected_type} encoder) from {path.name}")
-    return loaded_encoder, loaded_predictor, detected_type
+    return loaded_encoder, loaded_predictor, detected_type, model_cfg
 
 
 def load_value_head_checkpoint(
@@ -98,7 +98,6 @@ class MPCDriver:
         checkpoint_path: Optional[str | Path] = None,
         value_head_path: Optional[str | Path] = None,
         config_path: Optional[str | Path] = None,
-        planner_type: Optional[str] = None,
         output_dir: Optional[str | Path] = None,
         max_episodes: Optional[int] = None,
     ) -> None:
@@ -108,7 +107,6 @@ class MPCDriver:
           checkpoint_path: Path to combined (encoder, predictor) Equinox checkpoint
           value_head_path: Path to learned MLPValueHead Equinox checkpoint
           config_path: Optional custom path to model configuration yaml
-          planner_type: Trajectory planning algorithm ('cem', 'beam', or 'random')
           output_dir: Output directory for recorded rollout HDF5 files
           max_episodes: Maximum number of rollout episodes to complete before stopping
         """
@@ -130,9 +128,12 @@ class MPCDriver:
                 "or settings.yaml (mpc.value_head_path)."
             )
 
-        self.planner_type = planner_type or cfg.mpc.planner_type
-
-        self.encoder, self.predictor, self.encoder_type = load_subjepa_checkpoint(
+        (
+            self.encoder,
+            self.predictor,
+            self.encoder_type,
+            self.model_cfg,
+        ) = load_subjepa_checkpoint(
             checkpoint_path=self.checkpoint_path,
             config_path=config_path,
             seed=cfg.mpc.seed,
@@ -158,16 +159,7 @@ class MPCDriver:
         self.writer: Optional[HDF5Writer] = None
 
     def _build_planner(self):
-        planner_cfg = PlannerConfig(
-            type=self.planner_type,
-            sequence_len=int(cfg.mpc.sequence_len),
-            beam_width=int(cfg.mpc.beam_width),
-            cem_iters=int(cfg.mpc.num_iters),
-            cem_samples=int(cfg.mpc.num_samples),
-            cem_elites=int(cfg.mpc.num_elites),
-            rs_samples=int(cfg.mpc.num_samples),
-        )
-        return create_planner(planner_cfg, self.predictor, self.objective_fn)
+        return create_planner(self.model_cfg.planner, self.predictor, self.objective_fn)
 
     def _make_session_path(self) -> Path:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -182,7 +174,7 @@ class MPCDriver:
                     "map_name": cfg.agent.map_name,
                     "map_uid": cfg.agent.map_uid,
                     "encoder_type": self.encoder_type,
-                    "planner_type": self.planner_type,
+                    "planner_type": self.model_cfg.planner.type,
                     "timestamp": datetime.datetime.now().isoformat(),
                 }
             )
@@ -298,13 +290,6 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="Number of rollout episodes to record before stopping",
     )
-    parser.add_argument(
-        "--planner-type",
-        type=str,
-        default="cem",
-        choices=["cem", "beam", "random"],
-        help="Trajectory planner algorithm",
-    )
     return parser.parse_args()
 
 
@@ -317,7 +302,6 @@ def main() -> None:
     driver = MPCDriver(
         checkpoint_path=args.checkpoint_path,
         value_head_path=args.value_head_path,
-        planner_type=args.planner_type,
         output_dir=args.output_dir,
         max_episodes=args.num_episodes,
     )

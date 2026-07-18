@@ -30,12 +30,6 @@ def parse_args() -> argparse.Namespace:
         help="Optional path to pretrained MLPValueHead checkpoint.",
     )
     parser.add_argument(
-        "--planner-type",
-        choices=["cem", "beam", "random"],
-        default=None,
-        help="Planner algorithm ('cem', 'beam', or 'random').",
-    )
-    parser.add_argument(
         "--record-rollouts",
         action="store_true",
         help="Record live MPC rollouts to HDF5 shards.",
@@ -58,7 +52,6 @@ def main() -> None:
     driver = MPCDriver(
         checkpoint_path=args.checkpoint_path,
         value_head_path=args.value_head_path,
-        planner_type=args.planner_type,
     )
     driver.run()
 

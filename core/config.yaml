@@ -13,5 +13,13 @@ predictor:
 planner:
   type: "beam"
   sequence_len: 10
-  smoothness_weight: 0.0
-  beam_width: 6
+  smoothness_weight: 0.5
+  # Beam Search
+  beam_width: 5
+  # Cross-Entropy Method (CEM)
+  cem_iters: 3
+  cem_samples: 100
+  cem_elites: 25
+  cem_alpha: 0.1
+  # Random Shooting
+  rs_samples: 500

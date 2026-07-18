@@ -348,9 +348,7 @@ def train_rl(
                     losses.append(loss)
                     global_step += 1
                     if global_step % ft_cfg.log_every == 0:
-                        wandb.log(
-                            {"warmup/step_loss": float(loss)}, step=global_step
-                        )
+                        wandb.log({"warmup/step_loss": float(loss)}, step=global_step)
                 mean_loss = float(jnp.mean(jnp.stack(losses)))
                 logging.info(
                     f"[Warmup Epoch {epoch + 1}/{ft_cfg.warmup_epochs}] "

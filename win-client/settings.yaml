@@ -6,9 +6,9 @@ agent:
   map_name: "Summer 2026 - 01"
   map_uid: "unknown"
   exploration:
-    ou_noise_mu: 0.0      # Mean the OU process reverts to (0 = unbiased)
-    ou_noise_theta: 0.15  # Mean-reversion rate (higher = faster reversion)
-    ou_noise_sigma: 0.05  # Noise volatility (lower = less jitter)
+    ou_noise_mu: 0.0 # Mean the OU process reverts to (0 = unbiased)
+    ou_noise_theta: 0.15 # Mean-reversion rate (higher = faster reversion)
+    ou_noise_sigma: 0.05 # Noise volatility (lower = less jitter)
   filter:
     enabled: true
     steer_deadzone: 0.015 # Ignore steering jitter below this absolute threshold
@@ -27,11 +27,5 @@ episode_monitor:
 mpc:
   checkpoint_path: null # Path to combined (encoder, predictor) checkpoint (.eqx) e.g., checkpoints/finetune/ft_model_latest.eqx
   value_head_path: null # Optional path to pretrained MLPValueHead checkpoint (.eqx)
-  planner_type: "cem"   # "cem", "beam", or "random"
-  sequence_len: 10
-  num_samples: 128
-  num_iters: 3
-  num_elites: 16
-  beam_width: 16
   record_rollouts: false
   seed: 42

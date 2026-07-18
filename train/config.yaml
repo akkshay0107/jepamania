@@ -17,7 +17,7 @@ pretrain:
 
 finetune:
   warmup_epochs: 3
-  joint_epochs: 7
+  joint_epochs: 4
   gamma: 0.990
   lr_warmup: 5.0e-4
   lr_enc: 5.0e-6

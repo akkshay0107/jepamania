@@ -42,12 +42,6 @@ _DEFAULTS = {
     "mpc": {
         "checkpoint_path": None,
         "value_head_path": None,
-        "planner_type": "cem",
-        "sequence_len": 10,
-        "num_samples": 128,
-        "num_iters": 3,
-        "num_elites": 16,
-        "beam_width": 16,
         "record_rollouts": False,
         "seed": 42,
     },
