@@ -23,7 +23,7 @@ class AsyncPlannerWrapper:
         encoder: Encoder,
         predictor: Predictor,
         planner: Planner,
-        default_action: int = 0,
+        default_action: int = 25,
         seed: int = 0,
     ):
         self.encoder = encoder
@@ -141,7 +141,9 @@ class AsyncPlannerWrapper:
             latent_t_plus_1 = self._predict_jit(latent_t, action_jax)
 
             self._rng_key, plan_key = jax.random.split(self._rng_key)
-            action_seq = self._plan_jit(latent_t_plus_1, key=plan_key)
+            action_seq = self._plan_jit(
+                latent_t_plus_1, key=plan_key, prev_action=action_jax
+            )
 
             action_seq_list = np.asarray(action_seq).tolist()
 

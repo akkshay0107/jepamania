@@ -20,6 +20,6 @@ planner:
   cem_iters: 4
   cem_samples: 128
   cem_elites: 25
-  cem_alpha: 0.1
+  cem_alpha: 0.7
   # Random Shooting
   rs_samples: 500
