@@ -30,24 +30,27 @@ def run_finetune_phase(
     output_dir: Path,
     root_dir: Path,
     dry_run: bool = False,
-) -> None:
+    step_offset: int = 0,
+) -> int:
     logging.info(f"Fine-tuning phase on data={data_dir} -> output={output_dir}")
     if dry_run:
         logging.info("[Dry Run] Fine-tuning skipped.")
-        return
+        return step_offset
 
     model_cfg = load_config(str(root_dir / "core" / "config.yaml"))
     train_cfg = load_train_config(str(root_dir / "train" / "config.yaml"))
-    train_rl(
+    _, next_step = train_rl(
         data_dir=data_dir,
         output_dir=output_dir,
         checkpoint=checkpoint_path,
         value_head_path=value_head_path,
         model_cfg=model_cfg,
         train_cfg=train_cfg,
+        step_offset=step_offset,
     )
     gc.collect()
     jax.clear_caches()
+    return next_step
 
 
 def run_mpc_phase(
@@ -111,42 +114,64 @@ def main() -> None:
     model_ckpt = args.checkpoints_dir / "ft_model_latest.eqx"
     valhead_ckpt = args.checkpoints_dir / "ft_value_head_latest.eqx"
 
-    for iter_idx in range(args.num_iterations):
-        logging.info(f"=== Starting RL Cycle Iteration {iter_idx} ===")
-        if not valhead_ckpt.exists():
-            logging.info(f"[Iter {iter_idx}] Bootstrapping on {args.bootstrap_dir}...")
-            run_finetune_phase(
-                data_dir=args.bootstrap_dir,
-                checkpoint_path=args.pretrain_checkpoint,
-                value_head_path=None,
-                output_dir=args.checkpoints_dir,
-                root_dir=root_dir,
-                dry_run=args.dry_run,
-            )
-        else:
-            iter_rollout_dir = args.rollouts_dir / f"iter_{iter_idx}"
-            iter_rollout_dir.mkdir(parents=True, exist_ok=True)
-            logging.info(
-                f"[Iter {iter_idx}] Collecting {args.episodes_per_iter} rollouts..."
-            )
-            run_mpc_phase(
-                checkpoint_path=model_ckpt,
-                value_head_path=valhead_ckpt,
-                output_dir=iter_rollout_dir,
-                num_episodes=args.episodes_per_iter,
-                dry_run=args.dry_run,
-            )
-            logging.info(f"[Iter {iter_idx}] Fine-tuning on collected rollouts...")
-            run_finetune_phase(
-                data_dir=iter_rollout_dir,
-                checkpoint_path=model_ckpt,
-                value_head_path=valhead_ckpt,
-                output_dir=args.checkpoints_dir,
-                root_dir=root_dir,
-                dry_run=args.dry_run,
-            )
+    import wandb
 
-    logging.info("=== RL Cyclic Orchestration Complete ===")
+    if not args.dry_run:
+        wandb.init(
+            project="jepamania",
+            name="online_rl_cyclic",
+            mode="offline",
+            config={
+                "num_iterations": args.num_iterations,
+                "episodes_per_iter": args.episodes_per_iter,
+            },
+        )
+
+    try:
+        current_step = 0
+        for iter_idx in range(args.num_iterations):
+            logging.info(f"=== Starting RL Cycle Iteration {iter_idx} ===")
+            if not valhead_ckpt.exists():
+                logging.info(
+                    f"[Iter {iter_idx}] Bootstrapping on {args.bootstrap_dir}..."
+                )
+                current_step = run_finetune_phase(
+                    data_dir=args.bootstrap_dir,
+                    checkpoint_path=args.pretrain_checkpoint,
+                    value_head_path=None,
+                    output_dir=args.checkpoints_dir,
+                    root_dir=root_dir,
+                    dry_run=args.dry_run,
+                    step_offset=current_step,
+                )
+            else:
+                iter_rollout_dir = args.rollouts_dir / f"iter_{iter_idx}"
+                iter_rollout_dir.mkdir(parents=True, exist_ok=True)
+                logging.info(
+                    f"[Iter {iter_idx}] Collecting {args.episodes_per_iter} rollouts..."
+                )
+                run_mpc_phase(
+                    checkpoint_path=model_ckpt,
+                    value_head_path=valhead_ckpt,
+                    output_dir=iter_rollout_dir,
+                    num_episodes=args.episodes_per_iter,
+                    dry_run=args.dry_run,
+                )
+                logging.info(f"[Iter {iter_idx}] Fine-tuning on collected rollouts...")
+                current_step = run_finetune_phase(
+                    data_dir=iter_rollout_dir,
+                    checkpoint_path=model_ckpt,
+                    value_head_path=valhead_ckpt,
+                    output_dir=args.checkpoints_dir,
+                    root_dir=root_dir,
+                    dry_run=args.dry_run,
+                    step_offset=current_step,
+                )
+
+        logging.info("=== RL Cyclic Orchestration Complete ===")
+    finally:
+        if not args.dry_run and wandb.run is not None:
+            wandb.finish()
 
 
 if __name__ == "__main__":

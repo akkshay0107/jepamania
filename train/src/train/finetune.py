@@ -247,7 +247,8 @@ def train_rl(
     value_head_path: Optional[Path],
     model_cfg: SubJepaConfig,
     train_cfg: TrainConfig,
-) -> RLModels:
+    step_offset: int = 0,
+) -> tuple[RLModels, int]:
     """Runs one stateless RL fine-tuning pass over the given dataset.
 
     Loads a combined (encoder, predictor) checkpoint, then either loads the
@@ -312,17 +313,19 @@ def train_rl(
         seed=ft_cfg.seed,
     )
 
-    wandb.init(
-        project="jepamania",
-        mode="offline",
-        config={
-            "cfg": OmegaConf.to_container(model_cfg, resolve=True),
-            "train_cfg": OmegaConf.to_container(train_cfg, resolve=True),
-            "checkpoint": str(checkpoint),
-            "value_head": str(value_head_path) if value_head_path else None,
-        },
-    )
-    global_step = 0
+    manage_wandb = wandb.run is None
+    if manage_wandb:
+        wandb.init(
+            project="jepamania",
+            mode="offline",
+            config={
+                "cfg": OmegaConf.to_container(model_cfg, resolve=True),
+                "train_cfg": OmegaConf.to_container(train_cfg, resolve=True),
+                "checkpoint": str(checkpoint),
+                "value_head": str(value_head_path) if value_head_path else None,
+            },
+        )
+    global_step = step_offset
     try:
         if value_head_path is not None:
             value_head = load_checkpoint(
@@ -431,7 +434,8 @@ def train_rl(
         save_checkpoint(output_dir / "ft_model_latest.eqx", (models[0], models[1]))
         save_checkpoint(output_dir / "ft_value_head_latest.eqx", models[2])
     finally:
-        wandb.finish()
+        if manage_wandb:
+            wandb.finish()
         if (
             "dataset" in locals()
             and hasattr(dataset, "_pool")
@@ -445,7 +449,7 @@ def train_rl(
             del dataset
 
     logging.info(f"Fine-tuning complete. Checkpoints written to {output_dir}")
-    return models
+    return models, global_step
 
 
 def parse_args() -> argparse.Namespace:

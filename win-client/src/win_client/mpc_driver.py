@@ -8,6 +8,7 @@ AsyncPlannerWrapper for delay-compensated asynchronous trajectory optimization.
 
 import argparse
 import datetime
+import gc
 import logging
 import sys
 from pathlib import Path
@@ -270,7 +271,13 @@ class MPCDriver:
             if self.writer is not None and not getattr(self.writer, "_closed", False):
                 self.writer.end_episode(termination="manual")
                 self.writer.close()
-            env.close()
+            try:
+                env.close()
+            except Exception as e:
+                logging.warning(f"Error while closing TMRL environment: {e}")
+            if "env" in locals():
+                del env
+            gc.collect()
             logging.info("MPCDriver shut down cleanly.")
 
 
