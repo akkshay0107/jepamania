@@ -46,9 +46,7 @@ def load_subjepa_checkpoint(
 ) -> tuple[Encoder, Predictor, str, SubJepaConfig]:
     """Loads a combined (encoder, predictor) Equinox checkpoint with auto-detection."""
     if config_path is None:
-        config_path = (
-            Path(__file__).resolve().parent.parent.parent / "core" / "config.yaml"
-        )
+        config_path = WIN_CLIENT_ROOT.parent / "core" / "config.yaml"
 
     model_cfg = load_config(str(config_path))
     key = jax.random.PRNGKey(seed)
@@ -72,9 +70,7 @@ def load_value_head_checkpoint(
         raise FileNotFoundError(f"Value head checkpoint not found: {path}")
 
     if config_path is None:
-        config_path = (
-            Path(__file__).resolve().parent.parent.parent / "core" / "config.yaml"
-        )
+        config_path = WIN_CLIENT_ROOT.parent / "core" / "config.yaml"
 
     model_cfg = load_config(str(config_path))
     key = jax.random.PRNGKey(seed)
@@ -197,6 +193,22 @@ class MPCDriver:
                 planner_obs = obs_to_dict(
                     raw_obs, obs_type=self.obs_type, keep_history=True
                 )
+                if "screen" in planner_obs and np.issubdtype(
+                    planner_obs["screen"].dtype, np.integer
+                ):
+                    planner_obs["screen"] = (
+                        planner_obs["screen"].astype(np.float32) / 255.0
+                    )
+                elif "screen" in planner_obs and np.issubdtype(
+                    planner_obs["screen"].dtype, np.floating
+                ):
+                    planner_obs["screen"] = planner_obs["screen"].astype(
+                        np.float32
+                    )
+                for k in ("telemetry", "lidar"):
+                    if k in planner_obs and planner_obs[k] is not None:
+                        planner_obs[k] = planner_obs[k].astype(np.float32)
+
                 rec_obs = obs_to_dict(
                     raw_obs, obs_type=self.obs_type, keep_history=False
                 )
@@ -255,7 +267,7 @@ class MPCDriver:
             logging.info("KeyboardInterrupt received. Shutting down MPC driver.")
         finally:
             self.async_wrapper.stop()
-            if self.writer is not None:
+            if self.writer is not None and not getattr(self.writer, "_closed", False):
                 self.writer.end_episode(termination="manual")
                 self.writer.close()
             env.close()

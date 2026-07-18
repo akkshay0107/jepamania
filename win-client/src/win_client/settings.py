@@ -3,7 +3,7 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DATA_OUTPUT_DIR = BASE_DIR / "data"
 
 os.makedirs(DATA_OUTPUT_DIR, exist_ok=True)

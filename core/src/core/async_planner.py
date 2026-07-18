@@ -31,7 +31,22 @@ class AsyncPlannerWrapper:
         self.planner = planner
         self.default_action = default_action
 
-        self._encode_jit = eqx.filter_jit(self.encoder)
+        def _normalize_and_encode(enc: Encoder, obs_dict: Dict[str, jax.Array]):
+            norm_obs = {}
+            for k, v in obs_dict.items():
+                if k == "screen" and jnp.issubdtype(v.dtype, jnp.integer):
+                    norm_obs[k] = v.astype(jnp.float32) / 255.0
+                elif jnp.issubdtype(v.dtype, jnp.floating) or jnp.issubdtype(
+                    v.dtype, jnp.integer
+                ):
+                    norm_obs[k] = v.astype(jnp.float32)
+                else:
+                    norm_obs[k] = v
+            return enc(norm_obs)
+
+        self._encode_jit = eqx.filter_jit(
+            lambda obs_dict: _normalize_and_encode(self.encoder, obs_dict)
+        )
         self._predict_jit = eqx.filter_jit(self.predictor)
         self._plan_jit = eqx.filter_jit(self.planner)
 
@@ -107,7 +122,16 @@ class AsyncPlannerWrapper:
                 time.sleep(0.001)
                 continue
 
-            jax_obs = {k: jnp.asarray(v) for k, v in obs.items()}
+            jax_obs = {}
+            for k, v in obs.items():
+                arr = jnp.asarray(v)
+                if k == "screen" and jnp.issubdtype(arr.dtype, jnp.integer):
+                    arr = arr.astype(jnp.float32) / 255.0
+                elif jnp.issubdtype(arr.dtype, jnp.floating) or jnp.issubdtype(
+                    arr.dtype, jnp.integer
+                ):
+                    arr = arr.astype(jnp.float32)
+                jax_obs[k] = arr
             latent_t = self._encode_jit(jax_obs)
 
             # We fast-forward the state by 1 tick using the currently executing action.

@@ -220,10 +220,15 @@ def _load_projectors(
     """Loads the frozen loss projectors written next to the model checkpoint."""
     projectors_path = checkpoint.parent / "projectors.eqx"
     if not projectors_path.exists():
-        raise FileNotFoundError(
-            f"Frozen loss projectors not found: {projectors_path}. "
-            "Fine-tuning must reuse the projectors saved during pretraining."
-        )
+        pretrain_fallback = checkpoint.parent.parent / "pretrain" / "projectors.eqx"
+        if pretrain_fallback.exists():
+            projectors_path = pretrain_fallback
+        else:
+            raise FileNotFoundError(
+                f"Frozen loss projectors not found at {projectors_path} or "
+                f"{pretrain_fallback}. Fine-tuning must reuse the projectors "
+                "saved during pretraining."
+            )
     subspace_dim = loss_cfg.subspace_dim or latent_dim // loss_cfg.num_subspaces
     template = generate_projectors(
         key,
@@ -427,6 +432,17 @@ def train_rl(
         save_checkpoint(output_dir / "ft_value_head_latest.eqx", models[2])
     finally:
         wandb.finish()
+        if (
+            "dataset" in locals()
+            and hasattr(dataset, "_pool")
+            and dataset._pool is not None
+        ):
+            dataset._pool.cache.clear()
+            dataset._pool.refcounts.clear()
+        if "dataloader" in locals():
+            del dataloader
+        if "dataset" in locals():
+            del dataset
 
     logging.info(f"Fine-tuning complete. Checkpoints written to {output_dir}")
     return models
