@@ -9,9 +9,12 @@ import argparse
 import logging
 from pathlib import Path
 
-from src.agent_recorder import AgentCollector
-from src.env_patches import apply_data_collection_patches, apply_online_rl_patches
-from src.human_recorder import HumanRecorder
+from win_client.agent_recorder import AgentCollector
+from win_client.env_patches import (
+    apply_data_collection_patches,
+    apply_online_rl_patches,
+)
+from win_client.human_recorder import HumanRecorder
 
 
 def parse_args() -> argparse.Namespace:

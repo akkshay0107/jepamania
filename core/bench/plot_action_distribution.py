@@ -4,10 +4,10 @@ from pathlib import Path
 from typing import cast
 
 import h5py
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # pyright: ignore[reportMissingImports]
 import numpy as np
 from core.actions import GAS_BRAKE_VALUES_NP, rescale_gas_np, to_continuous_action_np
-from matplotlib.colors import LogNorm
+from matplotlib.colors import LogNorm  # pyright: ignore[reportMissingImports]
 from scipy.ndimage import gaussian_filter
 
 # Path-independent resolution based on file location
@@ -68,7 +68,8 @@ def load_gamepad_actions(data_path: Path):
 
                 telemetry = None
                 if "observations/telemetry" in f:
-                    telemetry = cast(np.ndarray, f["observations/telemetry"][:])
+                    ds = cast(h5py.Dataset, f["observations/telemetry"])
+                    telemetry = cast(np.ndarray, ds[:])
                 elif "observations" in f:
                     obs_grp = cast(h5py.Group, f["observations"])
                     if "telemetry" in obs_grp:

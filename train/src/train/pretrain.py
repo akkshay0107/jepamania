@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple, TypeVar, Union
 
-TRAIN_ROOT = Path(__file__).resolve().parent.parent
+TRAIN_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(TRAIN_ROOT) not in sys.path:
     sys.path.insert(0, str(TRAIN_ROOT))
 
@@ -30,11 +30,11 @@ from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder
 from core.interfaces import Encoder, Predictor
 from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree
 from omegaconf import OmegaConf
-from src.config import LossConfig, load_train_config
-from src.dataloader import DataLoader, SlidingWindowDataset
-from src.loss import generate_projectors, sub_jepa_loss
 
 import wandb
+from train.config import LossConfig, load_train_config
+from train.dataloader import DataLoader, SlidingWindowDataset
+from train.loss import generate_projectors, sub_jepa_loss
 
 DEFAULT_CONFIG = TRAIN_ROOT.parent / "core" / "config.yaml"
 DEFAULT_TRAIN_CONFIG = TRAIN_ROOT / "config.yaml"

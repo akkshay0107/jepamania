@@ -34,7 +34,8 @@ def _monitor_step(
     self, speed_val: float, end_of_track: bool, teleported: bool, base_rew: float
 ):
     from core.config import FAILURE_PENALTY
-    from src.settings import cfg
+
+    from win_client.settings import cfg
 
     if not hasattr(self, "_ep_frame_count"):
         self._ep_frame_count = 0

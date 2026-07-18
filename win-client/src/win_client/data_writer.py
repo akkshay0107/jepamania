@@ -7,7 +7,8 @@ from typing import Any, cast
 import h5py
 import numpy as np
 from core.config import TELEMETRY_FEATURES
-from src.settings import cfg
+
+from win_client.settings import cfg
 
 IMG_SIZE: int = 64
 

@@ -3,9 +3,10 @@ import logging
 from pathlib import Path
 
 import numpy as np
-from src.data_writer import HDF5Writer
-from src.settings import cfg
-from src.utils import (
+
+from win_client.data_writer import HDF5Writer
+from win_client.settings import cfg
+from win_client.utils import (
     AdaptiveActionFilter,
     OUNoise,
     get_tmrl_env,

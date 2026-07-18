@@ -8,9 +8,9 @@ autonomously using asynchronous trajectory optimization.
 import argparse
 import logging
 
-from src.env_patches import apply_data_collection_patches
-from src.mpc_driver import MPCDriver
-from src.settings import cfg
+from win_client.env_patches import apply_data_collection_patches
+from win_client.mpc_driver import MPCDriver
+from win_client.settings import cfg
 
 
 def parse_args() -> argparse.Namespace:

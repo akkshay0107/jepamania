@@ -75,29 +75,29 @@ uv run --package win-client python win-client/record.py --mode human
 uv run --package win-client python win-client/record.py --mode agent
 ```
 
-### Step 2: Self-Supervised Sub-JEPA Pretraining (`train/src/pretrain.py`)
+### Step 2: Self-Supervised Sub-JEPA Pretraining (`train/src/train/pretrain.py`)
 Pretrain the joint `(Encoder, Predictor)` world model on recorded HDF5 shards.
 
 ```bash
 # Start fresh pretraining with Vision Transformer (ViT) encoder
-uv run --package train python train/src/pretrain.py \
+uv run --package train python -m train.pretrain \
   --encoder vit \
   --data-dir win-client/data \
   --checkpoint-dir checkpoints/pretrain
 
 # Resume training from existing checkpoints
-uv run --package train python train/src/pretrain.py \
+uv run --package train python -m train.pretrain \
   --encoder vit \
   --resume \
   --checkpoint-dir checkpoints/pretrain
 ```
 
-### Step 3: Downstream RL & Value Head Fine-Tuning (`train/src/finetune.py`)
+### Step 3: Downstream RL & Value Head Fine-Tuning (`train/src/train/finetune.py`)
 Fine-tune the pretrained Sub-JEPA latent model and train a discounted return value head on reward-labeled rollouts.
 
 ```bash
 # Bootstrap value head on frozen encoder, then fine-tune jointly
-uv run --package train python train/src/finetune.py \
+uv run --package train python -m train.finetune \
   --data-dir win-client/data/rl \
   --checkpoint checkpoints/pretrain/pretrain_model_best.eqx \
   --output-dir checkpoints/finetune

@@ -598,6 +598,11 @@ wheels = [
 name = "jepamania"
 version = "0.1.0"
 source = { virtual = "." }
+dependencies = [
+    { name = "core" },
+    { name = "train" },
+    { name = "win-client" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -606,6 +611,11 @@ dev = [
 ]
 
 [package.metadata]
+requires-dist = [
+    { name = "core", editable = "core" },
+    { name = "train", editable = "train" },
+    { name = "win-client", editable = "win-client" },
+]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1652,7 +1662,7 @@ wheels = [
 [[package]]
 name = "train"
 version = "0.1.0"
-source = { virtual = "train" }
+source = { editable = "train" }
 dependencies = [
     { name = "core" },
     { name = "h5py" },
@@ -1775,7 +1785,7 @@ wheels = [
 [[package]]
 name = "win-client"
 version = "0.1.0"
-source = { virtual = "win-client" }
+source = { editable = "win-client" }
 dependencies = [
     { name = "core" },
     { name = "h5py" },

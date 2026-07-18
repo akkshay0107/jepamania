@@ -300,24 +300,33 @@ def create_planner(
     objective_fn: Callable[[Float[Array, "latent_dim"]], Float[Array, ""]],
 ) -> Any:
     """Instantiates a trajectory planner from a PlannerConfig."""
-    common = dict(
-        predictor=predictor,
-        objective_fn=objective_fn,
-        sequence_len=cfg.sequence_len,
-        smoothness_weight=cfg.smoothness_weight,
-    )
     if cfg.type in ("beam", "beam_search"):
-        return BeamSearchPlanner(beam_width=cfg.beam_width, **common)
+        return BeamSearchPlanner(
+            predictor=predictor,
+            objective_fn=objective_fn,
+            sequence_len=cfg.sequence_len,
+            smoothness_weight=cfg.smoothness_weight,
+            beam_width=cfg.beam_width,
+        )
     elif cfg.type == "cem":
         return CEMPlanner(
+            predictor=predictor,
+            objective_fn=objective_fn,
+            sequence_len=cfg.sequence_len,
+            smoothness_weight=cfg.smoothness_weight,
             num_iters=cfg.cem_iters,
             num_samples=cfg.cem_samples,
             num_elites=cfg.cem_elites,
             alpha=cfg.cem_alpha,
-            **common,
         )
     elif cfg.type in ("random", "random_shooting"):
-        return RandomShootingPlanner(num_samples=cfg.rs_samples, **common)
+        return RandomShootingPlanner(
+            predictor=predictor,
+            objective_fn=objective_fn,
+            sequence_len=cfg.sequence_len,
+            smoothness_weight=cfg.smoothness_weight,
+            num_samples=cfg.rs_samples,
+        )
     else:
         raise ValueError(
             f"Unsupported planner '{cfg.type}'. Choose from 'beam', 'cem', or 'random'."

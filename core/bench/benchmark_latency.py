@@ -4,7 +4,7 @@ from pathlib import Path
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # pyright: ignore[reportMissingImports]
 import numpy as np
 from core.config import (
     IMG_HIST_LEN,

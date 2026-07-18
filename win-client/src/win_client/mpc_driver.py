@@ -9,8 +9,14 @@ AsyncPlannerWrapper for delay-compensated asynchronous trajectory optimization.
 import argparse
 import datetime
 import logging
+import sys
 from pathlib import Path
 from typing import Optional
+
+# ruff: noqa: E402
+WIN_CLIENT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(WIN_CLIENT_ROOT) not in sys.path:
+    sys.path.insert(0, str(WIN_CLIENT_ROOT))
 
 import equinox as eqx
 import jax
@@ -22,10 +28,11 @@ from core.dynamics import MLPValueHead
 from core.encoders import load_models_auto
 from core.interfaces import Encoder, Predictor
 from core.planners import create_planner
-from src.data_writer import HDF5Writer
-from src.env_patches import apply_online_rl_patches
-from src.settings import cfg
-from src.utils import get_tmrl_env, obs_to_dict
+
+from win_client.data_writer import HDF5Writer
+from win_client.env_patches import apply_online_rl_patches
+from win_client.settings import cfg
+from win_client.utils import get_tmrl_env, obs_to_dict
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"

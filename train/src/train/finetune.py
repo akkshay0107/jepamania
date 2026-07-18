@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
-TRAIN_ROOT = Path(__file__).resolve().parent.parent
+TRAIN_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(TRAIN_ROOT) not in sys.path:
     sys.path.insert(0, str(TRAIN_ROOT))
 
@@ -22,16 +22,16 @@ from core.dynamics import MLPPredictor, MLPValueHead
 from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder, load_models_auto
 from jaxtyping import Array, Float
 from omegaconf import OmegaConf
-from src.config import TrainConfig, load_train_config
-from src.dataloader import DataLoader, SlidingWindowDataset
-from src.loss import generate_projectors, sub_jepa_loss
-from src.pretrain import (
+
+import wandb
+from train.config import TrainConfig, load_train_config
+from train.dataloader import DataLoader, SlidingWindowDataset
+from train.loss import generate_projectors, sub_jepa_loss
+from train.pretrain import (
     _rollout_latent,
     load_checkpoint,
     save_checkpoint,
 )
-
-import wandb
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"

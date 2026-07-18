@@ -4,7 +4,16 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "core",
+    "train",
+    "win-client",
+]
+
+[tool.uv.sources]
+core = { workspace = true }
+train = { workspace = true }
+win-client = { workspace = true }
 
 [tool.uv.workspace]
 members = [
