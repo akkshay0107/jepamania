@@ -17,7 +17,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-from core.config import IMG_HIST_LEN, SubJepaConfig, load_config
+from core.config import (
+    IMG_HIST_LEN,
+    LAMBDA_RETURN_DECAY,
+    OBSERVED_ROLLOUT_LEN,
+    SubJepaConfig,
+    load_config,
+)
 from core.dynamics import MLPPredictor, MLPValueHead
 from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder, load_models_auto
 from jaxtyping import Array, Float
@@ -28,7 +34,7 @@ from train.config import TrainConfig, load_train_config
 from train.dataloader import DataLoader, SlidingWindowDataset
 from train.loss import generate_projectors, sub_jepa_loss
 from train.pretrain import (
-    _rollout_latent,
+    _rollout_latent_sequence,
     load_checkpoint,
     save_checkpoint,
 )
@@ -80,6 +86,38 @@ def extract_obs(
 _extract_obs = extract_obs
 
 
+def _compute_truncated_lambda_return(
+    rewards_seq: Float[Array, "batch steps"],
+    values_seq: Float[Array, "batch steps"],
+    mask_seq: Float[Array, "batch steps"],
+    gamma: float,
+    lambda_decay: float,
+) -> Float[Array, "batch"]:
+    """Computes M-step truncated TD(lambda) targets via reverse scan."""
+    # Terminal return initializes to the final value estimate values_seq[:, -1].
+    # Step k: G_k = r_k + gamma * mask_{k+1} * ((1-lambda)*V_{k+1} + lambda*G_{k+1}).
+    terminal_value = values_seq[:, -1]
+
+    def backward_step(next_return, step_data):
+        reward, value, mask = step_data
+        current_return = reward + gamma * mask * (
+            (1.0 - lambda_decay) * value + lambda_decay * next_return
+        )
+        return current_return, current_return
+
+    # Transpose to (steps, batch) and reverse along step axis for reverse scan
+    rewards_rev = jnp.swapaxes(rewards_seq, 0, 1)[::-1]
+    values_rev = jnp.swapaxes(values_seq, 0, 1)[::-1]
+    mask_rev = jnp.swapaxes(mask_seq, 0, 1)[::-1]
+
+    initial_return, _ = jax.lax.scan(
+        backward_step,
+        terminal_value,
+        (rewards_rev, values_rev, mask_rev),
+    )
+    return initial_return
+
+
 def compute_joint_loss(
     models: RLModels,
     batch: Batch,
@@ -97,30 +135,42 @@ def compute_joint_loss(
     z_t = jax.vmap(encoder)(obs_t)
     z_target = jax.vmap(encoder)(obs_target)
 
+    # Roll forward across all available action tokens
+    # (observed + imagined steps up to IMAGINED_ROLLOUT_LEN)
     actions = batch["actions_seq"].astype(jnp.int32)
-    z_pred = jax.vmap(lambda z0, acts: _rollout_latent(predictor, z0, acts))(
-        z_t, actions
-    )
+    z_pred_sequence = jax.vmap(
+        lambda z0, acts: _rollout_latent_sequence(predictor, z0, acts)
+    )(z_t, actions)
+
+    # Sub-JEPA geometry loss evaluates strictly against the
+    # observed ground-truth target latent at step K_obs
+    observed_idx = min(z_pred_sequence.shape[1], OBSERVED_ROLLOUT_LEN) - 1
+    z_pred_observed = z_pred_sequence[:, observed_idx]
     jepa_loss = sub_jepa_loss(
-        z_pred, z_target, subspace_projectors, slice_projectors, reg_weight
+        z_pred_observed, z_target, subspace_projectors, slice_projectors, reg_weight
     )
 
+    # Evaluate value network across all predicted latents to bootstrap future returns
     v_t = jax.vmap(value_head)(z_t)
-
-    v_target = jax.lax.stop_gradient(
+    v_pred_sequence = jax.vmap(jax.vmap(value_head))(
+        jax.lax.stop_gradient(z_pred_sequence)
+    )
+    v_target_observed = jax.lax.stop_gradient(
         jax.vmap(value_head)(jax.lax.stop_gradient(z_target))
     )
 
-    rewards = batch["rewards_seq"].astype(jnp.float32)
-    k_steps = rewards.shape[1]
-    discounts = gamma ** jnp.arange(k_steps, dtype=jnp.float32)
-    disc_reward = jnp.sum(rewards * discounts, axis=1)
-    target_return = disc_reward + (gamma**k_steps) * v_target
-
-    v_pred = jax.vmap(value_head)(jax.lax.stop_gradient(z_pred))
-    val_loss = 0.5 * jnp.mean(optax.huber_loss(v_t, target_return)) + 0.5 * jnp.mean(
-        optax.huber_loss(v_pred, v_target)
+    rewards = jnp.asarray(batch["rewards_seq"], dtype=jnp.float32)
+    mask = jnp.asarray(batch.get("mask_seq", jnp.ones_like(rewards)), dtype=jnp.float32)
+    lambda_return_target = _compute_truncated_lambda_return(
+        rewards, v_pred_sequence, mask, gamma, LAMBDA_RETURN_DECAY
     )
+
+    # Value loss combines base state TD(lambda)
+    # error with observed K_obs latent consistency loss
+    v_pred_consistency = v_pred_sequence[:, observed_idx]
+    val_loss = 0.5 * jnp.mean(
+        optax.huber_loss(v_t, lambda_return_target)
+    ) + 0.5 * jnp.mean(optax.huber_loss(v_pred_consistency, v_target_observed))
 
     total_loss = jepa_loss + value_weight * val_loss
     return total_loss, (jepa_loss, val_loss)

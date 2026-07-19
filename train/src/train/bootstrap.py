@@ -23,7 +23,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-from core.config import IMG_HIST_LEN, SubJepaConfig, load_config
+from core.config import (
+    IMG_HIST_LEN,
+    LAMBDA_RETURN_DECAY,
+    OBSERVED_ROLLOUT_LEN,
+    SubJepaConfig,
+    load_config,
+)
 from core.dynamics import MLPPredictor, MLPValueHead
 from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder, load_models_auto
 from jaxtyping import Array, Float
@@ -33,13 +39,14 @@ import wandb
 from train.config import TrainConfig, load_train_config
 from train.dataloader import DataLoader, SlidingWindowDataset
 from train.finetune import (
+    _compute_truncated_lambda_return,
     extract_obs,
     get_param_labels,
     load_projectors,
     make_joint_step,
 )
 from train.pretrain import (
-    _rollout_latent,
+    _rollout_latent_sequence,
     load_checkpoint,
     save_checkpoint,
 )
@@ -50,12 +57,13 @@ logging.basicConfig(
 
 DEFAULT_CONFIG = TRAIN_ROOT.parent / "core" / "config.yaml"
 DEFAULT_TRAIN_CONFIG = TRAIN_ROOT / "config.yaml"
-DEFAULT_DATA_DIR = TRAIN_ROOT.parent / "win-client" / "data"
-DEFAULT_CHECKPOINT = TRAIN_ROOT.parent / "checkpoints" / "pretrain" / "model_latest.eqx"
+DEFAULT_DATA_DIR = TRAIN_ROOT.parent / "win-client" / "data" / "rl" / "bootstrap"
+DEFAULT_CHECKPOINT = TRAIN_ROOT.parent / "checkpoints" / "pretrain" / "pretrain_model_latest.eqx"
 DEFAULT_OUTPUT_DIR = TRAIN_ROOT.parent / "checkpoints" / "finetune"
 
 Encoder = Union[ViTEncoder, ConvEncoder, LidarEncoder]
-RLModels = Tuple[Encoder, MLPPredictor, MLPValueHead]
+Predictor = MLPPredictor
+RLModels = Tuple[Encoder, Predictor, MLPValueHead]
 Batch = Mapping[str, Union[np.ndarray, Array]]
 
 
@@ -64,22 +72,10 @@ def compute_value_loss(
     encoder: Encoder,
     batch: Batch,
     gamma: float,
-    stop_grad_encoder: bool = True,
-    predictor: Optional[MLPPredictor] = None,
+    stop_grad_encoder: bool = False,
+    predictor: Optional[Predictor] = None,
 ) -> Float[Array, ""]:
-    """Computes K-step discounted return value loss on z_t and predicted states.
-
-    Arguments:
-      value_head: MLPValueHead network to evaluate returns
-      encoder: Observation encoder module
-      batch: Batch dictionary containing observation stacks and rewards
-      gamma: Discount factor for K-step returns
-      stop_grad_encoder: If True, prevents gradients propagating into encoder
-      predictor: Optional dynamics predictor for computing predicted latent returns
-
-    Returns:
-      Scalar Huber loss across the batch
-    """
+    """Computes K-step discounted return value loss on z_t and predicted states."""
     obs_t = extract_obs(encoder, batch, is_target=False)
     obs_target = extract_obs(encoder, batch, is_target=True)
 
@@ -93,24 +89,31 @@ def compute_value_loss(
     v_t = jax.vmap(value_head)(z_t)
     v_target = jax.lax.stop_gradient(jax.vmap(value_head)(z_target))
 
-    rewards = batch["rewards_seq"].astype(jnp.float32)
-    k_steps = rewards.shape[1]
-    discounts = gamma ** jnp.arange(k_steps, dtype=jnp.float32)
-    disc_reward = jnp.sum(rewards * discounts, axis=1)
-
-    target_return = disc_reward + (gamma**k_steps) * v_target
-    loss_t = jnp.mean(optax.huber_loss(v_t, target_return))
+    rewards = jnp.asarray(batch["rewards_seq"], dtype=jnp.float32)
+    mask = jnp.asarray(batch.get("mask_seq", jnp.ones_like(rewards)), dtype=jnp.float32)
 
     if predictor is not None and "actions_seq" in batch:
         actions = batch["actions_seq"].astype(jnp.int32)
-        z_pred = jax.vmap(lambda z0, acts: _rollout_latent(predictor, z0, acts))(
-            z_t, actions
+        z_pred_sequence = jax.vmap(
+            lambda z0, acts: _rollout_latent_sequence(predictor, z0, acts)
+        )(z_t, actions)
+        v_pred_sequence = jax.vmap(jax.vmap(value_head))(
+            jax.lax.stop_gradient(z_pred_sequence)
         )
-        v_pred = jax.vmap(value_head)(jax.lax.stop_gradient(z_pred))
-        loss_pred = jnp.mean(optax.huber_loss(v_pred, v_target))
+        lambda_return_target = _compute_truncated_lambda_return(
+            rewards, v_pred_sequence, mask, gamma, LAMBDA_RETURN_DECAY
+        )
+        observed_idx = min(z_pred_sequence.shape[1], OBSERVED_ROLLOUT_LEN) - 1
+        v_pred_consistency = v_pred_sequence[:, observed_idx]
+        loss_t = jnp.mean(optax.huber_loss(v_t, lambda_return_target))
+        loss_pred = jnp.mean(optax.huber_loss(v_pred_consistency, v_target))
         return 0.5 * loss_t + 0.5 * loss_pred
 
-    return loss_t
+    k_steps = rewards.shape[1]
+    discounts = gamma ** jnp.arange(k_steps, dtype=jnp.float32)
+    disc_reward = jnp.sum(rewards * discounts, axis=1)
+    target_return = disc_reward + (gamma**k_steps) * v_target
+    return jnp.mean(optax.huber_loss(v_t, target_return))
 
 
 def make_warmup_step(optimizer: optax.GradientTransformation, gamma: float):

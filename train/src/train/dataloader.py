@@ -8,6 +8,7 @@ from typing import Any, Dict, Generator, Optional, Sequence, Tuple, Union
 import h5py
 import numpy as np
 from core.actions import discretize_action_np, rescale_gas_np
+from core.config import IMAGINED_ROLLOUT_LEN, OBSERVED_ROLLOUT_LEN
 
 
 class _ShardPool:
@@ -34,7 +35,11 @@ class _ShardPool:
 
 
 class SlidingWindowDataset:
-    """Indexes and retrieves transitions across multiple HDF5 shards."""
+    """Indexed sequences of consecutive transitions from HDF5 rollouts.
+
+    Constructs (obs_stack_t, actions_seq, obs_stack_targets, rewards_seq) tuples
+    where obs stacks have length H and rollout targets/actions have length K.
+    """
 
     def __init__(
         self,
@@ -52,7 +57,9 @@ class SlidingWindowDataset:
         self.obs_type = obs_type
         self.data_dir = Path(data_dir)
         self.H = int(history_len)
-        self.K = int(rollout_len)
+        self.K_obs = int(rollout_len) if rollout_len != 5 else OBSERVED_ROLLOUT_LEN
+        self.K_imag = max(self.K_obs, IMAGINED_ROLLOUT_LEN)
+        self.K = self.K_obs
         self.discretize_actions = bool(discretize_actions)
         self.load_rewards = bool(load_rewards)
         self.max_cache_bytes = int(max_cache_bytes)
@@ -69,6 +76,7 @@ class SlidingWindowDataset:
         self.local_indices_map: np.ndarray = np.empty(0, dtype=np.int32)
         self.episode_indices_map: np.ndarray = np.empty(0, dtype=np.int32)
         self.frame_starts_map: np.ndarray = np.empty(0, dtype=np.int32)
+        self.frame_ends_map: np.ndarray = np.empty(0, dtype=np.int32)
 
         self._build_index()
 
@@ -96,11 +104,13 @@ class SlidingWindowDataset:
                         f["episode_id"], dtype=np.int32
                     )
                     total_frames = len(episode_ids)
-                    if total_frames <= self.K:
+                    if total_frames <= self.K_obs:
                         continue
 
-                    indices = np.arange(total_frames - self.K)
-                    valid_mask = episode_ids[indices] == episode_ids[indices + self.K]
+                    indices = np.arange(total_frames - self.K_obs)
+                    valid_mask = (
+                        episode_ids[indices] == episode_ids[indices + self.K_obs]
+                    )
                     if self.episode_ids is not None:
                         valid_mask &= np.isin(
                             episode_ids[indices], tuple(self.episode_ids)
@@ -175,10 +185,13 @@ class SlidingWindowDataset:
         ep_map = self.episode_indices_map
 
         frame_starts = np.empty(len(shard_map), dtype=np.int32)
+        frame_ends = np.empty(len(shard_map), dtype=np.int32)
         for i in range(len(shard_map)):
             boundaries = shards[shard_map[i]]["episode_boundaries"]
             frame_starts[i] = boundaries[ep_map[i]][0]
+            frame_ends[i] = boundaries[ep_map[i]][1]
         self.frame_starts_map = frame_starts
+        self.frame_ends_map = frame_ends
 
     def split(
         self, val_ratio: float = 0.1, seed: int = 42
@@ -216,6 +229,8 @@ class SlidingWindowDataset:
         for ds, mask in ((train_ds, train_mask), (val_ds, val_mask)):
             ds.data_dir = self.data_dir
             ds.H = self.H
+            ds.K_obs = self.K_obs
+            ds.K_imag = self.K_imag
             ds.K = self.K
             ds.discretize_actions = self.discretize_actions
             ds.obs_type = self.obs_type
@@ -228,6 +243,7 @@ class SlidingWindowDataset:
             ds.local_indices_map = self.local_indices_map[mask]
             ds.episode_indices_map = self.episode_indices_map[mask]
             ds.frame_starts_map = self.frame_starts_map[mask]
+            ds.frame_ends_map = self.frame_ends_map[mask]
 
         return train_ds, val_ds
 
@@ -239,6 +255,7 @@ class SlidingWindowDataset:
         f: h5py.File,
         local_t: int,
         frame_start: int,
+        frame_end: int,
     ) -> Dict[str, np.ndarray]:
         obs_ds = f[f"observations/{self.obs_type}"]
         telem_ds = f["observations/telemetry"]
@@ -246,7 +263,7 @@ class SlidingWindowDataset:
 
         slice_start = max(local_t - self.H + 1, frame_start)
         raw_chunk: np.ndarray = obs_ds[  # pyright: ignore[reportIndexIssue, reportAssignmentType]
-            slice_start : local_t + self.K + 1
+            slice_start : local_t + self.K_obs + 1
         ]
 
         is_screen = self.obs_type == "screen"
@@ -262,24 +279,44 @@ class SlidingWindowDataset:
 
         obs_stack_t = padded_chunk[0 : self.H]
         obs_stack_targets = np.stack(
-            [padded_chunk[k : k + self.H] for k in range(1, self.K + 1)]
+            [padded_chunk[k : k + self.H] for k in range(1, self.K_obs + 1)]
         )
 
         telem_slice = np.asarray(
-            telem_ds[local_t : local_t + self.K + 1],  # pyright: ignore[reportIndexIssue]
+            telem_ds[local_t : local_t + self.K_obs + 1],  # pyright: ignore[reportIndexIssue]
             dtype=np.float32,
         )
         telemetry_t = telem_slice[0]
+        telemetry_targets = telem_slice[1:]
 
-        actions_seq = np.asarray(
-            actions_ds[local_t : local_t + self.K],  # pyright: ignore[reportIndexIssue]
+        # Slice actions and rewards up to K_imag without crossing episode boundaries
+        available_steps = min(self.K_imag, max(0, frame_end - local_t))
+        if "actions" in f:
+            available_steps = min(
+                available_steps,
+                max(0, len(actions_ds) - local_t),  # pyright: ignore[reportArgumentType]
+            )
+
+        raw_actions = np.asarray(
+            actions_ds[local_t : local_t + available_steps],  # pyright: ignore[reportIndexIssue]
             dtype=np.float32,
         )
-        actions_seq = rescale_gas_np(actions_seq)
+        raw_actions = rescale_gas_np(raw_actions)
         if self.discretize_actions:
-            actions_seq = discretize_action_np(actions_seq)
+            raw_actions = discretize_action_np(raw_actions)
 
-        telemetry_targets = telem_slice[1:]
+        if available_steps < self.K_imag:
+            actions_seq = np.zeros(
+                (self.K_imag, *raw_actions.shape[1:]), dtype=raw_actions.dtype
+            )
+            if available_steps > 0:
+                actions_seq[:available_steps] = raw_actions
+        else:
+            actions_seq = raw_actions
+
+        mask_seq = np.zeros(self.K_imag, dtype=np.float32)
+        if available_steps > 0:
+            mask_seq[:available_steps] = 1.0
 
         sample = {
             "obs_stack_t": obs_stack_t,
@@ -287,17 +324,26 @@ class SlidingWindowDataset:
             "actions_seq": actions_seq,
             "obs_stack_targets": obs_stack_targets,
             "telemetry_targets": telemetry_targets,
+            "mask_seq": mask_seq,
         }
 
         if self.load_rewards:
             if "rewards" in f:
                 rewards_ds = f["rewards"]
-                sample["rewards_seq"] = np.asarray(
-                    rewards_ds[local_t : local_t + self.K],  # pyright: ignore[reportIndexIssue]
+                avail_rew = min(
+                    available_steps,
+                    max(0, len(rewards_ds) - local_t),  # pyright: ignore[reportArgumentType]
+                )
+                raw_rewards = np.asarray(
+                    rewards_ds[local_t : local_t + avail_rew],  # pyright: ignore[reportIndexIssue]
                     dtype=np.float32,
                 )
+                rewards_seq = np.zeros(self.K_imag, dtype=np.float32)
+                if avail_rew > 0:
+                    rewards_seq[:avail_rew] = raw_rewards
+                sample["rewards_seq"] = rewards_seq
             else:
-                sample["rewards_seq"] = np.zeros(self.K, dtype=np.float32)
+                sample["rewards_seq"] = np.zeros(self.K_imag, dtype=np.float32)
 
         return sample
 
@@ -424,7 +470,7 @@ class SlidingWindowDataset:
                     pool.refcounts[shard_idx] = rc - 1
 
     def _read_sample_ram(
-        self, cached: Dict[str, Any], local_t: int, frame_start: int
+        self, cached: Dict[str, Any], local_t: int, frame_start: int, frame_end: int
     ) -> Dict[str, np.ndarray]:
         """Slice contiguous transition stack directly from cached RAM arrays."""
         obs_arr = cached["obs"]
@@ -432,7 +478,7 @@ class SlidingWindowDataset:
         actions_arr = cached["actions"]
 
         slice_start = max(local_t - self.H + 1, frame_start)
-        raw_chunk: np.ndarray = obs_arr[slice_start : local_t + self.K + 1]
+        raw_chunk: np.ndarray = obs_arr[slice_start : local_t + self.K_obs + 1]
 
         pad_len = self.H - ((local_t + 1) - slice_start)
         if pad_len > 0:
@@ -443,17 +489,33 @@ class SlidingWindowDataset:
 
         obs_stack_t = padded_chunk[0 : self.H]
         obs_stack_targets = np.stack(
-            [padded_chunk[k : k + self.H] for k in range(1, self.K + 1)]
+            [padded_chunk[k : k + self.H] for k in range(1, self.K_obs + 1)]
         )
 
-        telem_slice = telem_arr[local_t : local_t + self.K + 1]
+        telem_slice = telem_arr[local_t : local_t + self.K_obs + 1]
         telemetry_t = telem_slice[0]
         telemetry_targets = telem_slice[1:]
 
-        actions_seq = actions_arr[local_t : local_t + self.K]
-        actions_seq = rescale_gas_np(actions_seq)
+        available_steps = min(self.K_imag, max(0, frame_end - local_t))
+        available_steps = min(available_steps, max(0, len(actions_arr) - local_t))
+
+        raw_actions = actions_arr[local_t : local_t + available_steps]
+        raw_actions = rescale_gas_np(raw_actions)
         if self.discretize_actions:
-            actions_seq = discretize_action_np(actions_seq)
+            raw_actions = discretize_action_np(raw_actions)
+
+        if available_steps < self.K_imag:
+            actions_seq = np.zeros(
+                (self.K_imag, *raw_actions.shape[1:]), dtype=raw_actions.dtype
+            )
+            if available_steps > 0:
+                actions_seq[:available_steps] = raw_actions
+        else:
+            actions_seq = raw_actions
+
+        mask_seq = np.zeros(self.K_imag, dtype=np.float32)
+        if available_steps > 0:
+            mask_seq[:available_steps] = 1.0
 
         sample = {
             "obs_stack_t": obs_stack_t,
@@ -461,13 +523,22 @@ class SlidingWindowDataset:
             "actions_seq": actions_seq,
             "obs_stack_targets": obs_stack_targets,
             "telemetry_targets": telemetry_targets,
+            "mask_seq": mask_seq,
         }
 
         if self.load_rewards:
             if cached["rewards"] is not None:
-                sample["rewards_seq"] = cached["rewards"][local_t : local_t + self.K]
+                avail_rew = min(
+                    available_steps, max(0, len(cached["rewards"]) - local_t)
+                )
+                rewards_seq = np.zeros(self.K_imag, dtype=np.float32)
+                if avail_rew > 0:
+                    rewards_seq[:avail_rew] = cached["rewards"][
+                        local_t : local_t + avail_rew
+                    ]
+                sample["rewards_seq"] = rewards_seq
             else:
-                sample["rewards_seq"] = np.zeros(self.K, dtype=np.float32)
+                sample["rewards_seq"] = np.zeros(self.K_imag, dtype=np.float32)
 
         return sample
 
@@ -475,14 +546,15 @@ class SlidingWindowDataset:
         shard_idx = int(self.shard_indices_map[idx])
         local_t = int(self.local_indices_map[idx])
         frame_start = int(self.frame_starts_map[idx])
+        frame_end = int(self.frame_ends_map[idx])
 
         cached = self._pool.peek(shard_idx)
         if cached is not None:
-            return self._read_sample_ram(cached, local_t, frame_start)
+            return self._read_sample_ram(cached, local_t, frame_start, frame_end)
 
         shard = self.shards[shard_idx]
         with h5py.File(shard["file_path"], "r") as f:
-            return self._read_sample(f, local_t, frame_start)
+            return self._read_sample(f, local_t, frame_start, frame_end)
 
 
 # One window's worth of an epoch: sample indices to serve, in order, and the
@@ -727,7 +799,10 @@ class DataLoader:
                     ds_idx = sorted_indices[pos]
                     local_t = int(ds.local_indices_map[ds_idx])
                     frame_start = int(ds.frame_starts_map[ds_idx])
-                    samples[pos] = ds._read_sample_ram(cached, local_t, frame_start)
+                    frame_end = int(ds.frame_ends_map[ds_idx])
+                    samples[pos] = ds._read_sample_ram(
+                        cached, local_t, frame_start, frame_end
+                    )
                 continue
 
             shard = ds.shards[shard_idx]
@@ -736,7 +811,8 @@ class DataLoader:
                     ds_idx = sorted_indices[pos]
                     local_t = int(ds.local_indices_map[ds_idx])
                     frame_start = int(ds.frame_starts_map[ds_idx])
-                    samples[pos] = ds._read_sample(f, local_t, frame_start)
+                    frame_end = int(ds.frame_ends_map[ds_idx])
+                    samples[pos] = ds._read_sample(f, local_t, frame_start, frame_end)
 
         unsort_order = np.argsort(sort_order)
         ordered = [samples[i] for i in unsort_order]

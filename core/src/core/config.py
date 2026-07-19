@@ -24,6 +24,11 @@ LATENT_DIM: int = 192
 MAX_STEP_REWARD: float = 10.0
 FAILURE_PENALTY: float = -100.0
 
+# Fixed Rollout and Return Constants
+OBSERVED_ROLLOUT_LEN: int = 5
+IMAGINED_ROLLOUT_LEN: int = 15
+LAMBDA_RETURN_DECAY: float = 0.95
+
 
 @dataclass
 class TransformerConfig:

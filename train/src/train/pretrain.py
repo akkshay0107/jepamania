@@ -70,16 +70,6 @@ def _rollout_latent_sequence(
     return z_seq
 
 
-def _rollout_latent(
-    predictor: Predictor,
-    z0: Float[Array, "latent_dim"],
-    actions: Int[Array, "K"],
-) -> Float[Array, "latent_dim"]:
-    """Rolls a single latent forward through K action tokens."""
-    z_seq = _rollout_latent_sequence(predictor, z0, actions)
-    return z_seq[-1]
-
-
 def compute_loss(
     models: Models,
     batch: Batch,
