@@ -2,7 +2,7 @@ import logging
 import queue
 import threading
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Optional, cast
 
 import h5py
 import numpy as np
@@ -48,6 +48,7 @@ class HDF5Writer:
 
         self._running: bool = True
         self._closed: bool = False
+        self._thread_error: Optional[BaseException] = None
 
         filepath.parent.mkdir(parents=True, exist_ok=True)
         if append and filepath.exists():
@@ -58,18 +59,21 @@ class HDF5Writer:
             else:
                 self.current_size = 0
 
+            metadata_ids: list[int] = []
             if "metadata" in self._file and len(self._file["metadata"]) > 0:  # pyright: ignore[reportArgumentType]
                 meta_grp = self._file["metadata"]
-                valid_eps = [
+                metadata_ids = [
                     int(k.split("_")[1])
                     for k in meta_grp.keys()  # pyright: ignore[reportAttributeAccessIssue]
                     if k.startswith("episode_") and k.split("_")[1].isdigit()
                 ]
-                self._current_episode_id = max(valid_eps) if valid_eps else -1
-            elif self.current_size > 0:
-                self._current_episode_id = int(np.max(self._file["episode_id"][:]))
-            else:
-                self._current_episode_id = -1
+            frame_id = (
+                int(np.max(cast(h5py.Dataset, self._file["episode_id"])[:]))
+                if self.current_size > 0
+                else -1
+            )
+            self._current_episode_id = max(metadata_ids, default=frame_id)
+            self._current_episode_id = max(self._current_episode_id, frame_id)
         else:
             self._file = h5py.File(filepath, "w")
 
@@ -131,16 +135,19 @@ class HDF5Writer:
             f"resumed_ep={self._current_episode_id}, size={self.current_size})"
         )
 
-    def new_episode(self, metadata: dict[str, Any]) -> None:
+    def new_episode(self, metadata: dict[str, Any]) -> int:
         """Signal the start of a new episode."""
         self._current_episode_id += 1
         self._queue.put(
             {
                 "_type": "episode_start",
                 "episode_id": self._current_episode_id,
-                "metadata": dict(metadata),
+                "metadata": {
+                    key: value for key, value in metadata.items() if value is not None
+                },
             }
         )
+        return self._current_episode_id
 
     def end_episode(self, termination: str = "done") -> None:
         """
@@ -194,12 +201,23 @@ class HDF5Writer:
         self._running = False
         if self._thread.is_alive():
             self._thread.join()
+        if self._thread_error is not None:
+            self._file.close()
+            raise RuntimeError("HDF5 writer thread failed") from self._thread_error
         self._flush()
         self._file.close()
         logging.info(f"HDF5Writer closed. Total frames written: {self.current_size}")
 
     def _writer_loop(self) -> None:
         """Background thread: processes tokens and frame data from the queue."""
+        try:
+            self._consume_tokens()
+        except BaseException as error:
+            self._thread_error = error
+            self._running = False
+
+    def _consume_tokens(self) -> None:
+        """Consume queued writer commands until shutdown."""
         # Maps episode_id → pending metadata dict (frame_start unknown until flush).
         pending: dict[int, dict] = {}
 
@@ -237,7 +255,7 @@ class HDF5Writer:
                         # HDF5 attributes must be scalar or string.
                         if isinstance(v, (int, float, np.integer, np.floating)):
                             grp.attrs[k] = v
-                        else:
+                        elif v is not None:
                             grp.attrs[k] = str(v)
                     self._file.flush()
 
@@ -297,3 +315,41 @@ class HDF5Writer:
         self._action_buf.clear()
         self._reward_buf.clear()
         self._episode_id_buf.clear()
+
+
+def validate_hdf5_schema(filepath: str | Path) -> str:
+    """Validate a rollout file and return its observation type."""
+    path = Path(filepath)
+    if not path.exists():
+        raise FileNotFoundError(f"Rollout file not found: {path}")
+
+    with h5py.File(path, "r") as file:
+        required = {
+            "observations/telemetry",
+            "actions",
+            "rewards",
+            "episode_id",
+            "metadata",
+        }
+        missing = sorted(name for name in required if name not in file)
+        if missing:
+            raise ValueError(f"Invalid rollout file {path}; missing: {missing}")
+
+        observations = cast(h5py.Group, file["observations"])
+        available = [name for name in ("screen", "lidar") if name in observations]
+        if len(available) != 1:
+            raise ValueError(
+                f"Invalid rollout file {path}; expected exactly one observation type"
+            )
+
+        frame_count = len(cast(h5py.Dataset, file["episode_id"]))
+        aligned = ("observations/telemetry", "actions", "rewards")
+        if any(len(cast(h5py.Dataset, file[name])) != frame_count for name in aligned):
+            raise ValueError(
+                f"Invalid rollout file {path}; frame datasets are misaligned"
+            )
+        if len(cast(h5py.Dataset, observations[available[0]])) != frame_count:
+            raise ValueError(
+                f"Invalid rollout file {path}; observations are misaligned"
+            )
+        return available[0]

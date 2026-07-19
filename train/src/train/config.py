@@ -27,11 +27,26 @@ class PretrainConfig:
 
 
 @dataclass
-class FinetuneConfig:
-    warmup_epochs: int = 3
+class BootstrapConfig:
+    warmup_epochs: int = 5
     joint_epochs: int = 5
     gamma: float = 0.990
-    lr_warmup: float = 5e-4
+    lr_warmup: float = 3e-4
+    lr_enc: float = 5e-6
+    lr_val: float = 1e-4
+    value_weight: float = 0.5
+    batch_size: int = 128
+    num_workers: int = 4
+    seed: int = 42
+    rollout_len: int = 5
+    log_every: int = 50
+    max_cache_gb: float = 2.0
+
+
+@dataclass
+class FinetuneConfig:
+    joint_epochs: int = 5
+    gamma: float = 0.990
     lr_enc: float = 1e-5
     lr_val: float = 3e-4
     value_weight: float = 0.5
@@ -41,14 +56,15 @@ class FinetuneConfig:
     rollout_len: int = 5
     log_every: int = 50
     max_cache_gb: float = 4.0
-    importance_max_episodes: int = 32
-    importance_recency_decay: float = 0.95
+    replay_history_limit: int = 32
+    replay_recency_decay: float = 0.95
 
 
 @dataclass
 class TrainConfig:
     loss: LossConfig = field(default_factory=LossConfig)
     pretrain: PretrainConfig = field(default_factory=PretrainConfig)
+    bootstrap: BootstrapConfig = field(default_factory=BootstrapConfig)
     finetune: FinetuneConfig = field(default_factory=FinetuneConfig)
 
 

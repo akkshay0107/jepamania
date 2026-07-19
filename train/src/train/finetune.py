@@ -6,7 +6,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, Mapping, Sequence, Tuple, Union
 
 TRAIN_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(TRAIN_ROOT) not in sys.path:
@@ -39,9 +39,9 @@ logging.basicConfig(
 
 DEFAULT_CONFIG = TRAIN_ROOT.parent / "core" / "config.yaml"
 DEFAULT_TRAIN_CONFIG = TRAIN_ROOT / "config.yaml"
-DEFAULT_DATA_DIR = TRAIN_ROOT.parent / "win-client" / "data"
+DEFAULT_DATA_DIR = TRAIN_ROOT.parent / "win-client" / "data" / "rl" / "rollouts"
 DEFAULT_CHECKPOINT = (
-    TRAIN_ROOT.parent / "checkpoints" / "pretrain" / "pretrain_model_latest.eqx"
+    TRAIN_ROOT.parent / "checkpoints" / "finetune" / "ft_model_latest.eqx"
 )
 DEFAULT_OUTPUT_DIR = TRAIN_ROOT.parent / "checkpoints" / "finetune"
 
@@ -55,7 +55,7 @@ Projectors = Tuple[
 ]
 
 
-def _extract_obs(
+def extract_obs(
     encoder: Encoder, batch: Batch, is_target: bool = False
 ) -> Dict[str, Any]:
     if is_target:
@@ -77,64 +77,7 @@ def _extract_obs(
         }
 
 
-def compute_value_loss(
-    value_head: MLPValueHead,
-    encoder: Encoder,
-    batch: Batch,
-    gamma: float,
-    stop_grad_encoder: bool = True,
-    predictor: Optional[MLPPredictor] = None,
-) -> Float[Array, ""]:
-    """Computes K-step discounted return value loss on z_t and predicted states."""
-    obs_t = _extract_obs(encoder, batch, is_target=False)
-    obs_target = _extract_obs(encoder, batch, is_target=True)
-
-    z_t = jax.vmap(encoder)(obs_t)
-    if stop_grad_encoder:
-        z_t = jax.lax.stop_gradient(z_t)
-    z_target = jax.lax.stop_gradient(jax.vmap(encoder)(obs_target))
-
-    v_t = jax.vmap(value_head)(z_t)
-    v_target = jax.lax.stop_gradient(jax.vmap(value_head)(z_target))
-
-    rewards = batch["rewards_seq"].astype(jnp.float32)
-    k_steps = rewards.shape[1]
-    discounts = gamma ** jnp.arange(k_steps, dtype=jnp.float32)
-    disc_reward = jnp.sum(rewards * discounts, axis=1)
-
-    target_return = disc_reward + (gamma**k_steps) * v_target
-    loss_t = jnp.mean(optax.huber_loss(v_t, target_return))
-
-    if predictor is not None and "actions_seq" in batch:
-        actions = batch["actions_seq"].astype(jnp.int32)
-        z_pred = jax.vmap(lambda z0, acts: _rollout_latent(predictor, z0, acts))(
-            z_t, actions
-        )
-        v_pred = jax.vmap(value_head)(jax.lax.stop_gradient(z_pred))
-        loss_pred = jnp.mean(optax.huber_loss(v_pred, v_target))
-        return 0.5 * loss_t + 0.5 * loss_pred
-
-    return loss_t
-
-
-def make_warmup_step(optimizer: optax.GradientTransformation, gamma: float):
-    @eqx.filter_jit
-    def warmup_step(
-        value_head: MLPValueHead,
-        frozen_encoder: Encoder,
-        frozen_predictor: Optional[MLPPredictor],
-        opt_state: optax.OptState,
-        batch: Batch,
-    ) -> Tuple[MLPValueHead, optax.OptState, Float[Array, ""]]:
-        loss, grads = eqx.filter_value_and_grad(compute_value_loss)(
-            value_head, frozen_encoder, batch, gamma, True, frozen_predictor
-        )
-        params = eqx.filter(value_head, eqx.is_array)
-        updates, new_opt_state = optimizer.update(grads, opt_state, params)
-        new_value_head = eqx.apply_updates(value_head, updates)
-        return new_value_head, new_opt_state, loss
-
-    return warmup_step
+_extract_obs = extract_obs
 
 
 def compute_joint_loss(
@@ -148,8 +91,8 @@ def compute_joint_loss(
 ) -> Tuple[Float[Array, ""], Tuple[Float[Array, ""], Float[Array, ""]]]:
     encoder, predictor, value_head = models
 
-    obs_t = _extract_obs(encoder, batch, is_target=False)
-    obs_target = _extract_obs(encoder, batch, is_target=True)
+    obs_t = extract_obs(encoder, batch, is_target=False)
+    obs_target = extract_obs(encoder, batch, is_target=True)
 
     z_t = jax.vmap(encoder)(obs_t)
     z_target = jax.vmap(encoder)(obs_target)
@@ -183,13 +126,16 @@ def compute_joint_loss(
     return total_loss, (jepa_loss, val_loss)
 
 
-def _get_param_labels(models: RLModels):
+def get_param_labels(models: RLModels):
     encoder, predictor, value_head = models
     return (
         jax.tree.map(lambda _: "enc_pred", encoder),
         jax.tree.map(lambda _: "enc_pred", predictor),
         jax.tree.map(lambda _: "val_head", value_head),
     )
+
+
+_get_param_labels = get_param_labels
 
 
 def make_joint_step(
@@ -227,7 +173,7 @@ def make_joint_step(
     return joint_step
 
 
-def _load_projectors(
+def load_projectors(
     checkpoint: Path,
     key: jax.Array,
     latent_dim: int,
@@ -236,15 +182,9 @@ def _load_projectors(
     """Loads the frozen loss projectors written next to the model checkpoint."""
     projectors_path = checkpoint.parent / "projectors.eqx"
     if not projectors_path.exists():
-        pretrain_fallback = checkpoint.parent.parent / "pretrain" / "projectors.eqx"
-        if pretrain_fallback.exists():
-            projectors_path = pretrain_fallback
-        else:
-            raise FileNotFoundError(
-                f"Frozen loss projectors not found at {projectors_path} or "
-                f"{pretrain_fallback}. Fine-tuning must reuse the projectors "
-                "saved during pretraining."
-            )
+        raise FileNotFoundError(
+            f"Frozen loss projectors must be next to the model: {projectors_path}"
+        )
     subspace_dim = loss_cfg.subspace_dim or latent_dim // loss_cfg.num_subspaces
     template = generate_projectors(
         key,
@@ -256,35 +196,31 @@ def _load_projectors(
     return load_checkpoint(projectors_path, template)
 
 
+_load_projectors = load_projectors
+
+
 def train_rl(
     data_dir: Path,
     output_dir: Path,
     checkpoint: Path,
-    value_head_path: Optional[Path],
+    value_head_path: Path,
     model_cfg: SubJepaConfig,
     train_cfg: TrainConfig,
+    episode_ids: Sequence[int] | None = None,
     step_offset: int = 0,
-    use_importance_sampling: bool = False,
 ) -> tuple[RLModels, int]:
-    """Runs one stateless RL fine-tuning pass over the given dataset.
-
-    Loads a combined (encoder, predictor) checkpoint, then either loads the
-    given value head (skipping bootstrap) or random-initializes one and
-    bootstraps it on the frozen encoder. Both are then fine-tuned jointly,
-    with `ft_model_latest.eqx` and `ft_value_head_latest.eqx` written to
-    `output_dir` at the end.
+    """Run one joint online update from an existing fine-tuned checkpoint.
 
     Arguments:
       data_dir: Path to reward-labeled HDF5 dataset directory
       output_dir: Destination directory for the fine-tuned checkpoints
       checkpoint: Combined (encoder, predictor) Equinox checkpoint; the frozen
         loss projectors are loaded from `projectors.eqx` alongside it
-      value_head_path: Optional value head checkpoint; when given, the
-        bootstrap warmup phase is skipped
+      value_head_path: Required value head checkpoint
       model_cfg: Model architecture configuration
       train_cfg: Training configuration (finetune and loss sections are used)
+      episode_ids: Completed rollout episodes selected for this update
       step_offset: Global step offset from prior iterations
-      use_importance_sampling: Whether to use Option 2 priority sampling
 
     Returns:
       Tuple containing fine-tuned (encoder, predictor, value_head) models
@@ -303,7 +239,7 @@ def train_rl(
     logging.info(f"Loaded Sub-JEPA models ({detected_type} encoder) from {checkpoint}")
     obs_type = "lidar" if detected_type == "lidar" else "screen"
 
-    subspace_projectors, slice_projectors = _load_projectors(
+    subspace_projectors, slice_projectors = load_projectors(
         checkpoint, key_proj, latent_dim, loss_cfg
     )
     save_checkpoint(
@@ -311,36 +247,18 @@ def train_rl(
     )
 
     logging.info(
-        f"Loading dataset from {data_dir} (obs_type={obs_type}, "
-        f"importance_sampling={use_importance_sampling})..."
+        "Loading %s selected episodes from %s", len(episode_ids or ()), data_dir
     )
-    if use_importance_sampling:
-        from train.priority_dataloader import PrioritySlidingWindowDataset
-
-        dataset = PrioritySlidingWindowDataset(
-            data_dir=data_dir,
-            history_len=IMG_HIST_LEN,
-            rollout_len=ft_cfg.rollout_len,
-            discretize_actions=True,
-            obs_type=obs_type,
-            load_rewards=True,
-            max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
-            max_sampled_episodes=ft_cfg.importance_max_episodes,
-            beta=2.0,
-            alpha=2.0,
-            recency_decay=ft_cfg.importance_recency_decay,
-            seed=ft_cfg.seed,
-        )
-    else:
-        dataset = SlidingWindowDataset(
-            data_dir=data_dir,
-            history_len=IMG_HIST_LEN,
-            rollout_len=ft_cfg.rollout_len,
-            discretize_actions=True,
-            obs_type=obs_type,
-            load_rewards=True,
-            max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
-        )
+    dataset = SlidingWindowDataset(
+        data_dir=data_dir,
+        history_len=IMG_HIST_LEN,
+        rollout_len=ft_cfg.rollout_len,
+        discretize_actions=True,
+        obs_type=obs_type,
+        load_rewards=True,
+        max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
+        episode_ids=episode_ids,
+    )
 
     if len(dataset) == 0:
         raise RuntimeError(f"No valid transitions found in {data_dir}")
@@ -368,44 +286,9 @@ def train_rl(
         )
     global_step = step_offset
     try:
-        if value_head_path is not None:
-            value_head = load_checkpoint(
-                value_head_path, MLPValueHead(model_cfg.value_head, key=key_val)
-            )
-            logging.info(
-                f"Loaded value head from {value_head_path}; skipping bootstrap."
-            )
-        else:
-            value_head = MLPValueHead(model_cfg.value_head, key=key_val)
-            logging.info(
-                f"--- Bootstrapping value head ({ft_cfg.warmup_epochs} epochs) ---"
-            )
-            warmup_opt = optax.chain(
-                optax.clip_by_global_norm(1.0),
-                optax.adamw(ft_cfg.lr_warmup),
-            )
-            warmup_opt_state = warmup_opt.init(eqx.filter(value_head, eqx.is_array))
-            warmup_step = make_warmup_step(warmup_opt, ft_cfg.gamma)
-
-            for epoch in range(ft_cfg.warmup_epochs):
-                t0 = time.time()
-                losses = []
-                for batch in dataloader:
-                    value_head, warmup_opt_state, loss = warmup_step(
-                        value_head, encoder, predictor, warmup_opt_state, batch
-                    )
-                    losses.append(loss)
-                    global_step += 1
-                    if global_step % ft_cfg.log_every == 0:
-                        wandb.log({"warmup/step_loss": float(loss)}, step=global_step)
-                mean_loss = float(jnp.mean(jnp.stack(losses)))
-                logging.info(
-                    f"[Warmup Epoch {epoch + 1}/{ft_cfg.warmup_epochs}] "
-                    f"Value Loss: {mean_loss:.6f} ({time.time() - t0:.1f}s)"
-                )
-                wandb.log({"warmup/epoch_loss": mean_loss}, step=global_step)
-
-            save_checkpoint(output_dir / "ft_value_head_latest.eqx", value_head)
+        value_head = load_checkpoint(
+            value_head_path, MLPValueHead(model_cfg.value_head, key=key_val)
+        )
 
         models: RLModels = (encoder, predictor, value_head)
 
@@ -422,7 +305,7 @@ def train_rl(
                     optax.clip_by_global_norm(1.0), optax.adamw(ft_cfg.lr_val)
                 ),
             },
-            _get_param_labels,
+            get_param_labels,
         )
         joint_opt_state = joint_opt.init(eqx.filter(models, eqx.is_array))
         joint_step = make_joint_step(
@@ -510,8 +393,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--value-head",
         type=Path,
-        default=None,
-        help="Optional value head eqx checkpoint; skips bootstrap when given",
+        required=True,
+        help="Existing value-head checkpoint",
     )
     parser.add_argument(
         "--output-dir",

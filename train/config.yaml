@@ -15,11 +15,24 @@ pretrain:
   val_ratio: 0.1
   max_cache_gb: 4.0
 
+bootstrap:
+  warmup_epochs: 5
+  joint_epochs: 5
+  gamma: 0.990
+  lr_warmup: 3.0e-4
+  lr_enc: 5.0e-6
+  lr_val: 1.0e-4
+  value_weight: 0.5
+  batch_size: 128
+  num_workers: 4
+  seed: 42
+  rollout_len: 5
+  log_every: 50
+  max_cache_gb: 2.0
+
 finetune:
-  warmup_epochs: 6
   joint_epochs: 4
   gamma: 0.990
-  lr_warmup: 5.0e-4
   lr_enc: 5.0e-6
   lr_val: 1.0e-4
   value_weight: 0.5
@@ -29,5 +42,5 @@ finetune:
   rollout_len: 5
   log_every: 50
   max_cache_gb: 1.0
-  importance_max_episodes: 32
-  importance_recency_decay: 0.95
+  replay_history_limit: 32
+  replay_recency_decay: 0.95

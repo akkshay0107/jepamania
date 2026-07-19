@@ -28,7 +28,8 @@ JEPAMania separates functional deep learning components into decoupled workspace
 - **Real-Time Latent Planning**:  
   Executes up to 128 parallel rollout trajectories per control tick using JAX `vmap`/`jit` for low-latency decision making.
 - **Closed-Loop Cyclic RL**:  
-  Interleaves online MPC rollout collection with value head bootstrapping and joint latent policy fine-tuning.
+  Starts from an existing fine-tuned model and interleaves online MPC rollout
+  collection with joint latent and value-head updates.
 
 ---
 
@@ -92,16 +93,28 @@ uv run --package train python -m train.pretrain \
   --checkpoint-dir checkpoints/pretrain
 ```
 
-### Step 3: Downstream RL & Value Head Fine-Tuning (`train/src/train/finetune.py`)
-Fine-tune the pretrained Sub-JEPA latent model and train a discounted return value head on reward-labeled rollouts.
+### Step 3: Prepare the Fine-Tuned Starting Checkpoint (`train/src/train/bootstrap.py`)
+
+Online RL requires an existing model, value head, and frozen projectors in
+`checkpoints/finetune/`:
 
 ```bash
-# Bootstrap value head on frozen encoder, then fine-tune jointly
-uv run --package train python -m train.finetune \
-  --data-dir win-client/data/rl \
-  --checkpoint checkpoints/pretrain/pretrain_model_best.eqx \
+checkpoints/finetune/ft_model_latest.eqx
+checkpoints/finetune/ft_value_head_latest.eqx
+checkpoints/finetune/projectors.eqx
+```
+
+Run supervised value bootstrapping and optional joint fine-tuning on pre-recorded dataset rollouts to produce this starting checkpoint:
+
+```bash
+# Bootstrap value head from a pretrained model checkpoint
+uv run --package train python -m train.bootstrap \
+  --checkpoint checkpoints/pretrain/model_latest.eqx \
+  --data-dir win-client/data \
   --output-dir checkpoints/finetune
 ```
+
+The online loop (`rl_loop.py`) starts from this fine-tuned checkpoint and never records, copies, or trains on bootstrap data automatically.
 
 ### Step 4: Real-Time Autonomous MPC Driving (`win-client/run.py`)
 Deploy the trained latent world model to drive autonomously in live Trackmania.
@@ -114,20 +127,26 @@ uv run --package win-client python win-client/run.py \
   --planner-type cem
 ```
 
-*Supported `--planner-type` options:* `cem`, `beam`, `random`. Add `--record-rollouts` to simultaneously record live MPC trajectories to disk.
+Planner selection and planner hyperparameters are read from `core/config.yaml`.
+Add `--record-rollouts` to record standalone MPC trajectories.
 
 ### Step 5: Cyclic Online RL Loop (`rl_loop.py`)
 Orchestrate alternating phases of MPC rollout collection and joint model fine-tuning automatically:
 
 ```bash
 uv run python rl_loop.py \
-  --pretrain-checkpoint checkpoints/pretrain/pretrain_model_best.eqx \
-  --bootstrap-dir win-client/data/rl/bootstrap \
-  --rollouts-dir win-client/data/rl/rollouts \
+  --initial-model checkpoints/finetune/ft_model_latest.eqx \
+  --initial-value-head checkpoints/finetune/ft_value_head_latest.eqx \
+  --rollout-file win-client/data/rl/rollouts/online_rollouts.h5 \
   --checkpoints-dir checkpoints/rl \
-  --num-iterations 5 \
-  --episodes-per-iter 5
+  --iterations 5 \
+  --episodes-per-iteration 5
 ```
+
+The loop keeps one TMRL environment alive for the full run. While JAX is
+fine-tuning, an idle brake heartbeat continues consuming Openplanet observations
+so the next collection does not reconnect through a stale 10-second timeout.
+Interrupted runs resume from `checkpoints/rl/run_state.json`.
 
 ### Step 6: Checkpoint Export (`tar`)
 Package required configs and model checkpoints into a compressed archive for deployment across machines:
@@ -175,11 +194,14 @@ Defines Sub-JEPA sliced-subspace regularizers, learning rates, schedules, and da
 | `pretrain.batch_size` | `256` | Transition batch size during pretraining. |
 | `pretrain.lr` | `3.0e-4` | Peak AdamW learning rate for joint encoder/predictor pretraining. |
 | `pretrain.rollout_len` | `5` | Autoregressive transition steps predicted during pretraining. |
-| `finetune.warmup_epochs` | `3` | Epochs spent bootstrapping the value head on frozen encoder representations. |
-| `finetune.joint_epochs` | `5` | Epochs for joint end-to-end fine-tuning of encoder, predictor, and value head. |
-| `finetune.lr_enc` | `1.0e-5` | Small learning rate for backbone fine-tuning to preserve learned world dynamics. |
-| `finetune.lr_val` | `3.0e-4` | Learning rate for the Huber discounted return value head. |
+| `bootstrap.warmup_epochs` | `5` | Number of supervised value-head warmup epochs over historical rollouts before online RL. |
+| `bootstrap.joint_epochs` | `5` | Number of joint fine-tuning epochs of encoder, predictor, and value head during bootstrapping. |
+| `finetune.joint_epochs` | `4` | Epochs for joint end-to-end fine-tuning per online RL iteration. |
+| `finetune.lr_enc` | `5.0e-6` | Small learning rate for backbone fine-tuning to preserve learned world dynamics. |
+| `finetune.lr_val` | `1.0e-4` | Learning rate for the Huber discounted return value head. |
 | `finetune.value_weight` | `0.5` | Relative loss multiplier between Sub-JEPA predictive loss and Huber value return loss. |
+| `finetune.replay_history_limit` | `32` | Maximum historical episodes mixed with every newly collected batch. |
+| `finetune.replay_recency_decay` | `0.95` | Per-iteration decay used by deterministic historical replay selection. |
 
 ---
 
