@@ -1,3 +1,5 @@
+import functools
+
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float, Int
@@ -144,18 +146,19 @@ def rescale_gas_np(actions: np.ndarray) -> np.ndarray:
     return out
 
 
-def _compute_unit_transition_cost_matrix() -> Float[Array, "NUM_ACTIONS NUM_ACTIONS"]:
-    """Computes normalized cost of transition from action to action across time steps"""
-    all_actions = to_continuous_action(jnp.arange(NUM_ACTIONS))
+@functools.lru_cache(maxsize=1)
+def _unit_transition_cost_matrix_np() -> np.ndarray:
+    all_actions = to_continuous_action_np(np.arange(NUM_ACTIONS))
     gas_brake = all_actions[:, 0:2]
     steer = all_actions[:, 2]
 
-    norm_steer_sq = jnp.square((steer[:, None] - steer[None, :]) / 2.0)
+    norm_steer_sq = np.square((steer[:, None] - steer[None, :]) / 2.0)
     norm_gb_sq = (
-        jnp.sum(jnp.square(gas_brake[:, None, :] - gas_brake[None, :, :]), axis=-1)
-        / 2.0
+        np.sum(np.square(gas_brake[:, None, :] - gas_brake[None, :, :]), axis=-1) / 2.0
     )
-    return 0.8 * norm_steer_sq + 0.2 * norm_gb_sq
+    return (0.8 * norm_steer_sq + 0.2 * norm_gb_sq).astype(np.float32)
 
 
-UNIT_TRANSITION_COST_MATRIX = _compute_unit_transition_cost_matrix()
+def unit_transition_cost_matrix() -> Float[Array, "NUM_ACTIONS NUM_ACTIONS"]:
+    """Computes normalized cost of transition from action to action across time steps"""
+    return jnp.asarray(_unit_transition_cost_matrix_np())

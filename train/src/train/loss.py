@@ -2,6 +2,7 @@ import functools
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array, Float, PRNGKeyArray
 
 
@@ -56,19 +57,32 @@ def _project_into_slices(
     return subspace_latents @ slice_p
 
 
+@functools.lru_cache(maxsize=4)
+def _get_epps_pulley_constants_np(
+    knots: int = 17, t_max: float = 3.0
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    t = np.linspace(0.0, t_max, knots, dtype=np.float32)
+    dt = t_max / (knots - 1)
+    weights = np.full((knots,), 2 * dt, dtype=np.float32)
+    weights[0] = dt
+    weights[-1] = dt
+    phi = np.exp(-(t**2) / 2.0).astype(np.float32)
+    weights = weights * phi
+    return t, phi, weights
+
+
+def get_epps_pulley_constants(
+    knots: int = 17, t_max: float = 3.0
+) -> tuple[Float[Array, "knots"], Float[Array, "knots"], Float[Array, "knots"]]:
+    """Computes and caches constant grid, target characteristic function,
+    and quadrature weights for Epps-Pulley test."""
+    t_np, phi_np, weights_np = _get_epps_pulley_constants_np(knots, t_max)
+    return jnp.asarray(t_np), jnp.asarray(phi_np), jnp.asarray(weights_np)
+
+
 def epps_pulley_1d(h: Float[Array, "batch"]) -> Float[Array, ""]:
     """Epps-Pulley normality test statistic along a 1D projection slice"""
-    knots = 17
-    t_max = 3.0
-    t = jnp.linspace(0.0, t_max, knots)
-    dt = t_max / (knots - 1)
-    weights = jnp.full((knots,), 2 * dt)
-    weights = weights.at[0].set(dt)
-    weights = weights.at[-1].set(dt)
-
-    phi = jnp.exp(-(t**2) / 2.0)
-    weights = weights * phi
-
+    t, phi, weights = get_epps_pulley_constants()
     x_t = h[:, None] * t[None, :]
     cos_mean = jnp.mean(jnp.cos(x_t), axis=0)
     sin_mean = jnp.mean(jnp.sin(x_t), axis=0)

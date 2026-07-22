@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from jax.tree_util import Partial
 from jaxtyping import Array, Float, Int, PRNGKeyArray
 
-from core.actions import UNIT_TRANSITION_COST_MATRIX
+from core.actions import unit_transition_cost_matrix
 from core.config import NUM_ACTIONS, PlannerConfig
 from core.interfaces import Predictor
 
@@ -19,7 +19,7 @@ def _compute_sequence_penalties(
     if smoothness_weight <= 0.0:
         return jnp.zeros(action_seqs.shape[:-1], dtype=jnp.float32)
 
-    cost_matrix = smoothness_weight * UNIT_TRANSITION_COST_MATRIX
+    cost_matrix = smoothness_weight * unit_transition_cost_matrix()
     transitions = cost_matrix[action_seqs[..., :-1], action_seqs[..., 1:]]
     penalties = jnp.sum(transitions, axis=-1)
 
@@ -231,7 +231,7 @@ class BeamSearchPlanner(eqx.Module):
         next_states, new_scores = jax.vmap(expand_wrapper)(beam_states)
 
         if self.smoothness_weight > 0.0:
-            cost_matrix = self.smoothness_weight * UNIT_TRANSITION_COST_MATRIX
+            cost_matrix = self.smoothness_weight * unit_transition_cost_matrix()
             prev_actions = jnp.where(
                 step_idx > 0,
                 beam_actions[:, step_idx - 1],

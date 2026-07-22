@@ -1,11 +1,11 @@
-"""Visual (ViT and CNN) and LiDAR observation encoders for JEPA latent embeddings."""
-
+import functools
 from pathlib import Path
 from typing import Any, Mapping, Union
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jaxtyping import Array, Float, PRNGKeyArray
 
 from core.config import (
@@ -18,11 +18,10 @@ from core.config import (
 from core.dynamics import MLPPredictor
 
 
-def get_2d_sincos_pos_embed(
-    latent_dim: int, grid_size: int = 4
-) -> Float[Array, "grid_size*grid_size latent_dim"]:
-    grid_y, grid_x = jnp.meshgrid(
-        jnp.arange(grid_size), jnp.arange(grid_size), indexing="ij"
+@functools.lru_cache(maxsize=16)
+def _get_2d_sincos_pos_embed_np(latent_dim: int, grid_size: int = 4) -> np.ndarray:
+    grid_y, grid_x = np.meshgrid(
+        np.arange(grid_size), np.arange(grid_size), indexing="ij"
     )
     grid_y = grid_y.flatten()
     grid_x = grid_x.flatten()
@@ -30,15 +29,21 @@ def get_2d_sincos_pos_embed(
     assert latent_dim % 2 == 0, f"latent_dim must be even, got {latent_dim}"
     d = latent_dim // 2
 
-    omega = 1.0 / (10000 ** (jnp.arange(d // 2) * 2 / d))
+    omega = 1.0 / (10000 ** (np.arange(d // 2) * 2 / d))
     out_y = grid_y[:, None] * omega[None, :]
-    emb_y = jnp.concatenate([jnp.sin(out_y), jnp.cos(out_y)], axis=-1)
+    emb_y = np.concatenate([np.sin(out_y), np.cos(out_y)], axis=-1)
 
     out_x = grid_x[:, None] * omega[None, :]
-    emb_x = jnp.concatenate([jnp.sin(out_x), jnp.cos(out_x)], axis=-1)
+    emb_x = np.concatenate([np.sin(out_x), np.cos(out_x)], axis=-1)
 
-    emb = jnp.concatenate([emb_y, emb_x], axis=-1)
+    emb = np.concatenate([emb_y, emb_x], axis=-1).astype(np.float32)
     return emb
+
+
+def get_2d_sincos_pos_embed(
+    latent_dim: int, grid_size: int = 4
+) -> Float[Array, "16 latent_dim"]:
+    return jnp.asarray(_get_2d_sincos_pos_embed_np(latent_dim, grid_size))
 
 
 class ConvStem(eqx.Module):

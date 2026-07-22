@@ -91,7 +91,8 @@ def compute_loss(
             "screen": batch["obs_stack_t"].astype(jnp.float32) / 255.0,
             "telemetry": batch["telemetry_t"],
         }
-    actions = batch["actions_seq"].astype(jnp.int32)
+    num_target_steps = batch["obs_stack_targets"].shape[1]
+    actions = batch["actions_seq"][:, :num_target_steps].astype(jnp.int32)
     z_t = jax.vmap(encoder)(obs_t)
 
     if isinstance(encoder, LidarEncoder):

@@ -64,6 +64,16 @@ Projectors = Tuple[
 def extract_obs(
     encoder: Encoder, batch: Batch, is_target: bool = False
 ) -> Dict[str, Any]:
+    """Extracts and normalizes single-step observation dictionaries from batch data.
+
+    Arguments:
+      encoder: Vision, Conv, or Lidar observation encoder instance
+      batch: Batch mapping containing observation stack and telemetry arrays
+      is_target: Flag indicating whether to extract target frame at K_obs step
+
+    Returns:
+      Dictionary containing normalized sensor observations (telemetry + screen/lidar)
+    """
     if is_target:
         obs_raw = batch["obs_stack_targets"][:, -1]
         telem_raw = batch["telemetry_targets"][:, -1]
