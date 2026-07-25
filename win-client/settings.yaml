@@ -25,7 +25,7 @@ episode_monitor:
 
 # Online MPC Deployment settings
 mpc:
-  checkpoint_path: null # Path to combined (encoder, predictor) checkpoint (.eqx) e.g., checkpoints/finetune/ft_model_latest.eqx
-  value_head_path: null # Optional path to pretrained MLPValueHead checkpoint (.eqx)
+  checkpoint_path: "checkpoints/rl/ft_model_latest.eqx" # Path to combined (encoder, predictor) checkpoint (.eqx) e.g., checkpoints/finetune/ft_model_latest.eqx
+  value_head_path: "checkpoints/rl/ft_value_head_latest.eqx" # Optional path to pretrained MLPValueHead checkpoint (.eqx)
   record_rollouts: false
   seed: 42

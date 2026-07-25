@@ -10,7 +10,7 @@ import numpy as np
 
 from win_client.utils import get_tmrl_env
 
-BRAKE_ACTION = np.asarray([0.0, 1.0, 0.0], dtype=np.float32)
+IDLE_ACTION = np.asarray([0.0, 0.0, 0.0], dtype=np.float32)
 
 
 @dataclass
@@ -93,7 +93,7 @@ class GameSessionWorker:
                     request = self._requests.get_nowait()
                 except queue.Empty:
                     # Idle control deliberately has no writer or rollout metadata.
-                    _, _, terminated, truncated, _ = env.step(BRAKE_ACTION)
+                    _, _, terminated, truncated, _ = env.step(IDLE_ACTION)
                     if terminated or truncated:
                         env.reset()
                     continue
