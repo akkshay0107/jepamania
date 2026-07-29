@@ -144,7 +144,7 @@ class MPCDriver:
                     "map_name": cfg.agent.map_name,
                     "map_uid": cfg.agent.map_uid,
                     "encoder_type": self.encoder_type,
-                    "planner_type": self.model_cfg.planner.type,
+                    "planner_type": "cem",
                     "timestamp": datetime.datetime.now().isoformat(),
                 }
             )

@@ -43,6 +43,9 @@ class CEMPlanner(eqx.Module):
     num_samples: int
     num_elites: int
     alpha: float
+    policy_head: Optional[
+        Callable[[Float[Array, "latent_dim"]], Float[Array, "NUM_ACTIONS"]]
+    ] = None
     smoothness_weight: float = 0.0
 
     def _step_fn(
@@ -107,6 +110,10 @@ class CEMPlanner(eqx.Module):
         prev_action: Optional[Int[Array, ""]] = kwargs.get("prev_action")
 
         init_logits = jnp.zeros((self.sequence_len, NUM_ACTIONS))
+        if self.policy_head is not None:
+            prior_probs = self.policy_head(current_latent_state)
+            # Epsilon-mixing guarantees probs > 0, so log is perfectly safe
+            init_logits = init_logits.at[0].set(jnp.log(prior_probs))
 
         cem_iter_wrapper = Partial(
             self._cem_iter_fn,
@@ -124,11 +131,15 @@ def create_planner(
     cfg: PlannerConfig,
     predictor: Predictor,
     objective_fn: Callable[[Float[Array, "latent_dim"]], Float[Array, ""]],
+    policy_head: Optional[
+        Callable[[Float[Array, "latent_dim"]], Float[Array, "NUM_ACTIONS"]]
+    ] = None,
 ) -> Any:
     """Instantiates the CEM trajectory planner from a PlannerConfig."""
     return CEMPlanner(
         predictor=predictor,
         objective_fn=objective_fn,
+        policy_head=policy_head,
         sequence_len=cfg.sequence_len,
         smoothness_weight=cfg.smoothness_weight,
         num_iters=cfg.cem_iters,

@@ -57,6 +57,14 @@ class ValueHeadConfig:
 
 
 @dataclass
+class PolicyHeadConfig:
+    latent_dim: int = 192
+    hidden_dim: int = 256
+    temperature: float = 2.0
+    epsilon: float = 0.05
+
+
+@dataclass
 class PlannerConfig:
     sequence_len: int = 15
     smoothness_weight: float = 0.5
@@ -72,6 +80,7 @@ class SubJepaConfig:
     encoder: EncoderConfig = field(default_factory=EncoderConfig)
     predictor: PredictorConfig = field(default_factory=PredictorConfig)
     value_head: ValueHeadConfig = field(default_factory=ValueHeadConfig)
+    policy_head: PolicyHeadConfig = field(default_factory=PolicyHeadConfig)
     planner: PlannerConfig = field(default_factory=PlannerConfig)
 
 

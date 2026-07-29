@@ -3,8 +3,8 @@ import time
 import equinox as eqx
 import jax
 import numpy as np
-from core.config import PredictorConfig, ValueHeadConfig
-from core.dynamics import MLPPredictor, MLPValueHead
+from core.config import PolicyHeadConfig, PredictorConfig, ValueHeadConfig
+from core.dynamics import MLPPolicyHead, MLPPredictor, MLPValueHead
 from core.planners import CEMPlanner
 
 
@@ -28,13 +28,16 @@ def benchmark(func, args, num_warmup=10, num_runs=100):
 def main():
     print("Setting up models for benchmarking...")
     key = jax.random.PRNGKey(0)
-    key_pred, key_val, key_plan = jax.random.split(key, 3)
+    key_pred, key_val, key_pol, key_plan = jax.random.split(key, 4)
 
     pred_cfg = PredictorConfig()
     predictor = MLPPredictor(pred_cfg, key_pred)
 
     val_cfg = ValueHeadConfig()
     value_head = MLPValueHead(val_cfg, key_val)
+
+    pol_cfg = PolicyHeadConfig()
+    policy_head = MLPPolicyHead(pol_cfg, key_pol)
 
     # Pure value-guided objective: just use the predicted value
     def objective_fn(latent):
@@ -60,6 +63,7 @@ def main():
         planner = CEMPlanner(
             predictor=predictor,
             objective_fn=objective_fn,
+            policy_head=policy_head,
             sequence_len=cfg["seq"],
             num_iters=cfg["iters"],
             num_samples=cfg["samples"],

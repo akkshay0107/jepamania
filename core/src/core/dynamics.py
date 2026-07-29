@@ -3,7 +3,12 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float, Int, PRNGKeyArray
 
-from core.config import NUM_ACTIONS, PredictorConfig, ValueHeadConfig
+from core.config import (
+    NUM_ACTIONS,
+    PolicyHeadConfig,
+    PredictorConfig,
+    ValueHeadConfig,
+)
 
 
 class MLPPredictor(eqx.Module):
@@ -49,3 +54,37 @@ class MLPValueHead(eqx.Module):
 
     def __call__(self, latent_state: Float[Array, "latent_dim"]) -> Float[Array, ""]:
         return self.value_mlp(latent_state).squeeze(axis=-1)
+
+
+class MLPPolicyHead(eqx.Module):
+    policy_mlp: eqx.nn.MLP
+    temperature: float
+    epsilon: float
+
+    def __init__(self, cfg: PolicyHeadConfig, key: PRNGKeyArray):
+        self.policy_mlp = eqx.nn.MLP(
+            in_size=cfg.latent_dim,
+            out_size=NUM_ACTIONS,
+            width_size=cfg.hidden_dim,
+            depth=3,
+            activation=jax.nn.silu,
+            key=key,
+        )
+        self.temperature = cfg.temperature
+        self.conf = 1.0 - cfg.epsilon  # confidence given to policy output
+        self.eps_uni_dist = (
+            cfg.epsilon / NUM_ACTIONS
+        )  # uniform distribution scaled down by epsilon
+
+    def __call__(
+        self, latent_state: Float[Array, "latent_dim"]
+    ) -> Float[Array, "NUM_ACTIONS"]:
+        """
+        Returns smoothed probabilities using temperature scaling and epsilon mixing.
+        """
+        logits = self.policy_mlp(latent_state)
+        scaled_logits = logits / self.temperature
+        probs = jax.nn.softmax(scaled_logits)
+
+        smoothed_probs = self.eps_uni_dist + self.conf * probs
+        return smoothed_probs
