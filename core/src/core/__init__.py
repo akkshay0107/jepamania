@@ -10,9 +10,7 @@ from .dynamics import MLPPredictor, MLPValueHead
 from .encoders import ConvEncoder, LidarEncoder, ViTEncoder, load_models_auto
 from .interfaces import Encoder, Planner, Predictor
 from .planners import (
-    BeamSearchPlanner,
     CEMPlanner,
-    RandomShootingPlanner,
     create_planner,
 )
 
@@ -28,8 +26,6 @@ __all__ = [
     "MLPPredictor",
     "MLPValueHead",
     "CEMPlanner",
-    "BeamSearchPlanner",
-    "RandomShootingPlanner",
     "create_planner",
     "AsyncPlannerWrapper",
     "discretize_action",

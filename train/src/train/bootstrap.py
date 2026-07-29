@@ -58,7 +58,9 @@ logging.basicConfig(
 DEFAULT_CONFIG = TRAIN_ROOT.parent / "core" / "config.yaml"
 DEFAULT_TRAIN_CONFIG = TRAIN_ROOT / "config.yaml"
 DEFAULT_DATA_DIR = TRAIN_ROOT.parent / "win-client" / "data" / "rl" / "bootstrap"
-DEFAULT_CHECKPOINT = TRAIN_ROOT.parent / "checkpoints" / "pretrain" / "pretrain_model_latest.eqx"
+DEFAULT_CHECKPOINT = (
+    TRAIN_ROOT.parent / "checkpoints" / "pretrain" / "pretrain_model_latest.eqx"
+)
 DEFAULT_OUTPUT_DIR = TRAIN_ROOT.parent / "checkpoints" / "finetune"
 
 Encoder = Union[ViTEncoder, ConvEncoder, LidarEncoder]
