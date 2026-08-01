@@ -10,16 +10,20 @@ predictor:
   action_embed_dim: 16
   hidden_dim: 256
 
+value_head:
+  latent_dim: 192
+  hidden_dim: 256
+
+policy_head:
+  latent_dim: 192
+  hidden_dim: 256
+  temperature: 2.0
+  epsilon: 0.05
+
 planner:
-  type: "cem"
   sequence_len: 5
   smoothness_weight: 0.0
-  # Beam Search
-  beam_width: 5
-  # Cross-Entropy Method (CEM)
   cem_iters: 4
   cem_samples: 128
   cem_elites: 25
   cem_alpha: 0.7
-  # Random Shooting
-  rs_samples: 500

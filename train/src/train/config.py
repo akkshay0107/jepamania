@@ -44,12 +44,30 @@ class BootstrapConfig:
 
 
 @dataclass
+class PolicySFTConfig:
+    epochs: int = 50
+    batch_size: int = 128
+    lr: float = 3e-4
+    num_workers: int = 4
+    min_frames: int = 420
+    max_frames: int = 540
+    log_every: int = 50
+
+
+@dataclass
 class FinetuneConfig:
     joint_epochs: int = 5
     gamma: float = 0.990
-    lr_enc: float = 1e-5
-    lr_val: float = 3e-4
+    lr_enc: float = 5e-6
+    lr_val: float = 1e-4
+    lr_policy: float = 3e-5
     value_weight: float = 0.5
+    policy_weight: float = 1.0
+    human_anchor_ratio: float = 0.5
+    bootstrap_anchor_ratio: float = 0.25
+    max_advantage_weight: float = 20.0
+    evaluation_episodes: int = 5
+    promotion_min_improvement_frames: int = 1
     batch_size: int = 64
     num_workers: int = 4
     seed: int = 42
@@ -65,6 +83,7 @@ class TrainConfig:
     loss: LossConfig = field(default_factory=LossConfig)
     pretrain: PretrainConfig = field(default_factory=PretrainConfig)
     bootstrap: BootstrapConfig = field(default_factory=BootstrapConfig)
+    policy_sft: PolicySFTConfig = field(default_factory=PolicySFTConfig)
     finetune: FinetuneConfig = field(default_factory=FinetuneConfig)
 
 

@@ -8,12 +8,21 @@ import h5py
 import numpy as np
 
 
+def _attr_text(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
 @dataclass(frozen=True)
 class EpisodeSummary:
     episode_id: int
     episode_return: float
     iteration: int
     transition_count: int
+    terminal_reward: float = 0.0
+    termination: str = ""
+    source: str = ""
 
 
 @dataclass(frozen=True)
@@ -68,6 +77,9 @@ def read_completed_episode_summaries(
                     episode_return=float(np.sum(rewards)),
                     iteration=int(attrs.get("iteration", -1)),  # pyright: ignore[reportArgumentType]
                     transition_count=frame_end - frame_start,
+                    terminal_reward=float(rewards[-1]),
+                    termination=_attr_text(attrs["termination"]),
+                    source=_attr_text(attrs.get("source", "")),
                 )
             )
     return sorted(summaries, key=lambda summary: summary.episode_id)

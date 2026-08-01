@@ -101,6 +101,7 @@ Online RL requires an existing model, value head, and frozen projectors in
 ```bash
 checkpoints/finetune/ft_model_latest.eqx
 checkpoints/finetune/ft_value_head_latest.eqx
+checkpoints/finetune/ft_policy_head_latest.eqx
 checkpoints/finetune/projectors.eqx
 ```
 
@@ -110,11 +111,12 @@ Run supervised value bootstrapping and optional joint fine-tuning on pre-recorde
 # Bootstrap value head from a pretrained model checkpoint
 uv run --package train python -m train.bootstrap \
   --checkpoint checkpoints/pretrain/model_latest.eqx \
-  --data-dir win-client/data \
+  --data-dir win-client/data/rl/bootstrap \
   --output-dir checkpoints/finetune
 ```
 
-The online loop (`rl_loop.py`) starts from this fine-tuned checkpoint and never records, copies, or trains on bootstrap data automatically.
+The online loop (`rl_loop.py`) starts from this four-component checkpoint and mixes
+the configured bootstrap replay anchor into each online update.
 
 ### Step 4: Real-Time Autonomous MPC Driving (`win-client/run.py`)
 Deploy the trained latent world model to drive autonomously in live Trackmania.
@@ -124,7 +126,7 @@ Deploy the trained latent world model to drive autonomously in live Trackmania.
 uv run --package win-client python win-client/run.py \
   --checkpoint-path checkpoints/finetune/ft_model_latest.eqx \
   --value-head-path checkpoints/finetune/ft_value_head_latest.eqx \
-  --planner-type cem
+  --policy-head-path checkpoints/finetune/ft_policy_head_latest.eqx
 ```
 
 Planner selection and planner hyperparameters are read from `core/config.yaml`.
@@ -137,6 +139,7 @@ Orchestrate alternating phases of MPC rollout collection and joint model fine-tu
 uv run python rl_loop.py \
   --initial-model checkpoints/finetune/ft_model_latest.eqx \
   --initial-value-head checkpoints/finetune/ft_value_head_latest.eqx \
+  --initial-policy-head checkpoints/finetune/ft_policy_head_latest.eqx \
   --rollout-file win-client/data/rl/rollouts/online_rollouts.h5 \
   --checkpoints-dir checkpoints/rl \
   --iterations 5 \

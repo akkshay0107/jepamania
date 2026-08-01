@@ -30,7 +30,7 @@ from core.config import (
     SubJepaConfig,
     load_config,
 )
-from core.dynamics import MLPPredictor, MLPValueHead
+from core.dynamics import MLPPolicyHead, MLPPredictor, MLPValueHead
 from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder, load_models_auto
 from jaxtyping import Array, Float
 from omegaconf import OmegaConf
@@ -39,11 +39,17 @@ import wandb
 from train.config import TrainConfig, load_train_config
 from train.dataloader import DataLoader, SlidingWindowDataset
 from train.finetune import (
+    JointModels,
     _compute_truncated_lambda_return,
     extract_obs,
     get_param_labels,
     load_projectors,
     make_joint_step,
+)
+from train.policy import (
+    make_policy_dataset,
+    select_policy_sft_episodes,
+    train_policy_sft,
 )
 from train.pretrain import (
     _rollout_latent_sequence,
@@ -58,6 +64,7 @@ logging.basicConfig(
 DEFAULT_CONFIG = TRAIN_ROOT.parent / "core" / "config.yaml"
 DEFAULT_TRAIN_CONFIG = TRAIN_ROOT / "config.yaml"
 DEFAULT_DATA_DIR = TRAIN_ROOT.parent / "win-client" / "data" / "rl" / "bootstrap"
+DEFAULT_SSL_HUMAN_DIR = TRAIN_ROOT.parent / "win-client" / "data" / "ssl" / "human"
 DEFAULT_CHECKPOINT = (
     TRAIN_ROOT.parent / "checkpoints" / "pretrain" / "pretrain_model_latest.eqx"
 )
@@ -65,7 +72,8 @@ DEFAULT_OUTPUT_DIR = TRAIN_ROOT.parent / "checkpoints" / "finetune"
 
 Encoder = Union[ViTEncoder, ConvEncoder, LidarEncoder]
 Predictor = MLPPredictor
-RLModels = Tuple[Encoder, Predictor, MLPValueHead]
+ValueModels = Tuple[Encoder, Predictor, MLPValueHead]
+SFTModels = Tuple[Encoder, Predictor, MLPValueHead, MLPPolicyHead]
 Batch = Mapping[str, Union[np.ndarray, Array]]
 
 
@@ -147,7 +155,8 @@ def train_bootstrap(
     value_head_path: Optional[Path],
     model_cfg: SubJepaConfig,
     train_cfg: TrainConfig,
-) -> RLModels:
+    ssl_human_dir: Path = DEFAULT_SSL_HUMAN_DIR,
+) -> SFTModels:
     """Run supervised value bootstrapping and joint fine-tuning over historical data.
 
     Arguments:
@@ -159,10 +168,11 @@ def train_bootstrap(
         value head is bootstrapped on the frozen encoder and predictor
       model_cfg: Model architecture configuration
       train_cfg: Training configuration (bootstrap and loss sections are used)
+      ssl_human_dir: Human SSL HDF5 directory used for policy behavior cloning
 
     Returns:
-      Tuple containing bootstrapped and fine-tuned (encoder, predictor,
-      value_head) models
+      Tuple containing the fine-tuned encoder, predictor, value head, and
+      behavior-cloned policy head
     """
     boot_cfg = train_cfg.bootstrap
     loss_cfg = train_cfg.loss
@@ -170,7 +180,7 @@ def train_bootstrap(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     key = jax.random.PRNGKey(boot_cfg.seed)
-    key_models, key_val, key_proj = jax.random.split(key, 3)
+    key_models, key_val, key_proj, key_policy = jax.random.split(key, 4)
 
     (encoder, predictor), detected_type = load_models_auto(
         checkpoint, key_models, model_cfg.encoder, model_cfg.predictor
@@ -221,6 +231,7 @@ def train_bootstrap(
             },
         )
     global_step = 0
+    policy_dataset = None
     try:
         if value_head_path is not None:
             value_head = load_checkpoint(
@@ -261,7 +272,7 @@ def train_bootstrap(
 
             save_checkpoint(output_dir / "ft_value_head_latest.eqx", value_head)
 
-        models: RLModels = (encoder, predictor, value_head)
+        models: JointModels = (encoder, predictor, value_head)
 
         if boot_cfg.joint_epochs > 0:
             logging.info(
@@ -329,6 +340,31 @@ def train_bootstrap(
 
         save_checkpoint(output_dir / "ft_model_latest.eqx", (models[0], models[1]))
         save_checkpoint(output_dir / "ft_value_head_latest.eqx", models[2])
+
+        policy_episodes = select_policy_sft_episodes(
+            data_dir,
+            ssl_human_dir,
+            min_frames=train_cfg.policy_sft.min_frames,
+            max_frames=train_cfg.policy_sft.max_frames,
+        )
+        logging.info(
+            "Selected %s successful human episodes for policy SFT",
+            len(policy_episodes),
+        )
+        policy_dataset = make_policy_dataset(
+            policy_episodes,
+            obs_type=obs_type,
+            rollout_len=boot_cfg.rollout_len,
+            max_cache_bytes=int(boot_cfg.max_cache_gb * 1024**3),
+        )
+        policy_head = train_policy_sft(
+            models[0],
+            policy_dataset,
+            train_cfg.policy_sft,
+            model_cfg.policy_head,
+            key_policy,
+            output_dir / "ft_policy_head_latest.eqx",
+        )
     finally:
         if manage_wandb:
             wandb.finish()
@@ -343,9 +379,13 @@ def train_bootstrap(
             del dataloader
         if "dataset" in locals():
             del dataset
+        if policy_dataset is not None:
+            policy_dataset._pool.cache.clear()
+            policy_dataset._pool.refcounts.clear()
+            del policy_dataset
 
     logging.info(f"Bootstrapping complete. Checkpoints written to {output_dir}")
-    return models
+    return models[0], models[1], models[2], policy_head
 
 
 def parse_args() -> argparse.Namespace:
@@ -357,6 +397,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_DATA_DIR,
         help="Reward-labeled HDF5 shards dir",
+    )
+    parser.add_argument(
+        "--ssl-human-dir",
+        type=Path,
+        default=DEFAULT_SSL_HUMAN_DIR,
+        help="Human SSL HDF5 shards used by policy behavior cloning",
     )
     parser.add_argument(
         "--checkpoint",
@@ -391,6 +437,7 @@ def main() -> None:
         value_head_path=args.value_head,
         model_cfg=model_cfg,
         train_cfg=train_cfg,
+        ssl_human_dir=args.ssl_human_dir,
     )
 
 

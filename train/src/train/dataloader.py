@@ -51,7 +51,26 @@ class SlidingWindowDataset:
         load_rewards: bool = False,
         max_cache_bytes: int = 4 * 1024**3,  # 4 GB RAM shard pool
         episode_ids: Optional[Sequence[int]] = None,
+        episode_keys: Optional[Sequence[Tuple[Union[str, Path], int]]] = None,
+        data_files: Optional[Sequence[Union[str, Path]]] = None,
     ) -> None:
+        """Initialize an indexed HDF5 transition dataset.
+
+        Arguments:
+          data_dir: Directory or file containing HDF5 rollout shards
+          history_len: Number of observation frames in each input history
+          rollout_len: Number of action/reward steps to expose per sample
+          discretize_actions: Whether continuous actions are converted to bins
+          obs_type: Observation modality, either ``screen`` or ``lidar``
+          load_rewards: Whether reward arrays are loaded into each sample
+          max_cache_bytes: Maximum RAM used by the shard cache
+          episode_ids: Optional episode IDs accepted from every selected file
+          episode_keys: Optional ``(file, episode_id)`` selections
+          data_files: Optional explicit HDF5 files; an empty sequence selects none
+
+        Returns:
+          None
+        """
         if obs_type not in ("screen", "lidar"):
             raise ValueError("obs_type must be either 'screen' or 'lidar'.")
         self.obs_type = obs_type
@@ -66,6 +85,19 @@ class SlidingWindowDataset:
         self.episode_ids = (
             frozenset(int(episode_id) for episode_id in episode_ids)
             if episode_ids is not None
+            else None
+        )
+        self.episode_keys = (
+            frozenset(
+                (str(Path(file_path).resolve()), int(episode_id))
+                for file_path, episode_id in episode_keys
+            )
+            if episode_keys is not None
+            else None
+        )
+        self.data_files = (
+            tuple(Path(file_path) for file_path in data_files)
+            if data_files is not None
             else None
         )
 
@@ -85,9 +117,13 @@ class SlidingWindowDataset:
             return
 
         h5_files = (
-            [self.data_dir]
-            if self.data_dir.is_file()
-            else sorted(self.data_dir.rglob("*.h5"))
+            self.data_files
+            if self.data_files is not None
+            else (
+                [self.data_dir]
+                if self.data_dir.is_file()
+                else tuple(sorted(self.data_dir.rglob("*.h5")))
+            )
         )
         shard_indices: list[np.ndarray] = []
         local_indices: list[np.ndarray] = []
@@ -115,6 +151,15 @@ class SlidingWindowDataset:
                         valid_mask &= np.isin(
                             episode_ids[indices], tuple(self.episode_ids)
                         )
+                    if self.episode_keys is not None:
+                        allowed_ids = tuple(
+                            episode_id
+                            for selected_path, episode_id in self.episode_keys
+                            if selected_path == str(file_path.resolve())
+                        )
+                        if not allowed_ids:
+                            continue
+                        valid_mask &= np.isin(episode_ids[indices], allowed_ids)
                     valid_local_ts = indices[valid_mask]
 
                     if len(valid_local_ts) == 0:
@@ -135,8 +180,15 @@ class SlidingWindowDataset:
                     )
                     local_indices.append(valid_local_ts.astype(np.int32))
                     episode_indices.append(episode_ids[valid_local_ts])
-            except (OSError, KeyError) as e:
-                print(f"Warning: Failed to read {file_path}, skipping shard: {e}")
+            except (
+                OSError,
+                KeyError,
+                TypeError,
+                ValueError,
+                IndexError,
+                OverflowError,
+            ):
+                continue
 
         if shard_indices:
             self.shard_indices_map = np.concatenate(shard_indices)
@@ -237,6 +289,8 @@ class SlidingWindowDataset:
             ds.load_rewards = self.load_rewards
             ds.max_cache_bytes = self.max_cache_bytes
             ds.episode_ids = self.episode_ids
+            ds.episode_keys = self.episode_keys
+            ds.data_files = self.data_files
             ds._pool = self._pool
             ds.shards = self.shards
             ds.shard_indices_map = self.shard_indices_map[mask]

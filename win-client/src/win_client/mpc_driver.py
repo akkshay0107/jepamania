@@ -12,7 +12,7 @@ import numpy as np
 from core.actions import to_continuous_action_np
 from core.async_planner import AsyncPlannerWrapper
 from core.config import SubJepaConfig, load_config
-from core.dynamics import MLPValueHead
+from core.dynamics import MLPPolicyHead, MLPValueHead
 from core.encoders import load_models_auto
 from core.interfaces import Encoder, Predictor
 from core.planners import create_planner
@@ -60,6 +60,21 @@ def load_value_head_checkpoint(
     return eqx.tree_deserialise_leaves(path, template)
 
 
+def load_policy_head_checkpoint(
+    policy_head_path: str | Path,
+    config_path: Optional[str | Path] = None,
+    seed: int = 42,
+) -> MLPPolicyHead:
+    """Load a serialized policy head."""
+    path = Path(policy_head_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Policy head checkpoint not found: {path}")
+    config_path = config_path or WIN_CLIENT_ROOT.parent / "core" / "config.yaml"
+    model_cfg = load_config(str(config_path))
+    template = MLPPolicyHead(model_cfg.policy_head, jax.random.PRNGKey(seed))
+    return eqx.tree_deserialise_leaves(path, template)
+
+
 class MPCDriver:
     """Run asynchronous MPC against an environment supplied by its owner."""
 
@@ -67,14 +82,18 @@ class MPCDriver:
         self,
         checkpoint_path: Optional[str | Path] = None,
         value_head_path: Optional[str | Path] = None,
+        policy_head_path: Optional[str | Path] = None,
         config_path: Optional[str | Path] = None,
         output_dir: Optional[str | Path] = None,
         max_episodes: Optional[int] = None,
     ) -> None:
         self.checkpoint_path = checkpoint_path or cfg.mpc.checkpoint_path
         self.value_head_path = value_head_path or cfg.mpc.value_head_path
-        if not self.checkpoint_path or not self.value_head_path:
-            raise ValueError("Both model and value-head checkpoints are required")
+        self.policy_head_path = policy_head_path or cfg.mpc.policy_head_path
+        if not all((self.checkpoint_path, self.value_head_path, self.policy_head_path)):
+            raise ValueError(
+                "Model, value-head, and policy-head checkpoints are required"
+            )
 
         self.output_dir = Path(output_dir) if output_dir else None
         self.max_episodes = max_episodes
@@ -86,8 +105,14 @@ class MPCDriver:
         self.value_head = load_value_head_checkpoint(
             self.value_head_path, config_path=config_path, seed=cfg.mpc.seed
         )
+        self.policy_head = load_policy_head_checkpoint(
+            self.policy_head_path, config_path=config_path, seed=cfg.mpc.seed
+        )
         planner = create_planner(
-            self.model_cfg.planner, self.predictor, self.value_head
+            self.model_cfg.planner,
+            self.predictor,
+            self.value_head,
+            policy_head=self.policy_head,
         )
         self.async_wrapper = AsyncPlannerWrapper(
             encoder=self.encoder,
@@ -117,7 +142,17 @@ class MPCDriver:
         num_episodes: Optional[int],
         iteration: int,
     ) -> tuple[int, ...]:
-        """Collect episodes without taking ownership of the environment."""
+        """Collect episodes without taking ownership of the environment.
+
+        Arguments:
+          env: Environment instance that supplies reset and step operations
+          rollout_file: Optional HDF5 destination for completed episode data
+          num_episodes: Number of completed episodes to collect, or ``None``
+          iteration: Online-loop iteration recorded in episode metadata
+
+        Returns:
+          Episode IDs completed during this collection request
+        """
         writer: Optional[HDF5Writer] = None
         if rollout_file is not None:
             path = Path(rollout_file)
@@ -208,6 +243,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Collect real-time MPC rollouts")
     parser.add_argument("--checkpoint-path", type=Path, required=True)
     parser.add_argument("--value-head-path", type=Path, required=True)
+    parser.add_argument("--policy-head-path", type=Path, required=True)
     parser.add_argument(
         "--rollout-file",
         type=Path,
@@ -222,7 +258,9 @@ def main() -> None:
     apply_online_rl_patches()
     env = get_tmrl_env()
     try:
-        driver = MPCDriver(args.checkpoint_path, args.value_head_path)
+        driver = MPCDriver(
+            args.checkpoint_path, args.value_head_path, args.policy_head_path
+        )
         driver.collect(env, args.rollout_file, args.num_episodes, iteration=0)
     finally:
         env.close()

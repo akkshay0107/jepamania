@@ -5,6 +5,7 @@ import gc
 import json
 import logging
 import os
+import statistics
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional, Sequence
@@ -14,6 +15,7 @@ from core.config import load_config
 from train.config import load_train_config
 from train.finetune import train_rl
 from train.priority_dataloader import (
+    EpisodeSummary,
     read_completed_episode_summaries,
     select_replay_episodes,
 )
@@ -31,6 +33,15 @@ class RunState:
     global_step: int
     model_checkpoint: str
     value_head_checkpoint: str
+    policy_head_checkpoint: str
+    incumbent_success_count: int
+    incumbent_median_frames: Optional[float]
+
+
+@dataclass(frozen=True)
+class EvaluationResult:
+    success_count: int
+    median_successful_frames: Optional[float]
 
 
 def save_run_state(checkpoints_dir: Path, state: RunState) -> None:
@@ -64,6 +75,11 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=Path("checkpoints/finetune/ft_value_head_latest.eqx"),
     )
     parser.add_argument(
+        "--initial-policy-head",
+        type=Path,
+        default=Path("checkpoints/finetune/ft_policy_head_latest.eqx"),
+    )
+    parser.add_argument(
         "--rollout-file",
         type=Path,
         default=Path("win-client/data/rl/rollouts/online_rollouts.h5"),
@@ -75,8 +91,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _validate_checkpoint_bundle(model: Path, value_head: Path) -> None:
-    candidates = (model, value_head, model.parent / "projectors.eqx")
+def _validate_checkpoint_bundle(
+    model: Path, value_head: Path, policy_head: Path
+) -> None:
+    candidates = (model, value_head, policy_head, model.parent / "projectors.eqx")
     missing = [path for path in candidates if not path.is_file()]
     if missing:
         raise FileNotFoundError(
@@ -95,6 +113,9 @@ def _initial_state(args: argparse.Namespace) -> RunState:
         global_step=0,
         model_checkpoint=str(args.initial_model),
         value_head_checkpoint=str(args.initial_value_head),
+        policy_head_checkpoint=str(args.initial_policy_head),
+        incumbent_success_count=-1,
+        incumbent_median_frames=None,
     )
 
 
@@ -113,6 +134,7 @@ def _collect_iteration(
         driver = MPCDriver(
             checkpoint_path=state.model_checkpoint,
             value_head_path=state.value_head_checkpoint,
+            policy_head_path=state.policy_head_checkpoint,
         )
         collected = session.collect(driver, rollout_file, missing, state.iteration)
         completed += tuple(collected)
@@ -120,6 +142,63 @@ def _collect_iteration(
         gc.collect()
         jax.clear_caches()
     return tuple(dict.fromkeys(completed))
+
+
+def evaluate_episode_ids(
+    summaries: Sequence[EpisodeSummary],
+    episode_ids: Sequence[int],
+) -> EvaluationResult:
+    selected = set(int(episode_id) for episode_id in episode_ids)
+    successful_frames = [
+        summary.transition_count
+        for summary in summaries
+        if summary.episode_id in selected and summary.termination == "done"
+    ]
+    median = float(statistics.median(successful_frames)) if successful_frames else None
+    return EvaluationResult(len(successful_frames), median)
+
+
+def should_promote_checkpoint(
+    incumbent: EvaluationResult,
+    candidate: EvaluationResult,
+    min_improvement_frames: int = 1,
+) -> bool:
+    if (
+        candidate.success_count < incumbent.success_count
+        or candidate.median_successful_frames is None
+        or incumbent.median_successful_frames is None
+    ):
+        return False
+    improvement = (
+        incumbent.median_successful_frames - candidate.median_successful_frames
+    )
+    return improvement >= min_improvement_frames
+
+
+def _evaluate_checkpoint(
+    session: GameSessionWorker,
+    rollout_file: Path,
+    model_checkpoint: Path,
+    value_head_checkpoint: Path,
+    policy_head_checkpoint: Path,
+    attempts: int,
+    iteration: int,
+) -> EvaluationResult:
+    driver = MPCDriver(
+        checkpoint_path=model_checkpoint,
+        value_head_path=value_head_checkpoint,
+        policy_head_path=policy_head_checkpoint,
+    )
+    try:
+        episode_ids = session.collect(
+            driver, rollout_file, attempts, iteration=iteration
+        )
+    finally:
+        del driver
+        gc.collect()
+        jax.clear_caches()
+    summaries = read_completed_episode_summaries(rollout_file)
+    return evaluate_episode_ids(summaries, episode_ids)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
@@ -131,7 +210,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     state = _initial_state(args)
     _validate_checkpoint_bundle(
-        Path(state.model_checkpoint), Path(state.value_head_checkpoint)
+        Path(state.model_checkpoint),
+        Path(state.value_head_checkpoint),
+        Path(state.policy_head_checkpoint),
     )
     if args.dry_run:
         LOGGER.info(
@@ -163,6 +244,32 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 "episodes_per_iteration": args.episodes_per_iteration,
             },
         )
+        if state.incumbent_success_count < 0:
+            baseline = _evaluate_checkpoint(
+                session,
+                args.rollout_file,
+                Path(state.model_checkpoint),
+                Path(state.value_head_checkpoint),
+                Path(state.policy_head_checkpoint),
+                train_cfg.finetune.evaluation_episodes,
+                iteration=-1,
+            )
+            if baseline.success_count == 0:
+                raise RuntimeError(
+                    "Offline SFT bundle is not deployment-ready: no successful "
+                    f"lap in {train_cfg.finetune.evaluation_episodes} attempts"
+                )
+            state = RunState(
+                iteration=state.iteration,
+                pending_episode_ids=state.pending_episode_ids,
+                global_step=state.global_step,
+                model_checkpoint=state.model_checkpoint,
+                value_head_checkpoint=state.value_head_checkpoint,
+                policy_head_checkpoint=state.policy_head_checkpoint,
+                incumbent_success_count=baseline.success_count,
+                incumbent_median_frames=baseline.median_successful_frames,
+            )
+            save_run_state(args.checkpoints_dir, state)
         while state.iteration < args.iterations:
             pending = state.pending_episode_ids
             if not pending:
@@ -173,11 +280,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     args.episodes_per_iteration,
                 )
                 state = RunState(
-                    state.iteration,
-                    pending,
-                    state.global_step,
-                    state.model_checkpoint,
-                    state.value_head_checkpoint,
+                    iteration=state.iteration,
+                    pending_episode_ids=pending,
+                    global_step=state.global_step,
+                    model_checkpoint=state.model_checkpoint,
+                    value_head_checkpoint=state.value_head_checkpoint,
+                    policy_head_checkpoint=state.policy_head_checkpoint,
+                    incumbent_success_count=state.incumbent_success_count,
+                    incumbent_median_frames=state.incumbent_median_frames,
                 )
                 save_run_state(args.checkpoints_dir, state)
 
@@ -196,17 +306,60 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 output_dir=output_dir,
                 checkpoint=Path(state.model_checkpoint),
                 value_head_path=Path(state.value_head_checkpoint),
+                policy_head_path=Path(state.policy_head_checkpoint),
                 model_cfg=model_cfg,
                 train_cfg=train_cfg,
                 episode_ids=selection.episode_ids,
                 step_offset=state.global_step,
+                incumbent_median_frames=state.incumbent_median_frames,
+            )
+            candidate_paths = (
+                output_dir / "ft_model_latest.eqx",
+                output_dir / "ft_value_head_latest.eqx",
+                output_dir / "ft_policy_head_latest.eqx",
+            )
+            candidate = _evaluate_checkpoint(
+                session,
+                args.rollout_file,
+                *candidate_paths,
+                attempts=train_cfg.finetune.evaluation_episodes,
+                iteration=state.iteration,
+            )
+            incumbent = EvaluationResult(
+                state.incumbent_success_count,
+                state.incumbent_median_frames,
+            )
+            promote = should_promote_checkpoint(
+                incumbent,
+                candidate,
+                train_cfg.finetune.promotion_min_improvement_frames,
+            )
+            promoted_paths = (
+                tuple(str(path) for path in candidate_paths)
+                if promote
+                else (
+                    state.model_checkpoint,
+                    state.value_head_checkpoint,
+                    state.policy_head_checkpoint,
+                )
+            )
+            promoted_evaluation = candidate if promote else incumbent
+            LOGGER.info(
+                "Candidate evaluation: %s/%s successes, median=%s; promoted=%s",
+                candidate.success_count,
+                train_cfg.finetune.evaluation_episodes,
+                candidate.median_successful_frames,
+                promote,
             )
             state = RunState(
                 iteration=state.iteration + 1,
                 pending_episode_ids=(),
                 global_step=next_step,
-                model_checkpoint=str(output_dir / "ft_model_latest.eqx"),
-                value_head_checkpoint=str(output_dir / "ft_value_head_latest.eqx"),
+                model_checkpoint=promoted_paths[0],
+                value_head_checkpoint=promoted_paths[1],
+                policy_head_checkpoint=promoted_paths[2],
+                incumbent_success_count=promoted_evaluation.success_count,
+                incumbent_median_frames=promoted_evaluation.median_successful_frames,
             )
             save_run_state(args.checkpoints_dir, state)
             gc.collect()

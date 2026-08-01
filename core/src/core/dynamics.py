@@ -71,10 +71,13 @@ class MLPPolicyHead(eqx.Module):
             key=key,
         )
         self.temperature = cfg.temperature
-        self.conf = 1.0 - cfg.epsilon  # confidence given to policy output
-        self.eps_uni_dist = (
-            cfg.epsilon / NUM_ACTIONS
-        )  # uniform distribution scaled down by epsilon
+        self.epsilon = cfg.epsilon
+
+    def raw_logits(
+        self, latent_state: Float[Array, "latent_dim"]
+    ) -> Float[Array, "NUM_ACTIONS"]:
+        """Return unsmoothed categorical logits for training."""
+        return self.policy_mlp(latent_state)
 
     def __call__(
         self, latent_state: Float[Array, "latent_dim"]
@@ -82,9 +85,7 @@ class MLPPolicyHead(eqx.Module):
         """
         Returns smoothed probabilities using temperature scaling and epsilon mixing.
         """
-        logits = self.policy_mlp(latent_state)
+        logits = self.raw_logits(latent_state)
         scaled_logits = logits / self.temperature
         probs = jax.nn.softmax(scaled_logits)
-
-        smoothed_probs = self.eps_uni_dist + self.conf * probs
-        return smoothed_probs
+        return self.epsilon / NUM_ACTIONS + (1.0 - self.epsilon) * probs

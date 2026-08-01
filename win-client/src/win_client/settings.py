@@ -42,6 +42,7 @@ _DEFAULTS = {
     "mpc": {
         "checkpoint_path": None,
         "value_head_path": None,
+        "policy_head_path": None,
         "record_rollouts": False,
         "seed": 42,
     },

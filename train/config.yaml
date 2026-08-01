@@ -30,12 +30,28 @@ bootstrap:
   log_every: 50
   max_cache_gb: 2.0
 
+policy_sft:
+  epochs: 50
+  batch_size: 128
+  lr: 3.0e-4
+  num_workers: 4
+  min_frames: 420
+  max_frames: 540
+  log_every: 50
+
 finetune:
   joint_epochs: 4
   gamma: 0.990
   lr_enc: 5.0e-6
   lr_val: 1.0e-4
+  lr_policy: 3.0e-5
   value_weight: 0.5
+  policy_weight: 1.0
+  human_anchor_ratio: 0.5
+  bootstrap_anchor_ratio: 0.25
+  max_advantage_weight: 20.0
+  evaluation_episodes: 5
+  promotion_min_improvement_frames: 1
   batch_size: 128
   num_workers: 4
   seed: 42
