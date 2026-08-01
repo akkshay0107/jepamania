@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 from collections import deque
@@ -54,6 +55,8 @@ class AsyncPlannerWrapper:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._rng_key = jax.random.PRNGKey(seed)
+        self._thread_error: Optional[BaseException] = None
+        self._reset_generation = 0
 
         self._latest_obs: Optional[Dict[str, np.ndarray]] = None
         self._current_action: int = self.default_action
@@ -68,6 +71,7 @@ class AsyncPlannerWrapper:
         """Starts the background planning thread."""
         if self._running:
             return
+        self._thread_error = None
         self._running = True
         self._thread = threading.Thread(target=self._planning_loop, daemon=True)
         self._thread.start()
@@ -81,7 +85,11 @@ class AsyncPlannerWrapper:
     def reset(self):
         """Resets planner buffers and internal state between episodes."""
         with self._lock:
+            self._reset_generation += 1
             self._action_buffer.clear()
+            self._action_buffer.extend(
+                [self.default_action] * self.planner.sequence_len
+            )
             self._latest_obs = None
             self._ticks_passed = 0
             self._current_action = self.default_action
@@ -92,6 +100,8 @@ class AsyncPlannerWrapper:
         Updates the shared observation and pops the next action from the buffer.
         """
         with self._lock:
+            if self._thread_error is not None:
+                raise RuntimeError("Background planner failed") from self._thread_error
             self._latest_obs = obs_dict
             self._ticks_passed += 1
             if len(self._action_buffer) > 0:
@@ -110,49 +120,58 @@ class AsyncPlannerWrapper:
         (delay compensation),
         and plans the optimal trajectory from the future state.
         """
-        while self._running:
+        try:
+            while self._running:
+                with self._lock:
+                    obs = self._latest_obs
+                    curr_act = self._current_action
+                    generation = self._reset_generation
+                    self._ticks_passed = 0
+
+                if obs is None:
+                    # The environment hasn't provided an observation yet.
+                    # Avoid spinning the CPU at 100% while waiting for the
+                    # client connection.
+                    time.sleep(0.001)
+                    continue
+
+                jax_obs = {}
+                for k, v in obs.items():
+                    arr = jnp.asarray(v)
+                    if k == "screen" and jnp.issubdtype(arr.dtype, jnp.integer):
+                        arr = arr.astype(jnp.float32) / 255.0
+                    elif jnp.issubdtype(arr.dtype, jnp.floating) or jnp.issubdtype(
+                        arr.dtype, jnp.integer
+                    ):
+                        arr = arr.astype(jnp.float32)
+                    jax_obs[k] = arr
+                latent_t = self._encode_jit(jax_obs)
+
+                # Fast-forward one tick using the currently executing action to
+                # compensate for physical movement while JAX computes the plan.
+                action_jax = jnp.asarray(curr_act, dtype=jnp.int32)
+                latent_t_plus_1 = self._predict_jit(latent_t, action_jax)
+
+                self._rng_key, plan_key = jax.random.split(self._rng_key)
+                action_seq = self._plan_jit(
+                    latent_t_plus_1, key=plan_key, prev_action=action_jax
+                )
+
+                action_seq_list = np.asarray(action_seq).tolist()
+
+                with self._lock:
+                    if generation != self._reset_generation:
+                        continue
+                    ticks = self._ticks_passed
+                    if ticks < len(action_seq_list):
+                        valid_actions = action_seq_list[ticks:]
+                    else:
+                        valid_actions = []
+
+                    self._action_buffer.clear()
+                    self._action_buffer.extend(valid_actions)
+        except Exception as error:
             with self._lock:
-                obs = self._latest_obs
-                curr_act = self._current_action
-                self._ticks_passed = 0
-
-            if obs is None:
-                # The environment hasn't provided an observation yet.
-                # Avoid spinning the CPU at 100% while waiting for the client connection
-                time.sleep(0.001)
-                continue
-
-            jax_obs = {}
-            for k, v in obs.items():
-                arr = jnp.asarray(v)
-                if k == "screen" and jnp.issubdtype(arr.dtype, jnp.integer):
-                    arr = arr.astype(jnp.float32) / 255.0
-                elif jnp.issubdtype(arr.dtype, jnp.floating) or jnp.issubdtype(
-                    arr.dtype, jnp.integer
-                ):
-                    arr = arr.astype(jnp.float32)
-                jax_obs[k] = arr
-            latent_t = self._encode_jit(jax_obs)
-
-            # We fast-forward the state by 1 tick using the currently executing action.
-            # This compensates for the fact that the car physically moves while
-            # JAX computes the plan
-            action_jax = jnp.asarray(curr_act, dtype=jnp.int32)
-            latent_t_plus_1 = self._predict_jit(latent_t, action_jax)
-
-            self._rng_key, plan_key = jax.random.split(self._rng_key)
-            action_seq = self._plan_jit(
-                latent_t_plus_1, key=plan_key, prev_action=action_jax
-            )
-
-            action_seq_list = np.asarray(action_seq).tolist()
-
-            with self._lock:
-                ticks = self._ticks_passed
-                if ticks < len(action_seq_list):
-                    valid_actions = action_seq_list[ticks:]
-                else:
-                    valid_actions = []
-
-                self._action_buffer.clear()
-                self._action_buffer.extend(valid_actions)
+                self._thread_error = error
+                self._running = False
+            logging.exception("Background planner loop failed")

@@ -112,7 +112,15 @@ def print_statistics(name: str, actions: np.ndarray):
 
 
 def plot_distributions(actions: np.ndarray, output_path: Path):
-    """Plots the 2D joint distribution of gas/brake and 1D histograms."""
+    """Plot action distributions and save the resulting figure.
+
+    Arguments:
+      actions: Array of continuous [gas, brake, steer] actions.
+      output_path: Destination path for the rendered plot.
+
+    Returns:
+      None. The figure is written to output_path.
+    """
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
 
     # Top-Left: Gas vs Brake 2D Joint Distribution (Heatmap + Contours)

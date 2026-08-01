@@ -17,7 +17,7 @@ JEPAMania separates functional deep learning components into decoupled workspace
 3. **Action-Conditioned Latent Rollout (`core.dynamics`)**  
    An autoregressive dynamics predictor (`MLPPredictor`) rolls forward future latent states $z_{t+k}$ across a $K$-step planning horizon given candidate action sequences without frame decoding.
 4. **Real-Time MPC Planning (`core.planners`)**  
-   A Model-Predictive Control planner (**Cross-Entropy Method / CEM**, **Beam Search**, or **Random Rollouts**) evaluates candidate latent trajectories against fine-tuned value heads (`MLPValueHead`) or smoothness penalties to select the optimal control action within 5 milliseconds.
+   A Cross-Entropy Method (CEM) Model-Predictive Control planner evaluates candidate latent trajectories against fine-tuned value heads (`MLPValueHead`) or smoothness penalties. Latency is hardware-dependent and should be measured with the included benchmarks.
 5. **Cyclic Self-Improvement (`train` & `rl_loop.py`)**  
    Recorded gameplay shards feed self-supervised **Sub-JEPA Sliced-Subspace Pretraining** and downstream joint **Value/Policy Fine-Tuning** to continually improve driving performance.
 
@@ -129,7 +129,7 @@ uv run --package win-client python win-client/run.py \
   --policy-head-path checkpoints/finetune/ft_policy_head_latest.eqx
 ```
 
-Planner selection and planner hyperparameters are read from `core/config.yaml`.
+The CEM planner and its hyperparameters are read from `core/config.yaml`.
 Add `--record-rollouts` to record standalone MPC trajectories.
 
 ### Step 5: Cyclic Online RL Loop (`rl_loop.py`)
@@ -178,9 +178,10 @@ Controls neural network dimensions, transformer backbones, and default latent pl
 | `encoder.transformer.num_layers` | `3` | Number of ViT self-attention blocks used for spatial observation encoding. |
 | `encoder.transformer.num_heads` | `4` | Number of attention heads in each ViT block. |
 | `predictor.hidden_dim` | `256` | MLP hidden layer width for latent transition dynamics prediction. |
-| `planner.type` | `"beam"` | Default MPC planner algorithm (`"cem"`, `"beam"`, or `"random"`). |
-| `planner.sequence_len` | `10` | MPC planning horizon ($K$ steps forward into the future). |
-| `planner.beam_width` | `6` | Number of concurrent top trajectories tracked during Beam Search optimization. |
+| `planner.sequence_len` | `5` | MPC planning horizon ($K$ steps forward into the future). |
+| `planner.cem_iters` | `4` | Number of CEM distribution-refinement iterations per control tick. |
+| `planner.cem_samples` | `128` | Candidate action sequences sampled per CEM iteration. |
+| `planner.cem_elites` | `25` | Highest-scoring candidate sequences used to update the CEM distribution. |
 
 ---
 

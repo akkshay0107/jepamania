@@ -58,10 +58,16 @@ class MLPValueHead(eqx.Module):
 
 class MLPPolicyHead(eqx.Module):
     policy_mlp: eqx.nn.MLP
+    # Keep scalar leaves serialized so existing policy-head checkpoints remain loadable.
     temperature: float
     epsilon: float
 
     def __init__(self, cfg: PolicyHeadConfig, key: PRNGKeyArray):
+        if cfg.temperature <= 0.0:
+            raise ValueError("Policy temperature must be positive.")
+        if not 0.0 <= cfg.epsilon <= 1.0:
+            raise ValueError("Policy epsilon must be in [0, 1].")
+
         self.policy_mlp = eqx.nn.MLP(
             in_size=cfg.latent_dim,
             out_size=NUM_ACTIONS,

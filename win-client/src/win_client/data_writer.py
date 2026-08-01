@@ -1,3 +1,5 @@
+"""Asynchronous HDF5 rollout storage and schema validation."""
+
 import logging
 import queue
 import threading
@@ -27,6 +29,17 @@ class HDF5Writer:
         obs_type: str = "screen",
         append: bool = False,
     ) -> None:
+        """Open an asynchronous writer for a rollout shard.
+
+        Arguments:
+          filepath: HDF5 file to create or extend.
+          chunk_size: Number of frames written in one HDF5 resize operation.
+          obs_type: Observation modality stored in the shard.
+          append: Whether to continue an existing schema-compatible shard.
+
+        Returns:
+          None.
+        """
         if obs_type not in ("screen", "lidar"):
             raise ValueError("obs_type must be either 'screen' or 'lidar'.")
         self.obs_type = obs_type

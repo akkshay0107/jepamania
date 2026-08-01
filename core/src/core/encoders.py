@@ -1,3 +1,5 @@
+"""Observation encoders and checkpoint loading for visual and LiDAR inputs."""
+
 import functools
 from pathlib import Path
 from typing import Any, Mapping, Union
@@ -167,6 +169,7 @@ class AttentionPool(eqx.Module):
 
 
 class ViTEncoder(eqx.Module):
+    # Kept as a pytree leaf to preserve compatibility with existing checkpoints.
     latent_dim: int
     conv_stem: ConvStem
     tel_proj: eqx.nn.Linear
@@ -352,6 +355,7 @@ def load_models_auto(
     enc_cfg = encoder_cfg or EncoderConfig()
     pred_cfg = predictor_cfg or PredictorConfig()
     key_enc, key_pred = jax.random.split(key)
+    errors: list[tuple[str, Exception]] = []
     for enc_cls, enc_name in (
         (ViTEncoder, "vit"),
         (ConvEncoder, "conv"),
@@ -361,8 +365,15 @@ def load_models_auto(
             template = (enc_cls(enc_cfg, key_enc), MLPPredictor(pred_cfg, key_pred))
             loaded = eqx.tree_deserialise_leaves(path, template)
             return loaded, enc_name
-        except Exception:
+        except Exception as error:
+            # Auto-detection necessarily attempts incompatible templates; retain
+            # each failure so a corrupt or mismatched checkpoint is diagnosable.
+            errors.append((enc_name, error))
             continue
-    raise ValueError(
-        f"Could not load (encoder, predictor) pair from {path} as ViT, Conv, or Lidar."
+    details = "; ".join(
+        f"{name}: {type(error).__name__}: {error}" for name, error in errors
     )
+    raise ValueError(
+        f"Could not load (encoder, predictor) pair from {path} as ViT, Conv, or "
+        f"Lidar. Attempts: {details}"
+    ) from errors[-1][1]

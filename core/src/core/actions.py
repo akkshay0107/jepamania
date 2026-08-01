@@ -1,5 +1,6 @@
 import functools
 
+import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
 from jaxtyping import Array, Float, Int
@@ -66,8 +67,11 @@ def to_continuous_action(discrete_action: Int[Array, "..."]) -> Float[Array, "..
     Returns:
         JAX Array of shape (..., 3) containing continuous actions [gas, brake, steer].
     """
-    # Clamp to valid range to prevent JAX out-of-bounds indexing errors
-    discrete_action = jnp.clip(discrete_action, 0, NUM_ACTIONS - 1)
+    discrete_action = eqx.error_if(
+        discrete_action,
+        (discrete_action < 0) | (discrete_action >= NUM_ACTIONS),
+        f"Discrete action index must be in [0, {NUM_ACTIONS - 1}]",
+    )
     steer_bin = discrete_action // NUM_GAS_BRAKE
     gb_bin = discrete_action % NUM_GAS_BRAKE
 

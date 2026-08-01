@@ -38,15 +38,52 @@ class CEMPlanner(eqx.Module):
 
     predictor: Predictor
     objective_fn: Callable[[Float[Array, "latent_dim"]], Float[Array, ""]]
-    sequence_len: int
-    num_iters: int
-    num_samples: int
-    num_elites: int
-    alpha: float
+    sequence_len: int = eqx.field(static=True)
+    num_iters: int = eqx.field(static=True)
+    num_samples: int = eqx.field(static=True)
+    num_elites: int = eqx.field(static=True)
+    alpha: float = eqx.field(static=True)
     policy_head: Optional[
         Callable[[Float[Array, "latent_dim"]], Float[Array, "NUM_ACTIONS"]]
     ] = None
-    smoothness_weight: float = 0.0
+    smoothness_weight: float = eqx.field(default=0.0, static=True)
+
+    def __init__(
+        self,
+        predictor: Predictor,
+        objective_fn: Callable[[Float[Array, "latent_dim"]], Float[Array, ""]],
+        sequence_len: int,
+        num_iters: int,
+        num_samples: int,
+        num_elites: int,
+        alpha: float,
+        policy_head: Optional[
+            Callable[[Float[Array, "latent_dim"]], Float[Array, "NUM_ACTIONS"]]
+        ] = None,
+        smoothness_weight: float = 0.0,
+    ) -> None:
+        if sequence_len <= 0:
+            raise ValueError("CEM sequence_len must be positive.")
+        if num_iters <= 0:
+            raise ValueError("CEM num_iters must be positive.")
+        if num_samples <= 0:
+            raise ValueError("CEM num_samples must be positive.")
+        if not 0 < num_elites <= num_samples:
+            raise ValueError("CEM num_elites must be in [1, num_samples].")
+        if not 0.0 <= alpha <= 1.0:
+            raise ValueError("CEM alpha must be in [0, 1].")
+        if smoothness_weight < 0.0:
+            raise ValueError("CEM smoothness_weight must be non-negative.")
+
+        self.predictor = predictor
+        self.objective_fn = objective_fn
+        self.sequence_len = sequence_len
+        self.num_iters = num_iters
+        self.num_samples = num_samples
+        self.num_elites = num_elites
+        self.alpha = alpha
+        self.policy_head = policy_head
+        self.smoothness_weight = smoothness_weight
 
     def _step_fn(
         self,
