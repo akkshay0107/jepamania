@@ -45,7 +45,7 @@ class HumanRecorder:
         self.writer = HDF5Writer(self._make_session_path())
         self.writer.new_episode(self._default_metadata())
 
-        _raw_obs, _info = env.reset()
+        raw_obs, _info = env.reset()
 
         frame_count = 0
         completed_episodes = 0
@@ -55,8 +55,8 @@ class HumanRecorder:
 
         try:
             while True:
+                recorded_obs = obs_to_dict(raw_obs)
                 raw_next, reward, terminated, truncated, info = env.step(dummy_action)
-                next_obs_dict = obs_to_dict(raw_next)
                 done = terminated or truncated
 
                 # Validate Openplanet input streaming on the first captured step
@@ -76,8 +76,10 @@ class HumanRecorder:
                 )
                 if self.writer is not None:
                     self.writer.append(
-                        next_obs_dict, actual_action, reward=float(reward)
+                        recorded_obs, actual_action, reward=float(reward)
                     )
+
+                raw_obs = raw_next
 
                 if done:
                     completed_episodes += 1

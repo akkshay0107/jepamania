@@ -116,11 +116,11 @@ class AgentCollector:
                 action = action_filter(action)
                 np.clip(action, [0.0, 0.0, -1.0], [1.0, 1.0, 1.0], out=action)
 
+                recorded_obs = obs_to_dict(raw_obs)
                 raw_next, reward, terminated, truncated, info = env.step(action)
                 done = terminated or truncated
 
-                obs_dict = obs_to_dict(raw_next)
-                writer.append(obs_dict, action, reward=float(reward))
+                writer.append(recorded_obs, action, reward=float(reward))
                 raw_obs = raw_next
 
                 if done:

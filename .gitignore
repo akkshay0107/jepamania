@@ -35,6 +35,7 @@ checkpoints/
 # Data collection
 data/
 win-client/data
+win-client/data_migrated
 
 # Zip archives of training checkpoints
 zips/
