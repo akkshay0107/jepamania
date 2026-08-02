@@ -1,10 +1,12 @@
 import datetime
 import logging
+from collections import deque
 from pathlib import Path
 
 import numpy as np
 
 from win_client.data_writer import HDF5Writer
+from win_client.game_session import IDLE_ACTION
 from win_client.settings import cfg
 from win_client.utils import get_tmrl_env, obs_to_dict
 
@@ -50,12 +52,14 @@ class HumanRecorder:
         frame_count = 0
         completed_episodes = 0
         dummy_action = np.zeros(cfg.action_dim, dtype=np.float32)
+        action_history = deque((np.copy(IDLE_ACTION), np.copy(IDLE_ACTION)), maxlen=2)
 
         logging.info("Recording STARTED. Make inputs in-game. Press Ctrl-C to stop.")
 
         try:
             while True:
                 recorded_obs = obs_to_dict(raw_obs)
+                recorded_obs["telemetry"][3:9] = np.concatenate(action_history)
                 raw_next, reward, terminated, truncated, info = env.step(dummy_action)
                 done = terminated or truncated
 
@@ -78,6 +82,7 @@ class HumanRecorder:
                     self.writer.append(
                         recorded_obs, actual_action, reward=float(reward)
                     )
+                action_history.append(np.copy(actual_action))
 
                 raw_obs = raw_next
 
@@ -94,7 +99,9 @@ class HumanRecorder:
                         "Starting new episode."
                     )
 
-                    _raw_obs, _info = env.reset()
+                    raw_obs, _info = env.reset()
+                    action_history.clear()
+                    action_history.extend((np.copy(IDLE_ACTION), np.copy(IDLE_ACTION)))
                     frame_count = 0
                     continue
 

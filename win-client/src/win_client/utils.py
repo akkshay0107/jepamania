@@ -153,6 +153,13 @@ def obs_to_dict(
             telemetry = np.zeros(TELEMETRY_FEATURES, dtype=np.float32)
 
         if len(telemetry) < TELEMETRY_FEATURES:
+            if obs_type == "screen":
+                raise ValueError(
+                    "TMRL screen observation is missing its action history: "
+                    f"received {len(telemetry)} telemetry floats, expected "
+                    f"{TELEMETRY_FEATURES}. Ensure rtgym act_in_obs=True and "
+                    "act_buf_len=2."
+                )
             pad_len = TELEMETRY_FEATURES - len(telemetry)
             telemetry = np.pad(telemetry, (0, pad_len), mode="constant")
         elif len(telemetry) > TELEMETRY_FEATURES:
@@ -289,9 +296,22 @@ def get_tmrl_env():
         raise RuntimeError(
             "TMRL gymnasium environment can only be instantiated on Windows systems."
         )
+    from win_client.env_patches import configure_rtgym_action_history
+
+    configure_rtgym_action_history()
     import tmrl  # type: ignore[import-not-found]
 
-    return tmrl.get_environment()
+    env = tmrl.get_environment()
+    base_env = env.unwrapped
+    if (
+        not getattr(base_env, "act_in_obs", False)
+        or getattr(base_env, "act_buf_len", 0) != 2
+    ):
+        raise RuntimeError(
+            "TMRL environment was created without the required two-action "
+            "history in observations."
+        )
+    return env
 
 
 def get_tmrl_obs_preprocessor():

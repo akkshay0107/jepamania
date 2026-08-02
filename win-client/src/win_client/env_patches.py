@@ -2,8 +2,46 @@
 
 import logging
 import platform
+import sys
 
 import numpy as np
+
+ACTION_HISTORY_LEN = 2
+
+
+def configure_rtgym_action_history() -> None:
+    """
+    Configure TMRL's native chronological action buffer.
+    """
+    if platform.system() != "Windows":
+        return
+
+    import tmrl.config.config_constants as tmrl_config  # type: ignore[import-not-found]
+
+    env_config = getattr(tmrl_config, "ENV_CONFIG", None)
+    if not isinstance(env_config, dict):
+        raise RuntimeError("TMRL ENV_CONFIG is unavailable or has an invalid type.")
+
+    rtgym_config = env_config.get("RTGYM_CONFIG")
+    if not isinstance(rtgym_config, dict):
+        raise RuntimeError("TMRL RTGYM_CONFIG is unavailable or has an invalid type.")
+
+    rtgym_config.update(
+        {
+            "act_in_obs": True,
+            "act_buf_len": ACTION_HISTORY_LEN,
+            "reset_act_buf": True,
+        }
+    )
+    tmrl_config.ACT_BUF_LEN = ACTION_HISTORY_LEN
+
+    # TMRL 0.7.1 materializes CONFIG_DICT at import time.  Keep it aligned if
+    # another module imported config_objects before this helper ran.
+    config_objects = sys.modules.get("tmrl.config.config_objects")
+    if config_objects is not None:
+        config_dict = getattr(config_objects, "CONFIG_DICT", None)
+        if isinstance(config_dict, dict):
+            config_dict.update(rtgym_config)
 
 
 def _patched_safe_keyres() -> None:
@@ -129,6 +167,7 @@ def apply_data_collection_patches() -> None:
         return
 
     try:
+        configure_rtgym_action_history()
         import tmrl.custom.tm.utils.control_keyboard as ck  # type: ignore[import-not-found]
         from tmrl.custom.tm.tm_gym_interfaces import (  # type: ignore[import-not-found]
             TM2020Interface,
@@ -168,6 +207,7 @@ def apply_online_rl_patches() -> None:
         return
 
     try:
+        configure_rtgym_action_history()
         import tmrl.custom.tm.utils.control_keyboard as ck  # type: ignore[import-not-found]
         from tmrl.custom.tm.tm_gym_interfaces import (  # type: ignore[import-not-found]
             TM2020Interface,

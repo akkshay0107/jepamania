@@ -21,8 +21,8 @@ OUTPUT_PLOT = SCRIPT_DIR.parent / "out" / "action_distributions.png"
 #   [0]   speed
 #   [1]   gear
 #   [2]   rpm
-#   [3:6] act1  — most recent previous action (gas, brake, steer)
-#   [6:9] act2  — action before that
+#   [3:6] act1  — older buffered action (gas, brake, steer)
+#   [6:9] act2  — most recent buffered action
 TELEM_ACT1_SLICE = slice(3, 6)
 
 
