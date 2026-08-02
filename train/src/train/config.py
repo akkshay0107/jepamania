@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 class LossConfig:
     num_subspaces: int = 16
     subspace_dim: Optional[int] = None  # Will default to latent_dim // num_subspaces
-    num_slices: int = 16
+    num_slices: int = 256
     reg_weight: float = 0.02
 
 

@@ -19,6 +19,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import wandb
 from core.config import (
     IMG_HIST_LEN,
     LAMBDA_RETURN_DECAY,
@@ -31,10 +32,9 @@ from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder, load_models_aut
 from jaxtyping import Array, Float
 from omegaconf import OmegaConf
 
-import wandb
 from train.config import TrainConfig, load_train_config
 from train.dataloader import DataLoader, SlidingWindowDataset
-from train.loss import generate_projectors, sub_jepa_loss
+from train.loss import generate_subspace_projectors, sub_jepa_loss
 from train.policy import (
     make_policy_dataset,
     policy_nll,
@@ -69,10 +69,7 @@ RLModels = Tuple[Encoder, MLPPredictor, MLPValueHead, MLPPolicyHead]
 JointModels = Union[ValueModels, RLModels]
 Batch = Mapping[str, Union[np.ndarray, Array]]
 
-Projectors = Tuple[
-    Float[Array, "num_subspaces latent_dim subspace_dim"],
-    Float[Array, "num_subspaces subspace_dim num_slices"],
-]
+SubspaceProjectors = Float[Array, "num_subspaces latent_dim subspace_dim"]
 
 
 def extract_obs(
@@ -144,8 +141,9 @@ def _compute_truncated_lambda_return(
 def compute_joint_loss(
     models: JointModels,
     batch: Batch,
-    subspace_projectors: Float[Array, "num_subspaces latent_dim subspace_dim"],
-    slice_projectors: Float[Array, "num_subspaces subspace_dim num_slices"],
+    subspace_projectors: SubspaceProjectors,
+    num_slices: int,
+    slice_key: jax.Array,
     reg_weight: float,
     gamma: float,
     value_weight: float,
@@ -168,7 +166,12 @@ def compute_joint_loss(
     observed_idx = min(z_pred_sequence.shape[1], OBSERVED_ROLLOUT_LEN) - 1
     z_pred_observed = z_pred_sequence[:, observed_idx]
     jepa_loss = sub_jepa_loss(
-        z_pred_observed, z_target, subspace_projectors, slice_projectors, reg_weight
+        z_pred_observed,
+        z_target,
+        subspace_projectors,
+        num_slices,
+        slice_key,
+        reg_weight,
     )
 
     v_t = jax.vmap(value_head)(z_t)
@@ -211,8 +214,8 @@ _get_param_labels = get_param_labels
 
 def make_joint_step(
     optimizer: optax.GradientTransformation,
-    subspace_projectors: Float[Array, "num_subspaces latent_dim subspace_dim"],
-    slice_projectors: Float[Array, "num_subspaces subspace_dim num_slices"],
+    subspace_projectors: SubspaceProjectors,
+    num_slices: int,
     reg_weight: float,
     gamma: float,
     value_weight: float,
@@ -222,6 +225,7 @@ def make_joint_step(
         models: JointModels,
         opt_state: optax.OptState,
         batch: Batch,
+        slice_key: jax.Array,
     ) -> Tuple[
         JointModels,
         optax.OptState,
@@ -235,7 +239,8 @@ def make_joint_step(
             models,
             batch,
             subspace_projectors,
-            slice_projectors,
+            num_slices,
+            slice_key,
             reg_weight,
             gamma,
             value_weight,
@@ -355,8 +360,9 @@ def compute_online_loss(
     replay_batch: Batch,
     online_policy_batch: Batch,
     human_anchor_batch: Batch,
-    subspace_projectors: Float[Array, "num_subspaces latent_dim subspace_dim"],
-    slice_projectors: Float[Array, "num_subspaces subspace_dim num_slices"],
+    subspace_projectors: SubspaceProjectors,
+    num_slices: int,
+    slice_key: jax.Array,
     reg_weight: float,
     gamma: float,
     value_weight: float,
@@ -370,7 +376,8 @@ def compute_online_loss(
         models,
         replay_batch,
         subspace_projectors,
-        slice_projectors,
+        num_slices,
+        slice_key,
         reg_weight,
         gamma,
         value_weight,
@@ -402,8 +409,8 @@ def compute_online_loss(
 
 def make_online_step(
     optimizer: optax.GradientTransformation,
-    subspace_projectors: Float[Array, "num_subspaces latent_dim subspace_dim"],
-    slice_projectors: Float[Array, "num_subspaces subspace_dim num_slices"],
+    subspace_projectors: SubspaceProjectors,
+    num_slices: int,
     reg_weight: float,
     gamma: float,
     value_weight: float,
@@ -420,6 +427,7 @@ def make_online_step(
         human_anchor_batch: Batch,
         running_advantage_std: float,
         has_online_policy_data: float,
+        slice_key: jax.Array,
     ):
         (loss, aux), gradients = eqx.filter_value_and_grad(
             compute_online_loss, has_aux=True
@@ -429,7 +437,8 @@ def make_online_step(
             online_policy_batch,
             human_anchor_batch,
             subspace_projectors,
-            slice_projectors,
+            num_slices,
+            slice_key,
             reg_weight,
             gamma,
             value_weight,
@@ -523,20 +532,19 @@ def load_projectors(
     key: jax.Array,
     latent_dim: int,
     loss_cfg,
-) -> Projectors:
-    """Loads the frozen loss projectors written next to the model checkpoint."""
+) -> SubspaceProjectors:
+    """Load the frozen subspace projectors written next to the checkpoint."""
     projectors_path = checkpoint.parent / "projectors.eqx"
     if not projectors_path.exists():
         raise FileNotFoundError(
-            f"Frozen loss projectors must be next to the model: {projectors_path}"
+            f"Frozen subspace projectors must be next to the model: {projectors_path}"
         )
     subspace_dim = loss_cfg.subspace_dim or latent_dim // loss_cfg.num_subspaces
-    template = generate_projectors(
+    template = generate_subspace_projectors(
         key,
         latent_dim=latent_dim,
         num_subspaces=loss_cfg.num_subspaces,
         subspace_dim=subspace_dim,
-        num_slices=loss_cfg.num_slices,
     )
     return load_checkpoint(projectors_path, template)
 
@@ -563,8 +571,8 @@ def train_rl(
     Arguments:
       data_dir: Path to reward-labeled HDF5 dataset directory
       output_dir: Destination directory for the fine-tuned checkpoints
-      checkpoint: Combined (encoder, predictor) Equinox checkpoint; the frozen
-        loss projectors are loaded from `projectors.eqx` alongside it
+        checkpoint: Combined (encoder, predictor) Equinox checkpoint; the frozen
+        subspace projectors are loaded from `projectors.eqx` alongside it
       value_head_path: Required value head checkpoint
       policy_head_path: Policy checkpoint used to initialize the policy head
       model_cfg: Model architecture configuration
@@ -584,7 +592,7 @@ def train_rl(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     key = jax.random.PRNGKey(ft_cfg.seed)
-    key_models, key_val, key_policy, key_proj = jax.random.split(key, 4)
+    key_models, key_val, key_policy, key_proj, slice_rng = jax.random.split(key, 5)
 
     (encoder, predictor), detected_type = load_models_auto(
         checkpoint, key_models, model_cfg.encoder, model_cfg.predictor
@@ -592,12 +600,8 @@ def train_rl(
     logging.info(f"Loaded Sub-JEPA models ({detected_type} encoder) from {checkpoint}")
     obs_type = "lidar" if detected_type == "lidar" else "screen"
 
-    subspace_projectors, slice_projectors = load_projectors(
-        checkpoint, key_proj, latent_dim, loss_cfg
-    )
-    save_checkpoint(
-        output_dir / "projectors.eqx", (subspace_projectors, slice_projectors)
-    )
+    subspace_projectors = load_projectors(checkpoint, key_proj, latent_dim, loss_cfg)
+    save_checkpoint(output_dir / "projectors.eqx", subspace_projectors)
 
     selected_episode_ids = tuple(episode_ids or ())
     logging.info(
@@ -703,7 +707,7 @@ def train_rl(
         online_step = make_online_step(
             online_optimizer,
             subspace_projectors,
-            slice_projectors,
+            loss_cfg.num_slices,
             loss_cfg.reg_weight,
             ft_cfg.gamma,
             ft_cfg.value_weight,
@@ -711,7 +715,6 @@ def train_rl(
             ft_cfg.human_anchor_ratio,
             ft_cfg.max_advantage_weight,
         )
-
         human_loader = DataLoader(
             human_dataset,
             batch_size=ft_cfg.batch_size,
@@ -760,6 +763,7 @@ def train_rl(
                     )
                 else:
                     online_policy_batch = human_batch
+                slice_rng, slice_key = jax.random.split(slice_rng)
                 models, opt_state, total_loss, aux = online_step(
                     models,
                     opt_state,
@@ -768,6 +772,7 @@ def train_rl(
                     human_batch,
                     running_std.value,
                     float(has_online),
+                    slice_key,
                 )
                 (
                     jepa_loss,

@@ -24,6 +24,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import wandb
 from core.config import IMG_HIST_LEN, load_config
 from core.dynamics import MLPPredictor
 from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder
@@ -31,10 +32,9 @@ from core.interfaces import Encoder, Predictor
 from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree
 from omegaconf import OmegaConf
 
-import wandb
 from train.config import LossConfig, load_train_config
 from train.dataloader import DataLoader, SlidingWindowDataset
-from train.loss import generate_projectors, sub_jepa_loss
+from train.loss import generate_subspace_projectors, sub_jepa_loss
 
 DEFAULT_CONFIG = TRAIN_ROOT.parent / "core" / "config.yaml"
 DEFAULT_TRAIN_CONFIG = TRAIN_ROOT / "config.yaml"
@@ -74,8 +74,9 @@ def compute_loss(
     models: Models,
     batch: Batch,
     subspace_projectors: Float[Array, "num_subspaces latent_dim subspace_dim"],
-    slice_projectors: Float[Array, "num_subspaces subspace_dim num_slices"],
+    num_slices: int,
     reg_weight: float,
+    slice_key: PRNGKeyArray,
 ) -> Float[Array, ""]:
     encoder, predictor = models
 
@@ -116,7 +117,8 @@ def compute_loss(
         z_pred_flat,
         z_target_flat,
         subspace_projectors,
-        slice_projectors,
+        num_slices,
+        slice_key,
         reg_weight,
     )
 
@@ -124,7 +126,7 @@ def compute_loss(
 def make_train_step(
     optimizer: optax.GradientTransformation,
     subspace_projectors: Float[Array, "num_subspaces latent_dim subspace_dim"],
-    slice_projectors: Float[Array, "num_subspaces subspace_dim num_slices"],
+    num_slices: int,
     reg_weight: float,
 ):
     """Builds a JIT-compiled, purely functional optimization step."""
@@ -134,9 +136,10 @@ def make_train_step(
         models: Models,
         opt_state: optax.OptState,
         batch: Batch,
+        slice_key: PRNGKeyArray,
     ) -> Tuple[Models, optax.OptState, Float[Array, ""]]:
         loss, grads = eqx.filter_value_and_grad(compute_loss)(
-            models, batch, subspace_projectors, slice_projectors, reg_weight
+            models, batch, subspace_projectors, num_slices, reg_weight, slice_key
         )
         params = eqx.filter(models, eqx.is_array)
         updates, new_opt_state = optimizer.update(grads, opt_state, params)
@@ -190,7 +193,8 @@ def train(
     after every epoch as `pretrain_model_ep{n}.eqx` plus a rolling
     `pretrain_model_latest.eqx` (and `pretrain_model_best.eqx` on validation
     improvement), with the optimizer state in `pretrain_optstate_latest.eqx`
-    and the frozen loss projectors in `projectors.eqx`.
+    and the frozen subspace projectors in `projectors.eqx`. Slice directions are
+    resampled per training pass and are not serialized.
 
     With `resume=True`, weights, optimizer state, and projectors are restored
     from the rolling files and epoch numbering continues from the highest
@@ -222,16 +226,14 @@ def train(
     )
 
     subspace_dim = loss_cfg.subspace_dim or latent_dim // loss_cfg.num_subspaces
-    key_proj, _ = jax.random.split(key)
+    key_proj, slice_rng = jax.random.split(key)
     # Frozen random orthogonal bases; the freshly generated values are only
-    # templates when resuming — the serialized ones are restored below, so a
-    # resumed run keeps its original loss surface regardless of `key`.
-    subspace_projectors, slice_projectors = generate_projectors(
+    # templates when resuming because the serialized subspace bases are restored.
+    subspace_projectors = generate_subspace_projectors(
         key_proj,
         latent_dim=latent_dim,
         num_subspaces=loss_cfg.num_subspaces,
         subspace_dim=subspace_dim,
-        num_slices=loss_cfg.num_slices,
     )
 
     optimizer = optax.chain(
@@ -250,29 +252,34 @@ def train(
                 raise FileNotFoundError(f"Cannot resume: missing {path}")
         models = load_checkpoint(model_path, models)
         opt_state = load_checkpoint(latest_opt_path, opt_state)
-        subspace_projectors, slice_projectors = load_checkpoint(
-            projectors_path, (subspace_projectors, slice_projectors)
-        )
+        # Loading the subspace-only template also reads legacy tuple-form
+        # projectors.eqx files and ignores their obsolete slice-projector leaf.
+        subspace_projectors = load_checkpoint(projectors_path, subspace_projectors)
+        # Rewrite legacy tuple-form files so future checkpoints retain only the
+        # state required by the resampled-slice protocol.
+        save_checkpoint(projectors_path, subspace_projectors)
         start_epoch = _last_epoch_index(checkpoint_dir)
         print(f"Resumed from {model_path} at epoch {start_epoch}")
     else:
-        save_checkpoint(projectors_path, (subspace_projectors, slice_projectors))
+        save_checkpoint(projectors_path, subspace_projectors)
 
     train_step = make_train_step(
-        optimizer, subspace_projectors, slice_projectors, loss_cfg.reg_weight
+        optimizer, subspace_projectors, loss_cfg.num_slices, loss_cfg.reg_weight
     )
 
     @eqx.filter_jit
     def eval_step(
         models_eval: Models,
         batch_eval: Batch,
+        slice_key: PRNGKeyArray,
     ) -> Float[Array, ""]:
         return compute_loss(
             models_eval,
             batch_eval,
             subspace_projectors,
-            slice_projectors,
+            loss_cfg.num_slices,
             loss_cfg.reg_weight,
+            slice_key,
         )
 
     best_val_loss = float("inf")
@@ -280,7 +287,11 @@ def train(
         best_path = checkpoint_dir / "pretrain_model_best.eqx"
         if best_path.exists():
             best_models = load_checkpoint(best_path, models)
-            val_losses = [eval_step(best_models, b) for b in val_dataloader]
+            val_losses = []
+            resume_eval_rng, _ = jax.random.split(slice_rng)
+            for batch in val_dataloader:
+                resume_eval_rng, slice_key = jax.random.split(resume_eval_rng)
+                val_losses.append(eval_step(best_models, batch, slice_key))
             if val_losses:
                 best_val_loss = float(jnp.mean(jnp.stack(val_losses)))
                 print(
@@ -298,7 +309,10 @@ def train(
             epoch_start = time.time()
 
             for batch in dataloader:
-                models, opt_state, loss = train_step(models, opt_state, batch)
+                slice_rng, slice_key = jax.random.split(slice_rng)
+                models, opt_state, loss = train_step(
+                    models, opt_state, batch, slice_key
+                )
                 epoch_losses.append(loss)
                 global_step += 1
 
@@ -329,7 +343,8 @@ def train(
             if val_dataloader is not None:
                 val_losses = []
                 for val_batch in val_dataloader:
-                    val_losses.append(eval_step(models, val_batch))
+                    slice_rng, slice_key = jax.random.split(slice_rng)
+                    val_losses.append(eval_step(models, val_batch, slice_key))
                 if val_losses:
                     val_mean_loss = float(jnp.mean(jnp.stack(val_losses)))
                     val_loss_str = f" | val loss {val_mean_loss:.6f}"

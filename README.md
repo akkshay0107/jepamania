@@ -105,6 +105,10 @@ checkpoints/finetune/ft_policy_head_latest.eqx
 checkpoints/finetune/projectors.eqx
 ```
 
+`projectors.eqx` stores only the frozen orthogonal subspace bases. Sub-JEPA
+samples fresh slice directions during each loss pass. Resumed pretraining may
+therefore start with a discontinuous slice-sampling stream.
+
 Run supervised value bootstrapping and optional joint fine-tuning on pre-recorded dataset rollouts to produce this starting checkpoint:
 
 ```bash
@@ -192,8 +196,8 @@ Defines Sub-JEPA sliced-subspace regularizers, learning rates, schedules, and da
 | Parameter | Default | Tuning Guidance |
 | :--- | :--- | :--- |
 | `loss.num_subspaces` | `16` | Number of orthogonal subspace projections ($M$) for Sub-JEPA loss calculation. |
-| `loss.num_slices` | `16` | Number of 1D slices ($S$) per subspace. |
-| `loss.reg_weight` | `0.5` | Variance regularization weight preventing representation collapse. Increase if latents shrink toward zero. |
+| `loss.num_slices` | `256` | Number of fresh 1D slices ($S$) sampled per subspace and training pass. |
+| `loss.reg_weight` | `0.02` | Gaussian regularization weight preventing representation collapse. |
 | `pretrain.epochs` | `10` | Number of self-supervised pretraining epochs over recorded shards. |
 | `pretrain.batch_size` | `256` | Transition batch size during pretraining. |
 | `pretrain.lr` | `3.0e-4` | Peak AdamW learning rate for joint encoder/predictor pretraining. |

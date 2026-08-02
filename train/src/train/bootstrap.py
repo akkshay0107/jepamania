@@ -1,7 +1,7 @@
 """Supervised value-head bootstrapping and joint fine-tuning pipeline.
 
 This module loads a pretrained Sub-JEPA world model checkpoint along with its frozen
-loss projectors, either bootstraps a new value head or loads an existing one, and
+subspace projectors, either bootstraps a new value head or loads an existing one, and
 performs supervised value warmup and joint fine-tuning on pre-recorded dataset rollouts.
 It outputs the starting checkpoints required by the online RL loop.
 """
@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import wandb
 from core.config import (
     IMG_HIST_LEN,
     LAMBDA_RETURN_DECAY,
@@ -35,7 +36,6 @@ from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder, load_models_aut
 from jaxtyping import Array, Float
 from omegaconf import OmegaConf
 
-import wandb
 from train.config import TrainConfig, load_train_config
 from train.dataloader import DataLoader, SlidingWindowDataset
 from train.finetune import (
@@ -163,7 +163,7 @@ def train_bootstrap(
       data_dir: Path to reward-labeled HDF5 dataset directory
       output_dir: Destination directory for the fine-tuned checkpoints
       checkpoint: Combined (encoder, predictor) Equinox checkpoint; the frozen
-        loss projectors are loaded from `projectors.eqx` alongside it
+        subspace projectors are loaded from `projectors.eqx` alongside it
       value_head_path: Optional value head checkpoint; when omitted, a random
         value head is bootstrapped on the frozen encoder and predictor
       model_cfg: Model architecture configuration
@@ -180,7 +180,7 @@ def train_bootstrap(
 
     output_dir.mkdir(parents=True, exist_ok=True)
     key = jax.random.PRNGKey(boot_cfg.seed)
-    key_models, key_val, key_proj, key_policy = jax.random.split(key, 4)
+    key_models, key_val, key_proj, key_policy, slice_rng = jax.random.split(key, 5)
 
     (encoder, predictor), detected_type = load_models_auto(
         checkpoint, key_models, model_cfg.encoder, model_cfg.predictor
@@ -188,12 +188,8 @@ def train_bootstrap(
     logging.info(f"Loaded Sub-JEPA models ({detected_type} encoder) from {checkpoint}")
     obs_type = "lidar" if detected_type == "lidar" else "screen"
 
-    subspace_projectors, slice_projectors = load_projectors(
-        checkpoint, key_proj, latent_dim, loss_cfg
-    )
-    save_checkpoint(
-        output_dir / "projectors.eqx", (subspace_projectors, slice_projectors)
-    )
+    subspace_projectors = load_projectors(checkpoint, key_proj, latent_dim, loss_cfg)
+    save_checkpoint(output_dir / "projectors.eqx", subspace_projectors)
 
     logging.info(f"Loading dataset from {data_dir} (obs_type={obs_type})...")
     dataset = SlidingWindowDataset(
@@ -294,7 +290,7 @@ def train_bootstrap(
             joint_step = make_joint_step(
                 joint_opt,
                 subspace_projectors,
-                slice_projectors,
+                loss_cfg.num_slices,
                 loss_cfg.reg_weight,
                 boot_cfg.gamma,
                 boot_cfg.value_weight,
@@ -304,8 +300,9 @@ def train_bootstrap(
                 t0 = time.time()
                 total_losses, jepa_losses, val_losses = [], [], []
                 for batch in dataloader:
+                    slice_rng, slice_key = jax.random.split(slice_rng)
                     models, joint_opt_state, t_loss, j_loss, v_loss = joint_step(
-                        models, joint_opt_state, batch
+                        models, joint_opt_state, batch, slice_key
                     )
                     total_losses.append(t_loss)
                     jepa_losses.append(j_loss)

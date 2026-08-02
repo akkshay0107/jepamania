@@ -24,21 +24,26 @@ def _make_slice_projector(
     return matrix / norms
 
 
-def generate_projectors(
+def generate_subspace_projectors(
     key: PRNGKeyArray,
     latent_dim: int,
     num_subspaces: int,
     subspace_dim: int,
-    num_slices: int,
 ):
-    key_subspace_split, key_slice_split = jax.random.split(key)
-    keys_subspace = jax.random.split(key_subspace_split, num_subspaces)
-    keys_slices = jax.random.split(key_slice_split, num_subspaces)
+    """Generate the frozen orthogonal subspace bases used by Sub-JEPA."""
+    keys_subspace = jax.random.split(key, num_subspaces)
+    return _make_projector(keys_subspace, latent_dim, subspace_dim)
 
-    subspace_projectors = _make_projector(keys_subspace, latent_dim, subspace_dim)
-    slice_projectors = _make_slice_projector(keys_slices, subspace_dim, num_slices)
 
-    return subspace_projectors, slice_projectors
+def sample_slice_projectors(
+    key: PRNGKeyArray,
+    subspace_dim: int,
+    num_subspaces: int,
+    num_slices: int,
+) -> Float[Array, "num_subspaces subspace_dim num_slices"]:
+    """Sample fresh unit slice directions for one regularizer evaluation."""
+    keys_slices = jax.random.split(key, num_subspaces)
+    return _make_slice_projector(keys_slices, subspace_dim, num_slices)
 
 
 @functools.partial(jax.vmap, in_axes=(None, 0))
@@ -98,9 +103,16 @@ _vmap_subspaces = jax.vmap(_vmap_slices, in_axes=0)
 def sub_jepa_regularization(
     target_latents: Float[Array, "batch latent_dim"],
     subspace_projectors: Float[Array, "num_subspaces latent_dim subspace_dim"],
-    slice_projectors: Float[Array, "num_subspaces subspace_dim num_slices"],
+    num_slices: int,
+    key: PRNGKeyArray,
 ) -> Float[Array, ""]:
     subspace_latents = _project_into_subspace(target_latents, subspace_projectors)
+    slice_projectors = sample_slice_projectors(
+        key,
+        subspace_dim=subspace_latents.shape[-1],
+        num_subspaces=subspace_latents.shape[0],
+        num_slices=num_slices,
+    )
     sliced_latents = _project_into_slices(subspace_latents, slice_projectors)
     ep_stats = _vmap_subspaces(sliced_latents)
     return jnp.mean(ep_stats)
@@ -110,13 +122,14 @@ def sub_jepa_loss(
     predicted_latents: Float[Array, "batch latent_dim"],
     target_latents: Float[Array, "batch latent_dim"],
     subspace_projectors: Float[Array, "num_subspaces latent_dim subspace_dim"],
-    slice_projectors: Float[Array, "num_subspaces subspace_dim num_slices"],
+    num_slices: int,
+    key: PRNGKeyArray,
     reg_weight: float = 1.0,
 ) -> Float[Array, ""]:
     pred_loss = jnp.mean(
         (predicted_latents - jax.lax.stop_gradient(target_latents)) ** 2
     )
     reg_loss = sub_jepa_regularization(
-        target_latents, subspace_projectors, slice_projectors
+        target_latents, subspace_projectors, num_slices, key
     )
     return pred_loss + reg_weight * reg_loss

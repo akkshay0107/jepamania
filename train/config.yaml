@@ -1,7 +1,7 @@
 loss:
   num_subspaces: 16
   subspace_dim: null
-  num_slices: 16
+  num_slices: 256
   reg_weight: 0.02
 
 pretrain:
