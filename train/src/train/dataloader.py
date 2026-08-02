@@ -650,6 +650,13 @@ class DataLoader:
         self.thread: Optional[threading.Thread] = None
         self.shutdown_event = threading.Event()
 
+    def __len__(self) -> int:
+        """Returns total number of batches per epoch across all RAM shard windows."""
+        if len(self.dataset) == 0:
+            return 0
+        windows = self._plan_windows()
+        return sum(self._num_batches(len(idx)) for idx, _ in windows)
+
     def _num_batches(self, num_samples: int) -> int:
         num_batches = num_samples // self.batch_size
         if not self.drop_last and num_samples % self.batch_size != 0:

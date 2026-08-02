@@ -206,7 +206,7 @@ def train(
       latent_dim: Dimensionality of latent embedding representation
       loss_cfg: Loss configuration specifying subspace and slice parameters
       num_epochs: Total number of pretraining epochs to run
-      learning_rate: Optimizer learning rate
+      learning_rate: Peak AdamW learning rate used for warmup-cosine decay
       key: PRNG key for projector initialization
       checkpoint_dir: Directory path for saving output checkpoints
       log_every: Frequency of logging metrics to stdout and wandb
@@ -236,9 +236,25 @@ def train(
         subspace_dim=subspace_dim,
     )
 
+    batches_per_epoch = (
+        len(dataloader) if hasattr(dataloader, "__len__") else 1000  # type: ignore[arg-type]
+    )
+    total_steps = max(1, num_epochs * batches_per_epoch)
+    warmup_steps = int(total_steps * 0.10)
+    decay_steps = max(1, total_steps - warmup_steps)
+    end_value = learning_rate * 0.01
+
+    lr_schedule = optax.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=learning_rate,
+        warmup_steps=warmup_steps,
+        decay_steps=decay_steps,
+        end_value=end_value,
+    )
+
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
-        optax.adamw(learning_rate),
+        optax.adamw(lr_schedule),
     )
     opt_state = optimizer.init(eqx.filter(models, eqx.is_array))
 
@@ -317,13 +333,15 @@ def train(
                 global_step += 1
 
                 if global_step == 1 or global_step % log_every == 0:
+                    current_lr = float(np.asarray(lr_schedule(global_step)))
                     print(
                         f"epoch {epoch + 1}/{last_epoch} | step {global_step} | "
-                        f"loss {float(loss):.6f}"
+                        f"loss {float(loss):.6f} | lr {current_lr:.2e}"
                     )
                     wandb.log(
                         {
                             "train/step_loss": float(loss),
+                            "train/learning_rate": current_lr,
                             "epoch": epoch + 1,
                             "global_step": global_step,
                         },
@@ -423,7 +441,7 @@ def main() -> None:
 
     epochs = train_cfg.pretrain.epochs
     batch_size = train_cfg.pretrain.batch_size
-    lr = train_cfg.pretrain.lr
+    peak_lr = train_cfg.pretrain.peak_lr
     seed = train_cfg.pretrain.seed
 
     obs_type = "lidar" if args.encoder == "lidar" else "screen"
@@ -489,7 +507,7 @@ def main() -> None:
         latent_dim=cfg.encoder.latent_dim,
         loss_cfg=train_cfg.loss,
         num_epochs=epochs,
-        learning_rate=lr,
+        learning_rate=peak_lr,
         key=key_train,
         checkpoint_dir=args.checkpoint_dir,
         log_every=train_cfg.pretrain.log_every,

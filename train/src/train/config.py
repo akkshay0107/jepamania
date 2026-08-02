@@ -17,7 +17,7 @@ class LossConfig:
 class PretrainConfig:
     epochs: int = 10
     batch_size: int = 256
-    lr: float = 3e-4
+    peak_lr: float = 3e-4
     rollout_len: int = 5
     num_workers: int = 4
     seed: int = 42

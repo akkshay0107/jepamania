@@ -200,7 +200,7 @@ Defines Sub-JEPA sliced-subspace regularizers, learning rates, schedules, and da
 | `loss.reg_weight` | `0.02` | Gaussian regularization weight preventing representation collapse. |
 | `pretrain.epochs` | `10` | Number of self-supervised pretraining epochs over recorded shards. |
 | `pretrain.batch_size` | `256` | Transition batch size during pretraining. |
-| `pretrain.lr` | `3.0e-4` | Peak AdamW learning rate for joint encoder/predictor pretraining. |
+| `pretrain.peak_lr` | `3.0e-4` | Peak AdamW learning rate for joint encoder/predictor pretraining (10% linear warmup, 90% cosine decay to 1% peak). |
 | `pretrain.rollout_len` | `5` | Autoregressive transition steps predicted during pretraining. |
 | `bootstrap.warmup_epochs` | `5` | Number of supervised value-head warmup epochs over historical rollouts before online RL. |
 | `bootstrap.joint_epochs` | `5` | Number of joint fine-tuning epochs of encoder, predictor, and value head during bootstrapping. |
