@@ -23,11 +23,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import wandb
 from core.config import (
     IMG_HIST_LEN,
     LAMBDA_RETURN_DECAY,
-    OBSERVED_ROLLOUT_LEN,
     SubJepaConfig,
     load_config,
 )
@@ -36,12 +34,15 @@ from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder, load_models_aut
 from jaxtyping import Array, Float
 from omegaconf import OmegaConf
 
+import wandb
 from train.config import TrainConfig, load_train_config
 from train.dataloader import DataLoader, SlidingWindowDataset
 from train.finetune import (
     JointModels,
     _compute_truncated_lambda_return,
+    _target_indices,
     extract_obs,
+    extract_target_obs_sequence,
     get_param_labels,
     load_projectors,
     make_joint_step,
@@ -87,10 +88,13 @@ def compute_value_loss(
 ) -> Float[Array, ""]:
     """Computes K-step discounted return value loss on z_t and predicted states."""
     obs_t = extract_obs(encoder, batch, is_target=False)
-    obs_target = extract_obs(encoder, batch, is_target=True)
+    obs_target_sequence = extract_target_obs_sequence(encoder, batch)
 
     z_t = jax.vmap(encoder)(obs_t)
-    z_target = jax.vmap(encoder)(obs_target)
+    z_target_sequence = jax.vmap(jax.vmap(encoder))(obs_target_sequence)
+    target_indices = _target_indices(batch, z_target_sequence.shape[1])
+    batch_indices = jnp.arange(z_t.shape[0])
+    z_target = z_target_sequence[batch_indices, target_indices]
 
     if stop_grad_encoder:
         z_t = jax.lax.stop_gradient(z_t)
@@ -110,11 +114,12 @@ def compute_value_loss(
         v_pred_sequence = jax.vmap(jax.vmap(value_head))(
             jax.lax.stop_gradient(z_pred_sequence)
         )
-        lambda_return_target = _compute_truncated_lambda_return(
-            rewards, v_pred_sequence, mask, gamma, LAMBDA_RETURN_DECAY
+        lambda_return_target = jax.lax.stop_gradient(
+            _compute_truncated_lambda_return(
+                rewards, v_pred_sequence, mask, gamma, LAMBDA_RETURN_DECAY
+            )
         )
-        observed_idx = min(z_pred_sequence.shape[1], OBSERVED_ROLLOUT_LEN) - 1
-        v_pred_consistency = v_pred_sequence[:, observed_idx]
+        v_pred_consistency = v_pred_sequence[batch_indices, target_indices]
         loss_t = jnp.mean(optax.huber_loss(v_t, lambda_return_target))
         loss_pred = jnp.mean(optax.huber_loss(v_pred_consistency, v_target))
         return 0.5 * loss_t + 0.5 * loss_pred
@@ -122,7 +127,7 @@ def compute_value_loss(
     k_steps = rewards.shape[1]
     discounts = gamma ** jnp.arange(k_steps, dtype=jnp.float32)
     disc_reward = jnp.sum(rewards * discounts, axis=1)
-    target_return = disc_reward + (gamma**k_steps) * v_target
+    target_return = disc_reward + (gamma**k_steps) * mask[:, -1] * v_target
     return jnp.mean(optax.huber_loss(v_t, target_return))
 
 
@@ -200,6 +205,7 @@ def train_bootstrap(
         obs_type=obs_type,
         load_rewards=True,
         max_cache_bytes=int(boot_cfg.max_cache_gb * 1024**3),
+        include_terminal_windows=True,
     )
 
     if len(dataset) == 0:

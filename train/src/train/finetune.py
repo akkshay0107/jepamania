@@ -19,11 +19,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import wandb
 from core.config import (
     IMG_HIST_LEN,
     LAMBDA_RETURN_DECAY,
-    OBSERVED_ROLLOUT_LEN,
     SubJepaConfig,
     load_config,
 )
@@ -32,6 +30,7 @@ from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder, load_models_aut
 from jaxtyping import Array, Float
 from omegaconf import OmegaConf
 
+import wandb
 from train.config import TrainConfig, load_train_config
 from train.dataloader import DataLoader, SlidingWindowDataset
 from train.loss import generate_subspace_projectors, sub_jepa_loss
@@ -80,7 +79,7 @@ def extract_obs(
     Arguments:
       encoder: Vision, Conv, or Lidar observation encoder instance
       batch: Batch mapping containing observation stack and telemetry arrays
-      is_target: Flag indicating whether to extract target frame at K_obs step
+      is_target: Flag indicating whether to extract the final target frame
 
     Returns:
       Dictionary containing normalized sensor observations (telemetry + screen/lidar)
@@ -107,6 +106,38 @@ def extract_obs(
 _extract_obs = extract_obs
 
 
+def extract_target_obs_sequence(encoder: Encoder, batch: Batch) -> Dict[str, Any]:
+    """Extract all observed target frames for a rollout window."""
+    obs_raw = batch["obs_stack_targets"]
+    telem_raw = batch["telemetry_targets"]
+
+    if isinstance(encoder, LidarEncoder):
+        return {
+            "lidar": obs_raw.astype(jnp.float32),
+            "telemetry": telem_raw,
+        }
+    return {
+        "screen": obs_raw.astype(jnp.float32) / 255.0,
+        "telemetry": telem_raw,
+    }
+
+
+def _target_indices(batch: Batch, rollout_len: int) -> jax.Array:
+    """Return the final real target index for each rollout window."""
+    target_mask = jnp.asarray(
+        batch.get(
+            "target_mask_seq",
+            jnp.ones(
+                (batch["obs_stack_targets"].shape[0], rollout_len),
+                dtype=jnp.float32,
+            ),
+        ),
+        dtype=jnp.float32,
+    )
+    target_counts = jnp.sum(target_mask, axis=1).astype(jnp.int32)
+    return jnp.clip(target_counts - 1, 0, rollout_len - 1)
+
+
 def _compute_truncated_lambda_return(
     rewards_seq: Float[Array, "batch steps"],
     values_seq: Float[Array, "batch steps"],
@@ -115,8 +146,8 @@ def _compute_truncated_lambda_return(
     lambda_decay: float,
 ) -> Float[Array, "batch"]:
     """Computes M-step truncated TD(lambda) targets via reverse scan."""
-    # Terminal return initializes to the final value estimate values_seq[:, -1].
-    # Step k: G_k = r_k + gamma * mask_{k+1} * ((1-lambda)*V_{k+1} + lambda*G_{k+1}).
+    # A non-terminal horizon bootstraps from the value after its final action.
+    # Step k: G_k = r_k + gamma * mask_k * ((1-lambda)*V_{k+1} + lambda*G_{k+1}).
     terminal_value = values_seq[:, -1]
 
     def backward_step(next_return, step_data):
@@ -151,20 +182,20 @@ def compute_joint_loss(
     encoder, predictor, value_head = models[:3]
 
     obs_t = extract_obs(encoder, batch, is_target=False)
-    obs_target = extract_obs(encoder, batch, is_target=True)
+    obs_target_sequence = extract_target_obs_sequence(encoder, batch)
 
     z_t = jax.vmap(encoder)(obs_t)
-    z_target = jax.vmap(encoder)(obs_target)
+    z_target_sequence = jax.vmap(jax.vmap(encoder))(obs_target_sequence)
 
     actions = batch["actions_seq"].astype(jnp.int32)
     z_pred_sequence = jax.vmap(
         lambda z0, acts: _rollout_latent_sequence(predictor, z0, acts)
     )(z_t, actions)
 
-    # Sub-JEPA geometry loss evaluates strictly against the
-    # observed ground-truth target latent at step K_obs
-    observed_idx = min(z_pred_sequence.shape[1], OBSERVED_ROLLOUT_LEN) - 1
-    z_pred_observed = z_pred_sequence[:, observed_idx]
+    target_indices = _target_indices(batch, z_pred_sequence.shape[1])
+    batch_indices = jnp.arange(z_t.shape[0])
+    z_target = z_target_sequence[batch_indices, target_indices]
+    z_pred_observed = z_pred_sequence[batch_indices, target_indices]
     jepa_loss = sub_jepa_loss(
         z_pred_observed,
         z_target,
@@ -184,11 +215,13 @@ def compute_joint_loss(
 
     rewards = jnp.asarray(batch["rewards_seq"], dtype=jnp.float32)
     mask = jnp.asarray(batch.get("mask_seq", jnp.ones_like(rewards)), dtype=jnp.float32)
-    lambda_return_target = _compute_truncated_lambda_return(
-        rewards, v_pred_sequence, mask, gamma, LAMBDA_RETURN_DECAY
+    lambda_return_target = jax.lax.stop_gradient(
+        _compute_truncated_lambda_return(
+            rewards, v_pred_sequence, mask, gamma, LAMBDA_RETURN_DECAY
+        )
     )
 
-    v_pred_consistency = v_pred_sequence[:, observed_idx]
+    v_pred_consistency = v_pred_sequence[batch_indices, target_indices]
     val_loss = 0.5 * jnp.mean(
         optax.huber_loss(v_t, lambda_return_target)
     ) + 0.5 * jnp.mean(optax.huber_loss(v_pred_consistency, v_target_observed))
@@ -616,6 +649,7 @@ def train_rl(
         load_rewards=True,
         max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
         episode_ids=selected_episode_ids,
+        include_terminal_windows=True,
     )
     if len(online_dataset) == 0:
         raise RuntimeError(f"No valid transitions found in {data_dir}")
@@ -627,6 +661,7 @@ def train_rl(
         obs_type=obs_type,
         load_rewards=True,
         max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
+        include_terminal_windows=True,
     )
     if len(bootstrap_dataset) == 0:
         raise RuntimeError(f"No bootstrap transitions found in {bootstrap_data_dir}")
@@ -644,6 +679,7 @@ def train_rl(
         load_rewards=True,
         max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
         episode_ids=qualifying_ids,
+        include_terminal_windows=True,
     )
     human_episodes = select_policy_sft_episodes(
         bootstrap_data_dir,
