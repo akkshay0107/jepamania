@@ -144,7 +144,8 @@ uv run python rl_loop.py \
   --initial-model checkpoints/finetune/ft_model_latest.eqx \
   --initial-value-head checkpoints/finetune/ft_value_head_latest.eqx \
   --initial-policy-head checkpoints/finetune/ft_policy_head_latest.eqx \
-  --rollout-file win-client/data/rl/rollouts/online_rollouts.h5 \
+  --training-rollout-file win-client/data/rl/rollouts/online_training.h5 \
+  --evaluation-rollout-file win-client/data/rl/rollouts/online_evaluations.h5 \
   --checkpoints-dir checkpoints/rl \
   --iterations 5 \
   --episodes-per-iteration 5
@@ -154,6 +155,9 @@ The loop keeps one TMRL environment alive for the full run. While JAX is
 fine-tuning, an idle brake heartbeat continues consuming Openplanet observations
 so the next collection does not reconnect through a stale 10-second timeout.
 Interrupted runs resume from `checkpoints/rl/run_state.json`.
+Training and evaluation rollouts are stored separately so evaluation episodes
+never enter replay. The old `--rollout-file` option remains an alias for the
+training file.
 
 ### Step 6: Checkpoint Export (`tar`)
 Package required configs and model checkpoints into a compressed archive for deployment across machines:

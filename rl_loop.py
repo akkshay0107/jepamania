@@ -80,9 +80,16 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         default=Path("checkpoints/finetune/ft_policy_head_latest.eqx"),
     )
     parser.add_argument(
+        "--training-rollout-file",
         "--rollout-file",
+        dest="training_rollout_file",
         type=Path,
-        default=Path("win-client/data/rl/rollouts/online_rollouts.h5"),
+        default=Path("win-client/data/rl/rollouts/online_training.h5"),
+    )
+    parser.add_argument(
+        "--evaluation-rollout-file",
+        type=Path,
+        default=Path("win-client/data/rl/rollouts/online_evaluations.h5"),
     )
     parser.add_argument("--checkpoints-dir", type=Path, default=Path("checkpoints/rl"))
     parser.add_argument("--iterations", type=int, default=5)
@@ -100,6 +107,15 @@ def _validate_checkpoint_bundle(
         raise FileNotFoundError(
             "Online RL requires a complete fine-tuned checkpoint bundle; missing: "
             + ", ".join(str(path) for path in missing)
+        )
+
+
+def _validate_rollout_files(training_file: Path, evaluation_file: Path) -> None:
+    """Require distinct append-only stores for replay and evaluation episodes."""
+    if training_file.resolve() == evaluation_file.resolve():
+        raise ValueError(
+            "Training and evaluation rollout files must be different so evaluation "
+            "episodes cannot enter replay."
         )
 
 
@@ -207,6 +223,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         raise ValueError(
             "iterations must be non-negative and episodes must be positive"
         )
+    _validate_rollout_files(args.training_rollout_file, args.evaluation_rollout_file)
 
     state = _initial_state(args)
     _validate_checkpoint_bundle(
@@ -242,12 +259,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             config={
                 "iterations": args.iterations,
                 "episodes_per_iteration": args.episodes_per_iteration,
+                "training_rollout_file": str(args.training_rollout_file),
+                "evaluation_rollout_file": str(args.evaluation_rollout_file),
             },
         )
         if state.incumbent_success_count < 0:
             baseline = _evaluate_checkpoint(
                 session,
-                args.rollout_file,
+                args.evaluation_rollout_file,
                 Path(state.model_checkpoint),
                 Path(state.value_head_checkpoint),
                 Path(state.policy_head_checkpoint),
@@ -276,7 +295,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 pending = _collect_iteration(
                     session,
                     state,
-                    args.rollout_file,
+                    args.training_rollout_file,
                     args.episodes_per_iteration,
                 )
                 state = RunState(
@@ -291,7 +310,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 )
                 save_run_state(args.checkpoints_dir, state)
 
-            summaries = read_completed_episode_summaries(args.rollout_file)
+            summaries = read_completed_episode_summaries(args.training_rollout_file)
             selection = select_replay_episodes(
                 summaries,
                 new_episode_ids=pending,
@@ -302,7 +321,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             )
             output_dir = args.checkpoints_dir / f"iteration_{state.iteration:04d}"
             _, next_step = train_rl(
-                data_dir=args.rollout_file,
+                data_dir=args.training_rollout_file,
                 output_dir=output_dir,
                 checkpoint=Path(state.model_checkpoint),
                 value_head_path=Path(state.value_head_checkpoint),
@@ -320,7 +339,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             )
             candidate = _evaluate_checkpoint(
                 session,
-                args.rollout_file,
+                args.evaluation_rollout_file,
                 *candidate_paths,
                 attempts=train_cfg.finetune.evaluation_episodes,
                 iteration=state.iteration,
