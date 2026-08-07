@@ -194,8 +194,9 @@ def apply_data_collection_patches() -> None:
         ck.keyres = _patched_safe_keyres
 
         logging.info("Applied TMRL Data Collection patches cleanly.")
-    except Exception as e:
-        logging.warning(f"Failed to apply TMRL Data Collection patches: {e}")
+    except Exception as error:
+        logging.exception("Failed to apply TMRL Data Collection patches")
+        raise RuntimeError("TMRL data collection patches were not applied") from error
 
 
 def apply_online_rl_patches() -> None:
@@ -269,5 +270,6 @@ def apply_online_rl_patches() -> None:
         ck.keyres = _patched_safe_keyres
 
         logging.info("Applied TMRL Online RL patches cleanly.")
-    except Exception as e:
-        logging.warning(f"Failed to apply TMRL Online RL patches: {e}")
+    except Exception as error:
+        logging.exception("Failed to apply TMRL Online RL patches")
+        raise RuntimeError("TMRL online RL patches were not applied") from error

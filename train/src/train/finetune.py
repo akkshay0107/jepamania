@@ -379,7 +379,12 @@ def compute_online_policy_loss(
     nll = optax.softmax_cross_entropy_with_integer_labels(logits, actions[:, 0])
     positive = advantages > 0.0
     positive_count = jnp.sum(positive)
-    loss = jnp.sum(weights * nll) / jnp.maximum(positive_count, 1.0)
+    weight_sum = jnp.sum(weights)
+    loss = jnp.where(
+        weight_sum > 0.0,
+        jnp.sum(weights * nll) / jnp.maximum(weight_sum, 1e-6),
+        0.0,
+    )
     positive_advantages = jnp.where(positive, advantages, 0.0)
     return loss, (
         positive_count,
@@ -622,6 +627,9 @@ def train_rl(
     ft_cfg = train_cfg.finetune
     loss_cfg = train_cfg.loss
     latent_dim = model_cfg.encoder.latent_dim
+
+    if ft_cfg.max_advantage_weight <= 0.0:
+        raise ValueError("max_advantage_weight must be positive")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     key = jax.random.PRNGKey(ft_cfg.seed)

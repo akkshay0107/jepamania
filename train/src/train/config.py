@@ -66,8 +66,8 @@ class FinetuneConfig:
     human_anchor_ratio: float = 0.5
     bootstrap_anchor_ratio: float = 0.25
     max_advantage_weight: float = 20.0
-    evaluation_episodes: int = 5
-    promotion_min_improvement_frames: int = 1
+    evaluation_episodes: int = 15
+    promotion_min_improvement_frames: int = 5
     batch_size: int = 64
     num_workers: int = 4
     seed: int = 42

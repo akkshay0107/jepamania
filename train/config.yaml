@@ -50,8 +50,8 @@ finetune:
   human_anchor_ratio: 0.5
   bootstrap_anchor_ratio: 0.25
   max_advantage_weight: 20.0
-  evaluation_episodes: 5
-  promotion_min_improvement_frames: 1
+  evaluation_episodes: 15
+  promotion_min_improvement_frames: 5
   batch_size: 128
   num_workers: 4
   seed: 42
