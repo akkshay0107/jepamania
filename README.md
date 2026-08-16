@@ -206,6 +206,8 @@ Defines Sub-JEPA sliced-subspace regularizers, learning rates, schedules, and da
 | `pretrain.batch_size` | `256` | Transition batch size during pretraining. |
 | `pretrain.peak_lr` | `3.0e-4` | Peak AdamW learning rate for joint encoder/predictor pretraining (10% linear warmup, 90% cosine decay to 1% peak). |
 | `pretrain.rollout_len` | `5` | Autoregressive transition steps predicted during pretraining. |
+| `policy_sft.lr_min` | `3.0e-6` | Final AdamW learning rate for policy-head SFT after warmup and cosine decay. |
+| `policy_sft.lr_max` | `3.0e-4` | Peak AdamW learning rate for policy-head SFT (10% linear warmup, 90% cosine decay). |
 | `bootstrap.warmup_epochs` | `5` | Number of supervised value-head warmup epochs over historical rollouts before online RL. |
 | `bootstrap.joint_epochs` | `5` | Number of joint fine-tuning epochs of encoder, predictor, and value head during bootstrapping. |
 | `finetune.joint_epochs` | `4` | Epochs for joint end-to-end fine-tuning per online RL iteration. |

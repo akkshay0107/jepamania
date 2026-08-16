@@ -28,8 +28,8 @@ class PretrainConfig:
 
 @dataclass
 class BootstrapConfig:
-    warmup_epochs: int = 5
-    joint_epochs: int = 5
+    warmup_epochs: int = 10
+    joint_epochs: int = 10
     gamma: float = 0.990
     lr_warmup: float = 3e-4
     lr_enc: float = 5e-6
@@ -45,9 +45,10 @@ class BootstrapConfig:
 
 @dataclass
 class PolicySFTConfig:
-    epochs: int = 50
+    epochs: int = 100
     batch_size: int = 128
-    lr: float = 3e-4
+    lr_min: float = 1e-6
+    lr_max: float = 1e-4
     num_workers: int = 4
     min_frames: int = 420
     max_frames: int = 540

@@ -300,9 +300,6 @@ def train_policy_sft(
     if len(dataset) == 0:
         raise RuntimeError("No successful human transitions available for policy SFT")
     policy_head = MLPPolicyHead(policy_cfg, key=key)
-    optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adamw(cfg.lr))
-    opt_state = optimizer.init(eqx.filter(policy_head, eqx.is_array))
-    step = make_policy_sft_step(optimizer)
     dataloader = DataLoader(
         dataset,
         batch_size=cfg.batch_size,
@@ -311,6 +308,24 @@ def train_policy_sft(
         num_workers=cfg.num_workers,
         seed=0,
     )
+    batches_per_epoch = len(dataloader)
+    total_steps = max(1, cfg.epochs * batches_per_epoch)
+    warmup_steps = int(total_steps * 0.10)
+    decay_steps = max(1, total_steps - warmup_steps)
+
+    lr_schedule = optax.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=cfg.lr_max,
+        warmup_steps=warmup_steps,
+        decay_steps=decay_steps,
+        end_value=cfg.lr_min,
+    )
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adamw(lr_schedule),
+    )
+    opt_state = optimizer.init(eqx.filter(policy_head, eqx.is_array))
+    step = make_policy_sft_step(optimizer)
     best_nll = float("inf")
     global_step = 0
     for epoch in range(cfg.epochs):
@@ -322,12 +337,14 @@ def train_policy_sft(
             for name, value in metrics.items():
                 totals.setdefault(name, []).append(value)
             global_step += 1
-            if global_step % cfg.log_every == 0:
+            if global_step == 1 or global_step % cfg.log_every == 0:
+                current_lr = float(np.asarray(lr_schedule(global_step)))
                 wandb.log(
                     {
                         f"policy_sft/step_{name}": float(value)
                         for name, value in metrics.items()
-                    },
+                    }
+                    | {"policy_sft/learning_rate": current_lr},
                     step=global_step,
                 )
         means = {
