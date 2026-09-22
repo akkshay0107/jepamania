@@ -20,6 +20,17 @@ from core.config import (
 from core.dynamics import MLPPredictor
 
 
+def normalize_telemetry(
+    telemetry: Float[Array, "... 9"],
+) -> Float[Array, "... 9"]:
+    """Scale raw telemetry consistently for training and inference, without clipping."""
+    # Speed, gear, RPM, then two chronological [gas, brake, steer] actions.
+    scales = jnp.asarray(
+        [100.0, 6.0, 10000.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=jnp.float32
+    )
+    return jnp.asarray(telemetry, dtype=jnp.float32) / scales
+
+
 @functools.lru_cache(maxsize=16)
 def _get_2d_sincos_pos_embed_np(latent_dim: int, grid_size: int = 4) -> np.ndarray:
     grid_y, grid_x = np.meshgrid(
@@ -202,7 +213,7 @@ class ViTEncoder(eqx.Module):
 
     def __call__(self, observations: Mapping[str, Any]) -> Float[Array, "latent_dim"]:
         screen = observations["screen"]
-        telemetry = observations["telemetry"]
+        telemetry = normalize_telemetry(observations["telemetry"])
 
         x_visual = self.conv_stem(screen)
         x_visual = x_visual.reshape(self.latent_dim, 16)
@@ -267,7 +278,7 @@ class ConvEncoder(eqx.Module):
         observations: Mapping[str, Any],
     ) -> Float[Array, "latent_dim"]:
         screen = observations["screen"]
-        telemetry = observations["telemetry"]
+        telemetry = normalize_telemetry(observations["telemetry"])
 
         x_screen = jax.nn.relu(self.conv1(screen))
         x_screen = jax.nn.relu(self.conv2(x_screen))
@@ -328,7 +339,7 @@ class LidarEncoder(eqx.Module):
                 "LidarEncoder requires 'lidar' observation of total size "
                 f"{IMG_HIST_LEN * LIDAR_BEAMS}."
             )
-        telemetry = observations["telemetry"]
+        telemetry = normalize_telemetry(observations["telemetry"])
 
         x_lidar = self.lidar_mlp(lidar.reshape(-1))
         x_telemetry = self.telemetry_mlp(telemetry)
