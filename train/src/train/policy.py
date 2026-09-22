@@ -27,6 +27,7 @@ from train.pretrain import save_checkpoint
 ConcreteEncoder = Union[ViTEncoder, ConvEncoder, LidarEncoder]
 Batch = Mapping[str, Union[np.ndarray, Array]]
 EXCLUDED_TERMINATIONS = frozenset({"manual", "respawn", "stuck", "truncated"})
+MIN_BOOTSTRAP_SUCCESS_REWARD = 99.0
 
 
 class RawPolicyHead(Protocol):
@@ -99,8 +100,12 @@ def _read_policy_episode(
     if is_bootstrap:
         if rewards is None or frame_end > len(rewards):
             return None
-        terminal_reward = float(rewards[frame_end - 1])  # pyright: ignore[reportIndexIssue]
-        if not np.isfinite(terminal_reward) or terminal_reward <= 0.0:
+        episode_rewards = np.asarray(rewards[frame_start:frame_end], dtype=np.float32)
+        max_reward = float(np.max(episode_rewards))
+        if (
+            not np.isfinite(max_reward)
+            or max_reward < MIN_BOOTSTRAP_SUCCESS_REWARD
+        ):
             return None
     elif termination != "done":
         return None

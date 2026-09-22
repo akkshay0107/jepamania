@@ -36,7 +36,7 @@ policy_sft:
   lr_min: 4.0e-6
   lr_max: 4.0e-4
   num_workers: 4
-  min_frames: 420
+  min_frames: 450
   max_frames: 540
   log_every: 50
 

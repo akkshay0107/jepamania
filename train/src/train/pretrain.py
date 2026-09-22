@@ -24,7 +24,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import wandb
 from core.config import IMG_HIST_LEN, load_config
 from core.dynamics import MLPPredictor
 from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder
@@ -32,6 +31,7 @@ from core.interfaces import Encoder, Predictor
 from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree
 from omegaconf import OmegaConf
 
+import wandb
 from train.config import LossConfig, load_train_config
 from train.dataloader import DataLoader, SlidingWindowDataset
 from train.loss import generate_subspace_projectors, sub_jepa_loss
@@ -171,6 +171,31 @@ def _last_epoch_index(checkpoint_dir: Path) -> int:
     return max(indices, default=0)
 
 
+def _make_lr_schedule(learning_rate: float, total_steps: int) -> optax.Schedule:
+    """Warm up for 10% of the run, then decay over its remaining steps."""
+    return optax.warmup_cosine_decay_schedule(
+        init_value=0.0,
+        peak_value=learning_rate,
+        warmup_steps=int(total_steps * 0.10),
+        # Optax includes warmup in decay_steps.
+        decay_steps=total_steps,
+        end_value=learning_rate * 0.01,
+    )
+
+
+def _restart_lr_schedule(opt_state: optax.OptState) -> optax.OptState:
+    """Restart the schedule for additional epochs while retaining Adam history."""
+    return jax.tree.map(
+        lambda state: (
+            state._replace(count=jnp.zeros_like(state.count))
+            if isinstance(state, optax.ScaleByScheduleState)
+            else state
+        ),
+        opt_state,
+        is_leaf=lambda state: isinstance(state, optax.ScaleByScheduleState),
+    )
+
+
 def train(
     models: Models,
     dataloader: Iterable[Dict[str, np.ndarray]],
@@ -199,6 +224,8 @@ def train(
     With `resume=True`, weights, optimizer state, and projectors are restored
     from the rolling files and epoch numbering continues from the highest
     existing epoch checkpoint; `num_epochs` more epochs are then trained.
+    The learning-rate schedule restarts for these additional epochs; Adam's
+    moments and bias-correction count are preserved.
 
     Arguments:
       models: Tuple containing (encoder, predictor) Equinox modules
@@ -240,17 +267,7 @@ def train(
         len(dataloader) if hasattr(dataloader, "__len__") else 1000  # type: ignore[arg-type]
     )
     total_steps = max(1, num_epochs * batches_per_epoch)
-    warmup_steps = int(total_steps * 0.10)
-    decay_steps = max(1, total_steps - warmup_steps)
-    end_value = learning_rate * 0.01
-
-    lr_schedule = optax.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=learning_rate,
-        warmup_steps=warmup_steps,
-        decay_steps=decay_steps,
-        end_value=end_value,
-    )
+    lr_schedule = _make_lr_schedule(learning_rate, total_steps)
 
     optimizer = optax.chain(
         optax.clip_by_global_norm(1.0),
@@ -268,6 +285,7 @@ def train(
                 raise FileNotFoundError(f"Cannot resume: missing {path}")
         models = load_checkpoint(model_path, models)
         opt_state = load_checkpoint(latest_opt_path, opt_state)
+        opt_state = _restart_lr_schedule(opt_state)
         # Loading the subspace-only template also reads legacy tuple-form
         # projectors.eqx files and ignores their obsolete slice-projector leaf.
         subspace_projectors = load_checkpoint(projectors_path, subspace_projectors)
@@ -333,7 +351,7 @@ def train(
                 global_step += 1
 
                 if global_step == 1 or global_step % log_every == 0:
-                    current_lr = float(np.asarray(lr_schedule(global_step)))
+                    current_lr = float(np.asarray(lr_schedule(global_step - 1)))
                     print(
                         f"epoch {epoch + 1}/{last_epoch} | step {global_step} | "
                         f"loss {float(loss):.6f} | lr {current_lr:.2e}"

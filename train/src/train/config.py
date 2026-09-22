@@ -50,7 +50,7 @@ class PolicySFTConfig:
     lr_min: float = 1e-6
     lr_max: float = 1e-4
     num_workers: int = 4
-    min_frames: int = 420
+    min_frames: int = 450
     max_frames: int = 540
     log_every: int = 50
 
