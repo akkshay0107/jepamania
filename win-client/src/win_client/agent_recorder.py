@@ -160,12 +160,3 @@ class AgentCollector:
             writer.end_episode(termination="manual")
             writer.close()
             logging.info("AgentCollector shut down cleanly.")
-
-
-def main() -> None:
-    collector = AgentCollector()
-    collector.run()
-
-
-if __name__ == "__main__":
-    main()

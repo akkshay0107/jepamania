@@ -1,8 +1,6 @@
 """Real-time latent MPC control and rollout collection for Trackmania."""
 
-import argparse
 import datetime
-import logging
 from pathlib import Path
 from typing import Any, Optional
 
@@ -18,7 +16,6 @@ from core.interfaces import Encoder, Predictor
 from core.planners import create_planner
 
 from win_client.data_writer import HDF5Writer
-from win_client.env_patches import apply_online_rl_patches
 from win_client.settings import cfg
 from win_client.utils import get_tmrl_env, obs_to_dict
 
@@ -208,7 +205,7 @@ class MPCDriver:
         return tuple(completed_ids)
 
     def run(self) -> None:
-        """Compatibility entry point for standalone autonomous driving."""
+        """Run standalone autonomous driving with an owned environment."""
         env = get_tmrl_env()
         try:
             rollout_file = None
@@ -222,35 +219,3 @@ class MPCDriver:
             self.collect(env, rollout_file, self.max_episodes, iteration=0)
         finally:
             env.close()
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Collect real-time MPC rollouts")
-    parser.add_argument("--checkpoint-path", type=Path, required=True)
-    parser.add_argument("--value-head-path", type=Path, required=True)
-    parser.add_argument("--policy-head-path", type=Path, required=True)
-    parser.add_argument(
-        "--rollout-file",
-        type=Path,
-        default=Path("win-client/data/rl/rollouts/online_rollouts.h5"),
-    )
-    parser.add_argument("--num-episodes", type=int, default=5)
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    apply_online_rl_patches()
-    env = get_tmrl_env()
-    try:
-        driver = MPCDriver(
-            args.checkpoint_path, args.value_head_path, args.policy_head_path
-        )
-        driver.collect(env, args.rollout_file, args.num_episodes, iteration=0)
-    finally:
-        env.close()
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    main()

@@ -1,18 +1,11 @@
 """RL fine-tuning pipeline for joint adaptation of Sub-JEPA models and value head."""
-# ruff: noqa: E402
 
-import argparse
 import logging
 import math
-import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping, Sequence, Tuple, Union
-
-TRAIN_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(TRAIN_ROOT) not in sys.path:
-    sys.path.insert(0, str(TRAIN_ROOT))
 
 import equinox as eqx
 import jax
@@ -23,7 +16,6 @@ from core.config import (
     IMG_HIST_LEN,
     LAMBDA_RETURN_DECAY,
     SubJepaConfig,
-    load_config,
 )
 from core.dynamics import MLPPolicyHead, MLPPredictor, MLPValueHead
 from core.encoders import ConvEncoder, ViTEncoder, load_models_auto
@@ -31,7 +23,7 @@ from jaxtyping import Array, Float
 from omegaconf import OmegaConf
 
 import wandb
-from train.config import TrainConfig, load_train_config
+from train.config import TrainConfig
 from train.dataloader import DataLoader, SlidingWindowDataset
 from train.loss import generate_subspace_projectors, sub_jepa_loss
 from train.policy import (
@@ -46,17 +38,7 @@ from train.pretrain import (
 )
 from train.priority_dataloader import EpisodeSummary, read_completed_episode_summaries
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
-
-DEFAULT_CONFIG = TRAIN_ROOT.parent / "core" / "config.yaml"
-DEFAULT_TRAIN_CONFIG = TRAIN_ROOT / "config.yaml"
-DEFAULT_DATA_DIR = TRAIN_ROOT.parent / "win-client" / "data" / "rl" / "rollouts"
-DEFAULT_CHECKPOINT = (
-    TRAIN_ROOT.parent / "checkpoints" / "finetune" / "ft_model_latest.eqx"
-)
-DEFAULT_OUTPUT_DIR = TRAIN_ROOT.parent / "checkpoints" / "finetune"
+TRAIN_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_BOOTSTRAP_DATA_DIR = (
     TRAIN_ROOT.parent / "win-client" / "data" / "rl" / "bootstrap"
 )
@@ -868,77 +850,3 @@ def train_rl(
 
     logging.info(f"Fine-tuning complete. Checkpoints written to {output_dir}")
     return models, global_step
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Sub-JEPA RL Fine-Tuner")
-    parser.add_argument(
-        "--data-dir",
-        type=Path,
-        default=DEFAULT_DATA_DIR,
-        help="Reward-labeled HDF5 shards dir",
-    )
-    parser.add_argument(
-        "--checkpoint",
-        type=Path,
-        default=DEFAULT_CHECKPOINT,
-        help="Combined (encoder, predictor) eqx checkpoint",
-    )
-    parser.add_argument(
-        "--value-head",
-        type=Path,
-        required=True,
-        help="Existing value-head checkpoint",
-    )
-    parser.add_argument(
-        "--policy-head",
-        type=Path,
-        required=True,
-        help="Existing policy-head checkpoint",
-    )
-    parser.add_argument(
-        "--incumbent-median-frames",
-        type=float,
-        default=None,
-        help="Median successful incumbent duration used for online policy filtering",
-    )
-    parser.add_argument(
-        "--bootstrap-data-dir",
-        type=Path,
-        default=DEFAULT_BOOTSTRAP_DATA_DIR,
-    )
-    parser.add_argument(
-        "--ssl-human-dir",
-        type=Path,
-        default=DEFAULT_SSL_HUMAN_DIR,
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=DEFAULT_OUTPUT_DIR,
-        help="Output checkpoints directory",
-    )
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    model_cfg = load_config(str(DEFAULT_CONFIG))
-    train_cfg = load_train_config(str(DEFAULT_TRAIN_CONFIG))
-
-    train_rl(
-        data_dir=args.data_dir,
-        output_dir=args.output_dir,
-        checkpoint=args.checkpoint,
-        value_head_path=args.value_head,
-        policy_head_path=args.policy_head,
-        model_cfg=model_cfg,
-        train_cfg=train_cfg,
-        incumbent_median_frames=args.incumbent_median_frames,
-        bootstrap_data_dir=args.bootstrap_data_dir,
-        ssl_human_dir=args.ssl_human_dir,
-    )
-
-
-if __name__ == "__main__":
-    main()

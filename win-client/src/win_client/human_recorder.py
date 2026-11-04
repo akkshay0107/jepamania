@@ -114,8 +114,3 @@ class HumanRecorder:
                 self.writer.end_episode(termination="manual")
                 self.writer.close()
             env.close()
-
-
-if __name__ == "__main__":
-    recorder = HumanRecorder()
-    recorder.run()
