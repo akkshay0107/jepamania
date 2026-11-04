@@ -2,12 +2,32 @@
 
 import queue
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Dict, Generator, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    Dict,
+    Generator,
+    Optional,
+    Sequence,
+    Tuple,
+    TypedDict,
+    Union,
+    cast,
+)
 
 import h5py
 import numpy as np
 from core.actions import discretize_action_np, rescale_gas_np
+from jaxtyping import Float32
+
+
+class _ShardMetadata(TypedDict):
+    file_path: Path
+    episode_boundaries: dict[int, tuple[int, int]]
+    final_observation_only: bool
+    terminal_ends: set[int]
+    ram_bytes: int
 
 
 class _ShardPool:
@@ -63,8 +83,8 @@ class SlidingWindowDataset:
           discretize_actions: Whether continuous actions are converted to bins
           obs_type: Observation modality, either ``screen`` or ``lidar``
           load_rewards: Whether reward arrays are loaded into each sample
-          include_terminal_windows: Whether windows ending on a terminal action
-            are included; RL targets need these windows, while pretraining does not
+          include_terminal_windows: Allow the last action in legacy episodes
+            that have no separate final observation
           max_cache_bytes: Maximum RAM used by the shard cache
           episode_ids: Optional episode IDs accepted from every selected file
           episode_keys: Optional ``(file, episode_id)`` selections
@@ -106,7 +126,7 @@ class SlidingWindowDataset:
 
         self._pool = _ShardPool(self.max_cache_bytes)
 
-        self.shards: list[Dict[str, Any]] = []
+        self.shards: list[_ShardMetadata] = []
         self.shard_indices_map: np.ndarray = np.empty(0, dtype=np.int32)
         self.local_indices_map: np.ndarray = np.empty(0, dtype=np.int32)
         self.episode_indices_map: np.ndarray = np.empty(0, dtype=np.int32)
@@ -142,23 +162,20 @@ class SlidingWindowDataset:
                     episode_ids: np.ndarray = np.asarray(
                         f["episode_id"], dtype=np.int32
                     )
-                    total_frames = len(episode_ids)
-                    minimum_frames = (
-                        self.K if self.include_terminal_windows else self.K + 1
+                    final_observation_only = bool(
+                        f.attrs.get("final_observation_only", False)
                     )
-                    if total_frames < minimum_frames:
+                    require_next_observation = (
+                        final_observation_only or not self.include_terminal_windows
+                    )
+                    end_offset = self.K if require_next_observation else self.K - 1
+                    if len(episode_ids) <= end_offset:
                         continue
 
-                    if self.include_terminal_windows:
-                        indices = np.arange(total_frames - self.K + 1)
-                        valid_mask = (
-                            episode_ids[indices] == episode_ids[indices + self.K - 1]
-                        )
-                    else:
-                        indices = np.arange(total_frames - self.K)
-                        valid_mask = (
-                            episode_ids[indices] == episode_ids[indices + self.K]
-                        )
+                    indices = np.arange(len(episode_ids) - end_offset)
+                    valid_mask = (
+                        episode_ids[indices] == episode_ids[indices + end_offset]
+                    )
                     if self.episode_ids is not None:
                         valid_mask &= np.isin(
                             episode_ids[indices], tuple(self.episode_ids)
@@ -174,18 +191,23 @@ class SlidingWindowDataset:
                         valid_mask &= np.isin(episode_ids[indices], allowed_ids)
                     valid_local_ts = indices[valid_mask]
 
-                    if len(valid_local_ts) == 0:
+                    if valid_local_ts.size == 0:
                         continue
 
-                    episode_boundaries = self._read_episode_boundaries(f, episode_ids)
+                    episode_boundaries, terminal_ends = self._read_episode_boundaries(
+                        f, episode_ids, final_observation_only
+                    )
 
                     shard_idx = len(self.shards)
-                    shard_data = {
-                        "file_path": file_path,
-                        "episode_boundaries": episode_boundaries,
-                        "ram_bytes": self._estimate_shard_bytes(f),
-                    }
-                    self.shards.append(shard_data)
+                    self.shards.append(
+                        {
+                            "file_path": file_path,
+                            "episode_boundaries": episode_boundaries,
+                            "final_observation_only": final_observation_only,
+                            "terminal_ends": terminal_ends,
+                            "ram_bytes": self._estimate_shard_bytes(f),
+                        }
+                    )
 
                     shard_indices.append(
                         np.full(len(valid_local_ts), shard_idx, dtype=np.int32)
@@ -210,21 +232,26 @@ class SlidingWindowDataset:
 
     @staticmethod
     def _read_episode_boundaries(
-        f: h5py.File, episode_ids: np.ndarray
-    ) -> Dict[int, Tuple[int, int]]:
-        episode_boundaries: Dict[int, Tuple[int, int]] = {}
+        f: h5py.File, episode_ids: np.ndarray, final_observation_only: bool
+    ) -> tuple[dict[int, tuple[int, int]], set[int]]:
+        """Read episode row ranges and the exclusive ends of terminal episodes."""
+        episode_boundaries: dict[int, tuple[int, int]] = {}
+        terminal_ends: set[int] = set()
 
         if "metadata" in f:
-            metadata_grp = f["metadata"]
-            for ep_name in metadata_grp.keys():  # type: ignore[union-attr]
-                ep_id = int(ep_name.split("_")[1])
-                ep_grp = metadata_grp[ep_name]  # type: ignore[union-attr]
-                frame_start = int(ep_grp.attrs["frame_start"])  # type: ignore[union-attr]
-                frame_end = int(ep_grp.attrs["frame_end"])  # type: ignore[union-attr]
-                episode_boundaries[ep_id] = (frame_start, frame_end)
+            metadata = cast(h5py.Group, f["metadata"])
+            for episode_name in map(str, metadata):
+                episode_id = int(episode_name.split("_")[1])
+                episode = cast(h5py.Group, metadata[episode_name])
+                frame_start = int(cast(int, episode.attrs["frame_start"]))
+                frame_end = int(cast(int, episode.attrs["frame_end"]))
+                episode_boundaries[episode_id] = (frame_start, frame_end)
+                if final_observation_only and frame_end > frame_start:
+                    reason = str(episode.attrs["termination"])
+                    if reason in {"done", "respawn", "stuck"}:
+                        terminal_ends.add(frame_end)
 
-        # fallback for shards missing metadata or with incomplete
-        # episode coverage — derive boundaries from consecutive-id changes
+        # Recover missing row ranges from changes in the recorded episode IDs.
         present_ids = set(episode_ids)
         if not present_ids.issubset(episode_boundaries):
             change_mask = np.empty(len(episode_ids), dtype=bool)
@@ -238,12 +265,10 @@ class SlidingWindowDataset:
                 if ep_id_int not in episode_boundaries:
                     episode_boundaries[ep_id_int] = (int(start), int(end))
 
-        return episode_boundaries
+        return episode_boundaries, terminal_ends
 
     def _build_frame_starts_map(self) -> None:
-        """
-        Pre-caches the episode frame_start for every sample.
-        """
+        """Cache both ends of each sample's episode for the read paths."""
         shards = self.shards
         shard_map = self.shard_indices_map
         ep_map = self.episode_indices_map
@@ -252,8 +277,7 @@ class SlidingWindowDataset:
         frame_ends = np.empty(len(shard_map), dtype=np.int32)
         for i in range(len(shard_map)):
             boundaries = shards[shard_map[i]]["episode_boundaries"]
-            frame_starts[i] = boundaries[ep_map[i]][0]
-            frame_ends[i] = boundaries[ep_map[i]][1]
+            frame_starts[i], frame_ends[i] = boundaries[ep_map[i]]
         self.frame_starts_map = frame_starts
         self.frame_ends_map = frame_ends
 
@@ -274,9 +298,7 @@ class SlidingWindowDataset:
         shuffled_indices = rng.permutation(num_episodes)
         val_pair_indices = unique_pairs[shuffled_indices[:num_val_episodes]]
 
-        # guaranteed unique keys - might overflow if the episodes are no
-        # longer tagged incrementally from 0.
-        # TODO: replace with a hash if episode id convention changes
+        # Give each shard a disjoint range of keys for its episode IDs.
         offset = int(self.episode_indices_map.max()) + 1
         val_keys = (
             val_pair_indices[:, 0].astype(np.int64) * offset + val_pair_indices[:, 1]
@@ -315,21 +337,49 @@ class SlidingWindowDataset:
     def __len__(self) -> int:
         return len(self.shard_indices_map)
 
+    def _transition_window(
+        self, shard_idx: int, local_t: int, frame_end: int, action_rows: int
+    ) -> tuple[int, Float32[np.ndarray, "rollout_steps"]]:
+        """Return the usable action count and continuation mask for a window."""
+        shard = self.shards[shard_idx]
+        final_observation_only = shard["final_observation_only"]
+        # A recorded final observation is the target of the preceding action.
+        action_end = frame_end - 1 if final_observation_only else frame_end
+        steps = min(self.K, max(0, min(action_end, action_rows) - local_t))
+        continuation = np.zeros(self.K, dtype=np.float32)
+        continuation[:steps] = 1.0
+        terminated = not final_observation_only or frame_end in shard["terminal_ends"]
+        if steps > 0 and terminated and local_t + steps == action_end:
+            continuation[steps - 1] = 0.0
+        return steps, continuation
+
     def _read_sample(
         self,
         f: h5py.File,
         local_t: int,
         frame_start: int,
         frame_end: int,
+        shard_idx: int,
     ) -> Dict[str, np.ndarray]:
-        obs_ds = f[f"observations/{self.obs_type}"]
-        telem_ds = f["observations/telemetry"]
-        actions_ds = f["actions"]
+        """Read a rollout window from an open HDF5 file.
+
+        Arguments:
+          f: Open HDF5 shard.
+          local_t: Row containing the first action.
+          frame_start: First row of the episode.
+          frame_end: Exclusive end of the episode.
+          shard_idx: Index of the shard whose layout defines the action boundary.
+
+        Returns:
+          Observation histories, actions, masks, and optional rewards.
+        """
+        obs_ds = cast(h5py.Dataset, f[f"observations/{self.obs_type}"])
+        telem_ds = cast(h5py.Dataset, f["observations/telemetry"])
+        actions_ds = cast(h5py.Dataset, f["actions"])
 
         slice_start = max(local_t - self.H + 1, frame_start)
-        raw_chunk: np.ndarray = obs_ds[  # pyright: ignore[reportIndexIssue, reportAssignmentType]
-            slice_start : min(local_t + self.K + 1, frame_end)
-        ]
+        slice_end = min(local_t + self.K + 1, frame_end)
+        raw_chunk = np.asarray(obs_ds[slice_start:slice_end])
 
         is_screen = self.obs_type == "screen"
         if is_screen and raw_chunk.ndim >= 3 and raw_chunk.shape[1] == 1:
@@ -354,10 +404,7 @@ class SlidingWindowDataset:
         )
 
         target_count = min(self.K, max(0, frame_end - local_t - 1))
-        telem_slice = np.asarray(
-            telem_ds[local_t : min(local_t + self.K + 1, frame_end)],  # pyright: ignore[reportIndexIssue]
-            dtype=np.float32,
-        )
+        telem_slice = np.asarray(telem_ds[local_t:slice_end], dtype=np.float32)
         if telem_slice.shape[0] < self.K + 1:
             telem_slice = np.pad(
                 telem_slice,
@@ -367,14 +414,15 @@ class SlidingWindowDataset:
         telemetry_t = telem_slice[0]
         telemetry_targets = telem_slice[1:]
 
-        available_steps = min(
-            self.K,
-            max(0, frame_end - local_t),
-            max(0, len(actions_ds) - local_t),  # pyright: ignore[reportArgumentType]
+        available_steps, mask_seq = self._transition_window(
+            shard_idx,
+            local_t,
+            frame_end,
+            len(actions_ds),
         )
 
         raw_actions = np.asarray(
-            actions_ds[local_t : local_t + available_steps],  # pyright: ignore[reportIndexIssue]
+            actions_ds[local_t : local_t + available_steps],
             dtype=np.float32,
         )
         raw_actions = rescale_gas_np(raw_actions)
@@ -389,12 +437,6 @@ class SlidingWindowDataset:
             )
         if available_steps > 0:
             actions_seq[:available_steps] = raw_actions
-
-        mask_seq = np.zeros(self.K, dtype=np.float32)
-        if available_steps > 0:
-            mask_seq[:available_steps] = 1.0
-            if local_t + available_steps >= frame_end:
-                mask_seq[available_steps - 1] = 0.0
 
         target_mask_seq = np.zeros(self.K, dtype=np.float32)
         if target_count > 0:
@@ -412,13 +454,13 @@ class SlidingWindowDataset:
 
         if self.load_rewards:
             if "rewards" in f:
-                rewards_ds = f["rewards"]
+                rewards_ds = cast(h5py.Dataset, f["rewards"])
                 avail_rew = min(
                     available_steps,
-                    max(0, len(rewards_ds) - local_t),  # pyright: ignore[reportArgumentType]
+                    max(0, len(rewards_ds) - local_t),
                 )
                 raw_rewards = np.asarray(
-                    rewards_ds[local_t : local_t + avail_rew],  # pyright: ignore[reportIndexIssue]
+                    rewards_ds[local_t : local_t + avail_rew],
                     dtype=np.float32,
                 )
                 rewards_seq = np.zeros(self.K, dtype=np.float32)
@@ -436,37 +478,38 @@ class SlidingWindowDataset:
         Telemetry/actions/rewards are stored as float32 in the cache, so their
         footprint is element count times four bytes regardless of on-disk dtype.
         """
-        obs_ds = f[f"observations/{self.obs_type}"]
-        total = int(np.prod(obs_ds.shape)) * obs_ds.dtype.itemsize  # pyright: ignore[reportAttributeAccessIssue]
-        for name in ("observations/telemetry", "actions"):
-            total += int(np.prod(f[name].shape)) * 4  # pyright: ignore[reportAttributeAccessIssue]
+        obs_ds = cast(h5py.Dataset, f[f"observations/{self.obs_type}"])
+        total = int(np.prod(obs_ds.shape)) * obs_ds.dtype.itemsize
+        float_datasets = ["observations/telemetry", "actions"]
         if self.load_rewards and "rewards" in f:
-            total += int(np.prod(f["rewards"].shape)) * 4  # pyright: ignore[reportAttributeAccessIssue]
+            float_datasets.append("rewards")
+        for name in float_datasets:
+            total += int(np.prod(cast(h5py.Dataset, f[name]).shape)) * 4
         return total
 
     def _materialize_shard(self, shard_idx: int) -> Dict[str, Any]:
         """Read a whole shard from disk into the array layout the pool serves."""
         shard = self.shards[shard_idx]
         with h5py.File(shard["file_path"], "r") as f:
-            obs_ds = f[f"observations/{self.obs_type}"]
-            raw_obs = obs_ds[:]  # pyright: ignore[reportIndexIssue]
+            obs_ds = cast(h5py.Dataset, f[f"observations/{self.obs_type}"])
+            raw_obs = np.asarray(obs_ds[:])
             if (
                 self.obs_type == "screen"
-                and raw_obs.ndim >= 3  # pyright: ignore[reportAttributeAccessIssue]
-                and raw_obs.shape[1] == 1  # pyright: ignore[reportAttributeAccessIssue]
+                and raw_obs.ndim >= 3
+                and raw_obs.shape[1] == 1
             ):
-                raw_obs = raw_obs[:, 0]  # pyright: ignore[reportIndexIssue]
+                raw_obs = raw_obs[:, 0]
             telem = np.asarray(
-                f["observations/telemetry"][:],  # pyright: ignore[reportIndexIssue]
+                cast(h5py.Dataset, f["observations/telemetry"])[:],
                 dtype=np.float32,
             )
             actions = np.asarray(
-                f["actions"][:],  # pyright: ignore[reportIndexIssue]
+                cast(h5py.Dataset, f["actions"])[:],
                 dtype=np.float32,
             )
             rewards = (
                 np.asarray(
-                    f["rewards"][:],  # pyright: ignore[reportIndexIssue]
+                    cast(h5py.Dataset, f["rewards"])[:],
                     dtype=np.float32,
                 )
                 if self.load_rewards and "rewards" in f
@@ -553,9 +596,25 @@ class SlidingWindowDataset:
                     pool.refcounts[shard_idx] = rc - 1
 
     def _read_sample_ram(
-        self, cached: Dict[str, Any], local_t: int, frame_start: int, frame_end: int
+        self,
+        cached: Dict[str, Any],
+        local_t: int,
+        frame_start: int,
+        frame_end: int,
+        shard_idx: int,
     ) -> Dict[str, np.ndarray]:
-        """Slice contiguous transition stack directly from cached RAM arrays."""
+        """Read a rollout window from the cached shard arrays.
+
+        Arguments:
+          cached: Materialized arrays for the shard.
+          local_t: Row containing the first action.
+          frame_start: First row of the episode.
+          frame_end: Exclusive end of the episode.
+          shard_idx: Index of the shard whose layout defines the action boundary.
+
+        Returns:
+          Observation histories, actions, masks, and optional rewards.
+        """
         obs_arr = cached["obs"]
         telem_arr = cached["telem"]
         actions_arr = cached["actions"]
@@ -594,10 +653,8 @@ class SlidingWindowDataset:
         telemetry_t = telem_slice[0]
         telemetry_targets = telem_slice[1:]
 
-        available_steps = min(
-            self.K,
-            max(0, frame_end - local_t),
-            max(0, len(actions_arr) - local_t),
+        available_steps, mask_seq = self._transition_window(
+            shard_idx, local_t, frame_end, len(actions_arr)
         )
 
         raw_actions = actions_arr[local_t : local_t + available_steps]
@@ -613,12 +670,6 @@ class SlidingWindowDataset:
             )
         if available_steps > 0:
             actions_seq[:available_steps] = raw_actions
-
-        mask_seq = np.zeros(self.K, dtype=np.float32)
-        if available_steps > 0:
-            mask_seq[:available_steps] = 1.0
-            if local_t + available_steps >= frame_end:
-                mask_seq[available_steps - 1] = 0.0
 
         target_mask_seq = np.zeros(self.K, dtype=np.float32)
         if target_count > 0:
@@ -658,11 +709,13 @@ class SlidingWindowDataset:
 
         cached = self._pool.peek(shard_idx)
         if cached is not None:
-            return self._read_sample_ram(cached, local_t, frame_start, frame_end)
+            return self._read_sample_ram(
+                cached, local_t, frame_start, frame_end, shard_idx
+            )
 
         shard = self.shards[shard_idx]
         with h5py.File(shard["file_path"], "r") as f:
-            return self._read_sample(f, local_t, frame_start, frame_end)
+            return self._read_sample(f, local_t, frame_start, frame_end, shard_idx)
 
 
 # One window's worth of an epoch: sample indices to serve, in order, and the
@@ -813,8 +866,6 @@ class DataLoader:
         return False
 
     def _prefetch_loop(self, windows: list[Window]) -> None:
-        from concurrent.futures import ThreadPoolExecutor
-
         ds = self.dataset
         workers = max(1, self.num_workers)
         prefetch_count = max(4, workers * 2)
@@ -853,7 +904,9 @@ class DataLoader:
                 ds.release_shards(held)
             self._put_blocking(None)
 
-    def _emit_window(self, executor, indices: np.ndarray, prefetch_count: int) -> bool:
+    def _emit_window(
+        self, executor: ThreadPoolExecutor, indices: np.ndarray, prefetch_count: int
+    ) -> bool:
         """Collates and enqueues one window's batches; False aborts the epoch."""
         num_batches = self._num_batches(len(indices))
         futures = []
@@ -873,6 +926,7 @@ class DataLoader:
             try:
                 batch = futures.pop(0).result()
             except Exception as e:
+                # End prefetch so the consumer receives the end-of-epoch sentinel.
                 print(f"Warning: DataLoader worker failed to collate batch: {e}")
                 return False
 
@@ -903,7 +957,7 @@ class DataLoader:
         group_starts = np.flatnonzero(change_mask)
         group_ends = np.append(group_starts[1:], batch_size)
 
-        samples: list[Dict[str, np.ndarray]] = [None] * batch_size  # type: ignore[list-item]
+        samples: list[Dict[str, np.ndarray]] = []
 
         for g_start, g_end in zip(group_starts, group_ends):
             shard_idx = int(sorted_shard_ids[g_start])
@@ -915,8 +969,10 @@ class DataLoader:
                     local_t = int(ds.local_indices_map[ds_idx])
                     frame_start = int(ds.frame_starts_map[ds_idx])
                     frame_end = int(ds.frame_ends_map[ds_idx])
-                    samples[pos] = ds._read_sample_ram(
-                        cached, local_t, frame_start, frame_end
+                    samples.append(
+                        ds._read_sample_ram(
+                            cached, local_t, frame_start, frame_end, shard_idx
+                        )
                     )
                 continue
 
@@ -927,7 +983,9 @@ class DataLoader:
                     local_t = int(ds.local_indices_map[ds_idx])
                     frame_start = int(ds.frame_starts_map[ds_idx])
                     frame_end = int(ds.frame_ends_map[ds_idx])
-                    samples[pos] = ds._read_sample(f, local_t, frame_start, frame_end)
+                    samples.append(
+                        ds._read_sample(f, local_t, frame_start, frame_end, shard_idx)
+                    )
 
         unsort_order = np.argsort(sort_order)
         ordered = [samples[i] for i in unsort_order]
