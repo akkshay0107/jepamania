@@ -28,7 +28,7 @@ from core.config import IMG_HIST_LEN, load_config
 from core.dynamics import MLPPredictor
 from core.encoders import ViTEncoder
 from core.interfaces import Encoder, Predictor
-from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree
+from jaxtyping import Array, Float, PRNGKeyArray, PyTree
 from omegaconf import OmegaConf
 
 import wandb
@@ -55,13 +55,13 @@ CheckpointT = TypeVar("CheckpointT")
 def _rollout_latent_sequence(
     predictor: Predictor,
     z0: Float[Array, "latent_dim"],
-    actions: Int[Array, "K"],
+    actions: Float[Array, "K 3"],
 ) -> Float[Array, "K latent_dim"]:
-    """Rolls a single latent forward through K action tokens, returning all
+    """Rolls a single latent forward through K controls, returning all
     intermediate latents."""
 
     def step(
-        z: Float[Array, "latent_dim"], action: Int[Array, ""]
+        z: Float[Array, "latent_dim"], action: Float[Array, "3"]
     ) -> Tuple[Float[Array, "latent_dim"], Float[Array, "latent_dim"]]:
         next_z = predictor(z, action)
         return next_z, next_z
@@ -86,7 +86,7 @@ def compute_loss(
         "telemetry": batch["telemetry_t"],
     }
     num_target_steps = batch["obs_stack_targets"].shape[1]
-    actions = batch["actions_seq"][:, :num_target_steps].astype(jnp.int32)
+    actions = jnp.asarray(batch["actions_seq"][:, :num_target_steps], dtype=jnp.float32)
     z_t = jax.vmap(encoder)(obs_t)
 
     obs_targets = {
@@ -447,7 +447,7 @@ def main() -> None:
         data_dir=args.data_dir,
         history_len=IMG_HIST_LEN,
         rollout_len=train_cfg.pretrain.rollout_len,
-        discretize_actions=True,
+        discretize_actions=False,
     )
     if len(dataset) == 0:
         raise SystemExit(f"No valid transitions found in {args.data_dir}")

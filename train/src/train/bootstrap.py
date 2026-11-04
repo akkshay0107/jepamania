@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from core.actions import ACTION_GRID_JAX
 from core.config import (
     IMG_HIST_LEN,
     LAMBDA_RETURN_DECAY,
@@ -105,10 +106,10 @@ def compute_value_loss(
     mask = jnp.asarray(batch.get("mask_seq", jnp.ones_like(rewards)), dtype=jnp.float32)
 
     if predictor is not None and "actions_seq" in batch:
-        actions = batch["actions_seq"].astype(jnp.int32)
+        controls = ACTION_GRID_JAX[jnp.asarray(batch["actions_seq"], dtype=jnp.int32)]
         z_pred_sequence = jax.vmap(
             lambda z0, acts: _rollout_latent_sequence(predictor, z0, acts)
-        )(z_t, actions)
+        )(z_t, controls)
         v_pred_sequence = jax.vmap(jax.vmap(value_head))(
             jax.lax.stop_gradient(z_pred_sequence)
         )

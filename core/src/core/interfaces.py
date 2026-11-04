@@ -22,7 +22,7 @@ class Predictor(Protocol):
     """
 
     def __call__(
-        self, latent_state: Float[Array, "latent_dim"], action: Int[Array, ""]
+        self, latent_state: Float[Array, "latent_dim"], action: Float[Array, "3"]
     ) -> Float[Array, "latent_dim"]: ...
 
 

@@ -6,7 +6,7 @@ import jax.numpy as jnp
 from jax.tree_util import Partial
 from jaxtyping import Array, Float, Int, PRNGKeyArray
 
-from core.actions import unit_transition_cost_matrix
+from core.actions import ACTION_GRID_JAX, unit_transition_cost_matrix
 from core.config import NUM_ACTIONS, PlannerConfig
 from core.interfaces import Predictor
 
@@ -88,14 +88,14 @@ class CEMPlanner(eqx.Module):
     def _step_fn(
         self,
         latent: Float[Array, "latent_dim"],
-        action: Int[Array, ""],
+        action: Float[Array, "3"],
     ) -> Tuple[Float[Array, "latent_dim"], None]:
         next_state = self.predictor(latent, action)
         return next_state, None
 
     def _rollout_fn(
         self,
-        actions: Int[Array, "sequence_len"],
+        actions: Float[Array, "sequence_len 3"],
         current_latent_state: Float[Array, "latent_dim"],
     ) -> Float[Array, ""]:
         scan_step = Partial(self._step_fn)
@@ -116,7 +116,7 @@ class CEMPlanner(eqx.Module):
         rollout_wrapper = Partial(
             self._rollout_fn, current_latent_state=current_latent_state
         )
-        scores = jax.vmap(rollout_wrapper)(action_seqs)
+        scores = jax.vmap(rollout_wrapper)(ACTION_GRID_JAX[action_seqs])
         if self.smoothness_weight > 0.0:
             penalties = _compute_sequence_penalties(
                 action_seqs, self.smoothness_weight, prev_action

@@ -1,21 +1,20 @@
 encoder:
-  latent_dim: 192
+  latent_dim: 128
   transformer:
-    num_layers: 3
+    num_layers: 2
     num_heads: 4
-    mlp_ratio: 4.0
+    mlp_ratio: 2.0
 
 predictor:
-  latent_dim: 192
-  action_embed_dim: 16
-  hidden_dim: 256
+  latent_dim: 128
+  hidden_dim: 128
 
 value_head:
-  latent_dim: 192
+  latent_dim: 128
   hidden_dim: 256
 
 policy_head:
-  latent_dim: 192
+  latent_dim: 128
   hidden_dim: 256
   temperature: 2.0
   epsilon: 0.05

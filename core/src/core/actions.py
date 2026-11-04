@@ -27,6 +27,14 @@ GAS_BRAKE_VALUES_JAX = jnp.asarray(GAS_BRAKE_VALUES_NP, dtype=jnp.float32)
 NUM_STEER = len(STEER_VALUES_NP)
 NUM_GAS_BRAKE = len(GAS_BRAKE_VALUES_NP)
 NUM_ACTIONS = NUM_STEER * NUM_GAS_BRAKE
+ACTION_GRID_NP = np.column_stack(
+    (
+        np.tile(GAS_BRAKE_VALUES_NP, (NUM_STEER, 1)),
+        np.repeat(STEER_VALUES_NP, NUM_GAS_BRAKE),
+    )
+)
+ACTION_GRID_JAX = jnp.asarray(ACTION_GRID_NP, dtype=jnp.float32)
+NEUTRAL_ACTION = int(np.flatnonzero(np.all(ACTION_GRID_NP == 0.0, axis=1))[0])
 
 
 def discretize_action(continuous_action: Float[Array, "... 3"]) -> Int[Array, "..."]:
@@ -72,15 +80,7 @@ def to_continuous_action(discrete_action: Int[Array, "..."]) -> Float[Array, "..
         (discrete_action < 0) | (discrete_action >= NUM_ACTIONS),
         f"Discrete action index must be in [0, {NUM_ACTIONS - 1}]",
     )
-    steer_bin = discrete_action // NUM_GAS_BRAKE
-    gb_bin = discrete_action % NUM_GAS_BRAKE
-
-    steer = STEER_VALUES_JAX[steer_bin]
-    gb_pair = GAS_BRAKE_VALUES_JAX[gb_bin]
-    gas = gb_pair[..., 0]
-    brake = gb_pair[..., 1]
-
-    return jnp.stack([gas, brake, steer], axis=-1)
+    return ACTION_GRID_JAX[discrete_action]
 
 
 def discretize_action_np(continuous_action: np.ndarray) -> np.ndarray:
@@ -127,15 +127,7 @@ def to_continuous_action_np(
     discrete_arr = np.asarray(discrete_action)
     if not np.all((discrete_arr >= 0) & (discrete_arr < NUM_ACTIONS)):
         raise ValueError(f"Discrete action index out of bounds [0, {NUM_ACTIONS - 1}]")
-    steer_bin = discrete_arr // NUM_GAS_BRAKE
-    gb_bin = discrete_arr % NUM_GAS_BRAKE
-
-    steer = STEER_VALUES_NP[steer_bin]
-    gb_pair = GAS_BRAKE_VALUES_NP[gb_bin]
-    gas = gb_pair[..., 0]
-    brake = gb_pair[..., 1]
-
-    return np.stack([gas, brake, steer], axis=-1)
+    return ACTION_GRID_NP[discrete_arr]
 
 
 def rescale_gas_np(actions: np.ndarray, *, axis: int | None = None) -> np.ndarray:
@@ -153,9 +145,8 @@ def rescale_gas_np(actions: np.ndarray, *, axis: int | None = None) -> np.ndarra
 
 @functools.lru_cache(maxsize=1)
 def _unit_transition_cost_matrix_np() -> np.ndarray:
-    all_actions = to_continuous_action_np(np.arange(NUM_ACTIONS))
-    gas_brake = all_actions[:, 0:2]
-    steer = all_actions[:, 2]
+    gas_brake = ACTION_GRID_NP[:, 0:2]
+    steer = ACTION_GRID_NP[:, 2]
 
     norm_steer_sq = np.square((steer[:, None] - steer[None, :]) / 2.0)
     norm_gb_sq = (

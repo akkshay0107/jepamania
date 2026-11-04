@@ -12,6 +12,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from core.actions import ACTION_GRID_JAX
 from core.config import (
     IMG_HIST_LEN,
     LAMBDA_RETURN_DECAY,
@@ -154,10 +155,10 @@ def compute_joint_loss(
     z_t = jax.vmap(encoder)(obs_t)
     z_target_sequence = jax.vmap(jax.vmap(encoder))(obs_target_sequence)
 
-    actions = batch["actions_seq"].astype(jnp.int32)
+    controls = ACTION_GRID_JAX[jnp.asarray(batch["actions_seq"], dtype=jnp.int32)]
     z_pred_sequence = jax.vmap(
         lambda z0, acts: _rollout_latent_sequence(predictor, z0, acts)
-    )(z_t, actions)
+    )(z_t, controls)
 
     target_indices = _target_indices(batch, z_pred_sequence.shape[1])
     batch_indices = jnp.arange(z_t.shape[0])
@@ -324,7 +325,7 @@ def compute_online_policy_loss(
         lambda latent, action_seq: _rollout_latent_sequence(
             predictor, latent, action_seq
         )
-    )(latents, actions)
+    )(latents, ACTION_GRID_JAX[actions])
     predicted_values = jax.vmap(jax.vmap(value_head))(
         jax.lax.stop_gradient(predicted_latents)
     )

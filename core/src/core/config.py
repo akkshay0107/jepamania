@@ -4,6 +4,7 @@ from omegaconf import OmegaConf
 
 # Fixed TMRL Constants (TM2020FULL)
 IMG_HIST_LEN: int = 4
+IMG_SIZE: int = 64
 # The TMRL Full env observation carries exactly 9 telemetry floats:
 # speed, gear, rpm, plus rtgym's two-action chronological buffer (3 floats
 # each). The older buffered action comes first, followed by the most recent.
@@ -15,7 +16,7 @@ TELEMETRY_FEATURES: int = 9
 # Steering [-1.0, 1.0] -> discretized into 9 bins
 # so 54 distinct actions possible at any given moment of time
 NUM_ACTIONS: int = 54
-LATENT_DIM: int = 192
+LATENT_DIM: int = 128
 
 # In TMRL Trackmania (20 FPS), max progress reward per step is ~10.0 at top speed.
 # Fixed terminal penalty for getting stuck or exceeding max frames is 10x in negative.
@@ -28,33 +29,32 @@ LAMBDA_RETURN_DECAY: float = 0.95
 
 @dataclass
 class TransformerConfig:
-    num_layers: int = 3
+    num_layers: int = 2
     num_heads: int = 4
-    mlp_ratio: float = 4.0
+    mlp_ratio: float = 2.0
 
 
 @dataclass
 class EncoderConfig:
-    latent_dim: int = 192
+    latent_dim: int = LATENT_DIM
     transformer: TransformerConfig = field(default_factory=TransformerConfig)
 
 
 @dataclass
 class PredictorConfig:
-    latent_dim: int = 192
-    action_embed_dim: int = 16
-    hidden_dim: int = 256
+    latent_dim: int = LATENT_DIM
+    hidden_dim: int = 128
 
 
 @dataclass
 class ValueHeadConfig:
-    latent_dim: int = 192
+    latent_dim: int = LATENT_DIM
     hidden_dim: int = 256
 
 
 @dataclass
 class PolicyHeadConfig:
-    latent_dim: int = 192
+    latent_dim: int = LATENT_DIM
     hidden_dim: int = 256
     temperature: float = 2.0
     epsilon: float = 0.05

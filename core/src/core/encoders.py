@@ -38,7 +38,8 @@ def _get_2d_sincos_pos_embed_np(latent_dim: int, grid_size: int = 4) -> np.ndarr
     grid_y = grid_y.flatten()
     grid_x = grid_x.flatten()
 
-    assert latent_dim % 2 == 0, f"latent_dim must be even, got {latent_dim}"
+    if latent_dim <= 0 or latent_dim % 4 != 0:
+        raise ValueError("2D positions require a positive width divisible by four.")
     d = latent_dim // 2
 
     omega = 1.0 / (10000 ** (np.arange(d // 2) * 2 / d))
@@ -54,7 +55,7 @@ def _get_2d_sincos_pos_embed_np(latent_dim: int, grid_size: int = 4) -> np.ndarr
 
 def get_2d_sincos_pos_embed(
     latent_dim: int, grid_size: int = 4
-) -> Float[Array, "16 latent_dim"]:
+) -> Float[Array, "tokens latent_dim"]:
     return jnp.asarray(_get_2d_sincos_pos_embed_np(latent_dim, grid_size))
 
 
@@ -179,8 +180,7 @@ class AttentionPool(eqx.Module):
 
 
 class ViTEncoder(eqx.Module):
-    # Kept as a pytree leaf to preserve compatibility with existing checkpoints.
-    latent_dim: int
+    latent_dim: int = eqx.field(static=True)
     conv_stem: ConvStem
     tel_proj: eqx.nn.Linear
     transformer: TransformerStack
@@ -209,6 +209,12 @@ class ViTEncoder(eqx.Module):
             num_heads=cfg.transformer.num_heads,
             key=key_pool,
         )
+
+    def __check_init__(self) -> None:
+        if self.latent_dim <= 0 or self.latent_dim % 4 != 0:
+            raise ValueError("ViT width must be positive and divisible by four.")
+        if self.latent_dim % self.pool.mha.num_heads != 0:
+            raise ValueError("ViT width must be divisible by the number of heads.")
 
     def __call__(self, observations: Mapping[str, Any]) -> Float[Array, "latent_dim"]:
         screen = observations["screen"]

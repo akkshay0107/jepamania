@@ -48,7 +48,7 @@ def main():
     telemetry = jax.random.normal(key_telemetry, (TELEMETRY_FEATURES,))
 
     latent_state = jax.random.normal(key_latent, (pred_cfg.latent_dim,))
-    action = jnp.array(0, dtype=jnp.int32)
+    action = jnp.zeros(3, dtype=jnp.float32)
 
     @eqx.filter_jit
     def run_vit_encoder(screen_data, telemetry_data):

@@ -13,9 +13,9 @@ JEPAMania separates functional deep learning components into decoupled workspace
 1. **Observation & Telemetry Capture (`win-client`)**  
    Screen frames and nine telemetry values (speed, gear, RPM, and two previous controls) are streamed from Trackmania via Openplanet and `rtgym`.
 2. **Latent Encoding (`core.encoders`)**  
-   The ViT screen encoder compresses frame stacks and telemetry into a compact latent embedding vector $z_t \in \mathbb{R}^{192}$.
+   A convolutional stem turns four grayscale frames into a 4×4 grid of visual tokens. A two-block ViT processes these tokens and one telemetry token, then pools them into a 128-dimensional latent state.
 3. **Action-Conditioned Latent Rollout (`core.dynamics`)**  
-   An autoregressive dynamics predictor (`MLPPredictor`) rolls forward future latent states $z_{t+k}$ across a $K$-step planning horizon given candidate action sequences without frame decoding.
+   A residual MLP predicts the change in latent state from gas, brake, and steering values. SSL uses the recorded controls directly. CEM searches the existing action grid and looks up the corresponding physical controls for each rollout.
 4. **Real-Time MPC Planning (`core.planners`)**  
    A Cross-Entropy Method (CEM) Model-Predictive Control planner evaluates candidate latent trajectories against fine-tuned value heads (`MLPValueHead`) or smoothness penalties. Latency is hardware-dependent and should be measured with the included benchmarks.
 5. **Cyclic Self-Improvement (`train` & `rl_loop.py`)**  
@@ -79,6 +79,8 @@ uv run --package win-client python win-client/record.py --mode agent
 ### Step 2: Self-Supervised Sub-JEPA Pretraining (`train/src/train/pretrain.py`)
 Pretrain the joint `(Encoder, Predictor)` world model on recorded HDF5 shards.
 
+Start a fresh checkpoint directory when switching from the previous architecture. The compact model needs new world-model, optimizer, and bootstrap checkpoints.
+
 ```bash
 # Start fresh pretraining with Vision Transformer (ViT) encoder
 uv run --package train python -m train.pretrain \
@@ -112,7 +114,7 @@ Run supervised value bootstrapping and optional joint fine-tuning on pre-recorde
 ```bash
 # Bootstrap value head from a pretrained model checkpoint
 uv run --package train python -m train.bootstrap \
-  --checkpoint checkpoints/pretrain/model_latest.eqx \
+  --checkpoint checkpoints/pretrain/pretrain_model_latest.eqx \
   --data-dir win-client/data/rl/bootstrap \
   --output-dir checkpoints/finetune
 ```
@@ -181,10 +183,11 @@ Controls neural network dimensions, transformer backbones, and default latent pl
 
 | Parameter | Default | Tuning Guidance |
 | :--- | :--- | :--- |
-| `encoder.latent_dim` | `192` | Latent vector size ($d$). Must match `predictor.latent_dim`. Increase to `256` or `384` for higher visual feature capacity. |
-| `encoder.transformer.num_layers` | `3` | Number of ViT self-attention blocks used for spatial observation encoding. |
+| `encoder.latent_dim` | `128` | Shared latent width for the encoder, predictor, value head, and policy head. |
+| `encoder.transformer.num_layers` | `2` | Number of ViT self-attention blocks used for spatial observation encoding. |
 | `encoder.transformer.num_heads` | `4` | Number of attention heads in each ViT block. |
-| `predictor.hidden_dim` | `256` | MLP hidden layer width for latent transition dynamics prediction. |
+| `encoder.transformer.mlp_ratio` | `2.0` | Feed-forward expansion in each ViT block. |
+| `predictor.hidden_dim` | `128` | Width of each of the three hidden layers in the latent transition MLP. |
 | `planner.sequence_len` | `5` | MPC planning horizon ($K$ steps forward into the future). |
 | `planner.cem_iters` | `4` | Number of CEM distribution-refinement iterations per control tick. |
 | `planner.cem_samples` | `128` | Candidate action sequences sampled per CEM iteration. |

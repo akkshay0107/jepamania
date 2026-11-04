@@ -9,6 +9,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from core.actions import ACTION_GRID_JAX
 from core.interfaces import Encoder, Planner, Predictor
 
 
@@ -150,7 +151,9 @@ class AsyncPlannerWrapper:
                 # Fast-forward one tick using the currently executing action to
                 # compensate for physical movement while JAX computes the plan.
                 action_jax = jnp.asarray(curr_act, dtype=jnp.int32)
-                latent_t_plus_1 = self._predict_jit(latent_t, action_jax)
+                latent_t_plus_1 = self._predict_jit(
+                    latent_t, ACTION_GRID_JAX[action_jax]
+                )
 
                 self._rng_key, plan_key = jax.random.split(self._rng_key)
                 action_seq = self._plan_jit(

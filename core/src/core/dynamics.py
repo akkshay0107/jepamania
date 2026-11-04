@@ -1,7 +1,7 @@
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float, Int, PRNGKeyArray
+from jaxtyping import Array, Float, PRNGKeyArray
 
 from core.config import (
     NUM_ACTIONS,
@@ -12,30 +12,34 @@ from core.config import (
 
 
 class MLPPredictor(eqx.Module):
-    action_embedding: eqx.nn.Embedding
+    """Predict a latent change from the current state and physical controls."""
+
     predictor_mlp: eqx.nn.MLP
 
     def __init__(self, cfg: PredictorConfig, key: PRNGKeyArray):
-        key_emb, key_mlp = jax.random.split(key, 2)
-        self.action_embedding = eqx.nn.Embedding(
-            num_embeddings=NUM_ACTIONS,
-            embedding_size=cfg.action_embed_dim,
-            key=key_emb,
-        )
-        self.predictor_mlp = eqx.nn.MLP(
-            in_size=cfg.latent_dim + cfg.action_embed_dim,
+        mlp = eqx.nn.MLP(
+            in_size=cfg.latent_dim + 3,
             out_size=cfg.latent_dim,
             width_size=cfg.hidden_dim,
             depth=3,
             activation=jax.nn.silu,
-            key=key_mlp,
+            key=key,
+        )
+        output_weights = mlp.layers[-1].weight
+        # Start close to persistence so errors do not compound at initialization.
+        self.predictor_mlp = eqx.tree_at(
+            lambda model: (model.layers[-1].weight, model.layers[-1].bias),
+            mlp,
+            (
+                0.02 * output_weights,
+                jnp.zeros(cfg.latent_dim, dtype=output_weights.dtype),
+            ),
         )
 
     def __call__(
-        self, latent_state: Float[Array, "latent_dim"], action: Int[Array, ""]
+        self, latent_state: Float[Array, "latent_dim"], action: Float[Array, "3"]
     ) -> Float[Array, "latent_dim"]:
-        a_emb = self.action_embedding(action)
-        x = jnp.concatenate([latent_state, a_emb], axis=0)
+        x = jnp.concatenate([latent_state, action])
         return latent_state + self.predictor_mlp(x)
 
 
