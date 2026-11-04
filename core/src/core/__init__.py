@@ -7,7 +7,7 @@ from .actions import (
 from .async_planner import AsyncPlannerWrapper
 from .config import PlannerConfig
 from .dynamics import MLPPolicyHead, MLPPredictor, MLPValueHead
-from .encoders import ConvEncoder, LidarEncoder, ViTEncoder, load_models_auto
+from .encoders import ConvEncoder, ViTEncoder, load_models_auto
 from .interfaces import Encoder, Planner, Predictor
 from .planners import (
     CEMPlanner,
@@ -20,7 +20,6 @@ __all__ = [
     "Planner",
     "PlannerConfig",
     "ConvEncoder",
-    "LidarEncoder",
     "ViTEncoder",
     "load_models_auto",
     "MLPPredictor",

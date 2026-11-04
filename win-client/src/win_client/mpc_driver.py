@@ -17,7 +17,7 @@ from core.encoders import load_models_auto
 from core.interfaces import Encoder, Predictor
 from core.planners import create_planner
 
-from win_client.data_writer import HDF5Writer, validate_hdf5_schema
+from win_client.data_writer import HDF5Writer
 from win_client.env_patches import apply_online_rl_patches
 from win_client.settings import cfg
 from win_client.utils import get_tmrl_env, obs_to_dict
@@ -121,18 +121,10 @@ class MPCDriver:
             default_action=0,
             seed=cfg.mpc.seed,
         )
-        self.obs_type = "lidar" if self.encoder_type == "lidar" else "screen"
 
     def _planner_observation(self, raw_obs: Any) -> dict[str, np.ndarray]:
-        observation = obs_to_dict(raw_obs, obs_type=self.obs_type, keep_history=True)
-        if "screen" in observation:
-            screen = observation["screen"]
-            observation["screen"] = screen.astype(np.float32)
-            if np.issubdtype(screen.dtype, np.integer):
-                observation["screen"] /= 255.0
-        for name in ("telemetry", "lidar"):
-            if name in observation:
-                observation[name] = observation[name].astype(np.float32)
+        observation = obs_to_dict(raw_obs, keep_history=True)
+        observation["screen"] = observation["screen"].astype(np.float32) / 255.0
         return observation
 
     def collect(
@@ -155,12 +147,7 @@ class MPCDriver:
         """
         writer: Optional[HDF5Writer] = None
         if rollout_file is not None:
-            path = Path(rollout_file)
-            if path.exists() and validate_hdf5_schema(path) != self.obs_type:
-                raise ValueError(
-                    f"Rollout observation type does not match {self.obs_type} encoder"
-                )
-            writer = HDF5Writer(path, obs_type=self.obs_type, append=True)
+            writer = HDF5Writer(Path(rollout_file), append=True)
 
         raw_obs, _ = env.reset()
         completed_ids: list[int] = []
@@ -188,9 +175,7 @@ class MPCDriver:
         try:
             while num_episodes is None or len(completed_ids) < num_episodes:
                 planner_obs = self._planner_observation(raw_obs)
-                recorded_obs = obs_to_dict(
-                    raw_obs, obs_type=self.obs_type, keep_history=False
-                )
+                recorded_obs = obs_to_dict(raw_obs)
                 action_index = self.async_wrapper.step(planner_obs)
                 action = to_continuous_action_np(action_index).astype(np.float32)
                 raw_obs, reward, terminated, truncated, info = env.step(action)

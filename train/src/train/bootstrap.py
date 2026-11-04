@@ -30,7 +30,7 @@ from core.config import (
     load_config,
 )
 from core.dynamics import MLPPolicyHead, MLPPredictor, MLPValueHead
-from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder, load_models_auto
+from core.encoders import ConvEncoder, ViTEncoder, load_models_auto
 from jaxtyping import Array, Float
 from omegaconf import OmegaConf
 
@@ -71,7 +71,7 @@ DEFAULT_CHECKPOINT = (
 )
 DEFAULT_OUTPUT_DIR = TRAIN_ROOT.parent / "checkpoints" / "finetune"
 
-Encoder = Union[ViTEncoder, ConvEncoder, LidarEncoder]
+Encoder = Union[ViTEncoder, ConvEncoder]
 Predictor = MLPPredictor
 ValueModels = Tuple[Encoder, Predictor, MLPValueHead]
 SFTModels = Tuple[Encoder, Predictor, MLPValueHead, MLPPolicyHead]
@@ -87,8 +87,8 @@ def compute_value_loss(
     predictor: Optional[Predictor] = None,
 ) -> Float[Array, ""]:
     """Computes K-step discounted return value loss on z_t and predicted states."""
-    obs_t = extract_obs(encoder, batch, is_target=False)
-    obs_target_sequence = extract_target_obs_sequence(encoder, batch)
+    obs_t = extract_obs(batch)
+    obs_target_sequence = extract_target_obs_sequence(batch)
 
     z_t = jax.vmap(encoder)(obs_t)
     z_target_sequence = jax.vmap(jax.vmap(encoder))(obs_target_sequence)
@@ -191,18 +191,16 @@ def train_bootstrap(
         checkpoint, key_models, model_cfg.encoder, model_cfg.predictor
     )
     logging.info(f"Loaded Sub-JEPA models ({detected_type} encoder) from {checkpoint}")
-    obs_type = "lidar" if detected_type == "lidar" else "screen"
 
     subspace_projectors = load_projectors(checkpoint, key_proj, latent_dim, loss_cfg)
     save_checkpoint(output_dir / "projectors.eqx", subspace_projectors)
 
-    logging.info(f"Loading dataset from {data_dir} (obs_type={obs_type})...")
+    logging.info("Loading dataset from %s", data_dir)
     dataset = SlidingWindowDataset(
         data_dir=data_dir,
         history_len=IMG_HIST_LEN,
         rollout_len=boot_cfg.rollout_len,
         discretize_actions=True,
-        obs_type=obs_type,
         load_rewards=True,
         max_cache_bytes=int(boot_cfg.max_cache_gb * 1024**3),
         include_terminal_windows=True,
@@ -356,7 +354,6 @@ def train_bootstrap(
         )
         policy_dataset = make_policy_dataset(
             policy_episodes,
-            obs_type=obs_type,
             rollout_len=boot_cfg.rollout_len,
             max_cache_bytes=int(boot_cfg.max_cache_gb * 1024**3),
         )

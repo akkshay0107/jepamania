@@ -26,7 +26,7 @@ from core.config import (
     load_config,
 )
 from core.dynamics import MLPPolicyHead, MLPPredictor, MLPValueHead
-from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder, load_models_auto
+from core.encoders import ConvEncoder, ViTEncoder, load_models_auto
 from jaxtyping import Array, Float
 from omegaconf import OmegaConf
 
@@ -62,7 +62,7 @@ DEFAULT_BOOTSTRAP_DATA_DIR = (
 )
 DEFAULT_SSL_HUMAN_DIR = TRAIN_ROOT.parent / "win-client" / "data" / "ssl" / "human"
 
-Encoder = Union[ViTEncoder, ConvEncoder, LidarEncoder]
+Encoder = Union[ViTEncoder, ConvEncoder]
 ValueModels = Tuple[Encoder, MLPPredictor, MLPValueHead]
 RLModels = Tuple[Encoder, MLPPredictor, MLPValueHead, MLPPolicyHead]
 JointModels = Union[ValueModels, RLModels]
@@ -71,18 +71,15 @@ Batch = Mapping[str, Union[np.ndarray, Array]]
 SubspaceProjectors = Float[Array, "num_subspaces latent_dim subspace_dim"]
 
 
-def extract_obs(
-    encoder: Encoder, batch: Batch, is_target: bool = False
-) -> Dict[str, Any]:
+def extract_obs(batch: Batch, is_target: bool = False) -> Dict[str, Any]:
     """Extracts and normalizes single-step observation dictionaries from batch data.
 
     Arguments:
-      encoder: Vision, Conv, or Lidar observation encoder instance
       batch: Batch mapping containing observation stack and telemetry arrays
       is_target: Flag indicating whether to extract the final target frame
 
     Returns:
-      Dictionary containing normalized sensor observations (telemetry + screen/lidar)
+      Dictionary containing normalized screen observations and telemetry
     """
     if is_target:
         obs_raw = batch["obs_stack_targets"][:, -1]
@@ -91,31 +88,20 @@ def extract_obs(
         obs_raw = batch["obs_stack_t"]
         telem_raw = batch["telemetry_t"]
 
-    if isinstance(encoder, LidarEncoder):
-        return {
-            "lidar": obs_raw.astype(jnp.float32),
-            "telemetry": telem_raw,
-        }
-    else:
-        return {
-            "screen": obs_raw.astype(jnp.float32) / 255.0,
-            "telemetry": telem_raw,
-        }
+    return {
+        "screen": obs_raw.astype(jnp.float32) / 255.0,
+        "telemetry": telem_raw,
+    }
 
 
 _extract_obs = extract_obs
 
 
-def extract_target_obs_sequence(encoder: Encoder, batch: Batch) -> Dict[str, Any]:
+def extract_target_obs_sequence(batch: Batch) -> Dict[str, Any]:
     """Extract all observed target frames for a rollout window."""
     obs_raw = batch["obs_stack_targets"]
     telem_raw = batch["telemetry_targets"]
 
-    if isinstance(encoder, LidarEncoder):
-        return {
-            "lidar": obs_raw.astype(jnp.float32),
-            "telemetry": telem_raw,
-        }
     return {
         "screen": obs_raw.astype(jnp.float32) / 255.0,
         "telemetry": telem_raw,
@@ -181,8 +167,8 @@ def compute_joint_loss(
 ) -> Tuple[Float[Array, ""], Tuple[Float[Array, ""], Float[Array, ""]]]:
     encoder, predictor, value_head = models[:3]
 
-    obs_t = extract_obs(encoder, batch, is_target=False)
-    obs_target_sequence = extract_target_obs_sequence(encoder, batch)
+    obs_t = extract_obs(batch)
+    obs_target_sequence = extract_target_obs_sequence(batch)
 
     z_t = jax.vmap(encoder)(obs_t)
     z_target_sequence = jax.vmap(jax.vmap(encoder))(obs_target_sequence)
@@ -350,7 +336,7 @@ def compute_online_policy_loss(
 ]:
     """Compute latent-stopped, advantage-weighted NLL for executed actions."""
     encoder, predictor, value_head, policy_head = models
-    obs_t = extract_obs(encoder, batch, is_target=False)
+    obs_t = extract_obs(batch)
     latents = jax.lax.stop_gradient(jax.vmap(encoder)(obs_t))
     actions = jnp.asarray(batch["actions_seq"], dtype=jnp.int32)
     predicted_latents = jax.vmap(
@@ -639,7 +625,6 @@ def train_rl(
         checkpoint, key_models, model_cfg.encoder, model_cfg.predictor
     )
     logging.info(f"Loaded Sub-JEPA models ({detected_type} encoder) from {checkpoint}")
-    obs_type = "lidar" if detected_type == "lidar" else "screen"
 
     subspace_projectors = load_projectors(checkpoint, key_proj, latent_dim, loss_cfg)
     save_checkpoint(output_dir / "projectors.eqx", subspace_projectors)
@@ -653,7 +638,6 @@ def train_rl(
         history_len=IMG_HIST_LEN,
         rollout_len=ft_cfg.rollout_len,
         discretize_actions=True,
-        obs_type=obs_type,
         load_rewards=True,
         max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
         episode_ids=selected_episode_ids,
@@ -666,7 +650,6 @@ def train_rl(
         history_len=IMG_HIST_LEN,
         rollout_len=ft_cfg.rollout_len,
         discretize_actions=True,
-        obs_type=obs_type,
         load_rewards=True,
         max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
         include_terminal_windows=True,
@@ -683,7 +666,6 @@ def train_rl(
         history_len=IMG_HIST_LEN,
         rollout_len=ft_cfg.rollout_len,
         discretize_actions=True,
-        obs_type=obs_type,
         load_rewards=True,
         max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
         episode_ids=qualifying_ids,
@@ -697,7 +679,6 @@ def train_rl(
     )
     human_dataset = make_policy_dataset(
         human_episodes,
-        obs_type=obs_type,
         rollout_len=ft_cfg.rollout_len,
         max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
     )

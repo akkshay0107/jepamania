@@ -26,7 +26,6 @@ class HDF5Writer:
         self,
         filepath: Path,
         chunk_size: int = cfg.hdf5_chunk_size,
-        obs_type: str = "screen",
         append: bool = False,
     ) -> None:
         """Open an asynchronous writer for a rollout shard.
@@ -34,15 +33,11 @@ class HDF5Writer:
         Arguments:
           filepath: HDF5 file to create or extend.
           chunk_size: Number of frames written in one HDF5 resize operation.
-          obs_type: Observation modality stored in the shard.
           append: Whether to continue an existing schema-compatible shard.
 
         Returns:
           None.
         """
-        if obs_type not in ("screen", "lidar"):
-            raise ValueError("obs_type must be either 'screen' or 'lidar'.")
-        self.obs_type = obs_type
         self.filepath = filepath
         self.chunk_size = chunk_size
 
@@ -65,6 +60,7 @@ class HDF5Writer:
 
         filepath.parent.mkdir(parents=True, exist_ok=True)
         if append and filepath.exists():
+            validate_hdf5_schema(filepath)
             self._file = h5py.File(filepath, "a")
             if "episode_id" in self._file:
                 ep_id_ds = self._file["episode_id"]
@@ -91,25 +87,14 @@ class HDF5Writer:
             self._file = h5py.File(filepath, "w")
 
             obs_grp = self._file.create_group("observations")
-            if self.obs_type == "lidar":
-                from core.config import LIDAR_BEAMS
-
-                obs_grp.create_dataset(
-                    "lidar",
-                    shape=(0, LIDAR_BEAMS),
-                    maxshape=(None, LIDAR_BEAMS),
-                    chunks=(chunk_size, LIDAR_BEAMS),
-                    dtype=np.float32,
-                )
-            else:
-                obs_grp.create_dataset(
-                    "screen",
-                    shape=(0, 1, IMG_SIZE, IMG_SIZE),
-                    maxshape=(None, 1, IMG_SIZE, IMG_SIZE),
-                    chunks=(chunk_size, 1, IMG_SIZE, IMG_SIZE),
-                    dtype=np.uint8,
-                    compression="gzip",
-                )
+            obs_grp.create_dataset(
+                "screen",
+                shape=(0, 1, IMG_SIZE, IMG_SIZE),
+                maxshape=(None, 1, IMG_SIZE, IMG_SIZE),
+                chunks=(chunk_size, 1, IMG_SIZE, IMG_SIZE),
+                dtype=np.uint8,
+                compression="gzip",
+            )
             obs_grp.create_dataset(
                 "telemetry",
                 shape=(0, TELEMETRY_FEATURES),
@@ -195,15 +180,12 @@ class HDF5Writer:
 
         frame_data = {
             "_type": "frame",
+            "screen": np.copy(obs_dict["screen"]),
             "telemetry": np.copy(obs_dict["telemetry"]),
             "action": np.copy(action).astype(np.float32),
             "reward": float(reward),
             "episode_id": self._current_episode_id,
         }
-        if self.obs_type == "lidar":
-            frame_data["lidar"] = np.copy(obs_dict["lidar"])
-        else:
-            frame_data["screen"] = np.copy(obs_dict["screen"])
         self._queue.put(frame_data)
 
     def close(self) -> None:
@@ -273,10 +255,7 @@ class HDF5Writer:
                     self._file.flush()
 
             else:
-                if self.obs_type == "lidar":
-                    self._obs_buf.append(token["lidar"])
-                else:
-                    self._obs_buf.append(token["screen"])
+                self._obs_buf.append(token["screen"])
                 self._telemetry_buf.append(token["telemetry"])
                 self._action_buf.append(token["action"])
                 self._reward_buf.append(token["reward"])
@@ -296,10 +275,7 @@ class HDF5Writer:
         # casting to avoid pyright errors
         obs = cast(h5py.Group, self._file["observations"])
 
-        if self.obs_type == "lidar":
-            obs_ds = cast(h5py.Dataset, obs["lidar"])
-        else:
-            obs_ds = cast(h5py.Dataset, obs["screen"])
+        obs_ds = cast(h5py.Dataset, obs["screen"])
         telem_ds = cast(h5py.Dataset, obs["telemetry"])
         actions_ds = cast(h5py.Dataset, self._file["actions"])
         rewards_ds = cast(h5py.Dataset, self._file["rewards"])
@@ -330,14 +306,15 @@ class HDF5Writer:
         self._episode_id_buf.clear()
 
 
-def validate_hdf5_schema(filepath: str | Path) -> str:
-    """Validate a rollout file and return its observation type."""
+def validate_hdf5_schema(filepath: str | Path) -> None:
+    """Validate the required datasets in a screen rollout file."""
     path = Path(filepath)
     if not path.exists():
         raise FileNotFoundError(f"Rollout file not found: {path}")
 
     with h5py.File(path, "r") as file:
         required = {
+            "observations/screen",
             "observations/telemetry",
             "actions",
             "rewards",
@@ -348,21 +325,14 @@ def validate_hdf5_schema(filepath: str | Path) -> str:
         if missing:
             raise ValueError(f"Invalid rollout file {path}; missing: {missing}")
 
-        observations = cast(h5py.Group, file["observations"])
-        available = [name for name in ("screen", "lidar") if name in observations]
-        if len(available) != 1:
-            raise ValueError(
-                f"Invalid rollout file {path}; expected exactly one observation type"
-            )
-
         frame_count = len(cast(h5py.Dataset, file["episode_id"]))
-        aligned = ("observations/telemetry", "actions", "rewards")
+        aligned = (
+            "observations/screen",
+            "observations/telemetry",
+            "actions",
+            "rewards",
+        )
         if any(len(cast(h5py.Dataset, file[name])) != frame_count for name in aligned):
             raise ValueError(
                 f"Invalid rollout file {path}; frame datasets are misaligned"
             )
-        if len(cast(h5py.Dataset, observations[available[0]])) != frame_count:
-            raise ValueError(
-                f"Invalid rollout file {path}; observations are misaligned"
-            )
-        return available[0]

@@ -26,7 +26,7 @@ import numpy as np
 import optax
 from core.config import IMG_HIST_LEN, load_config
 from core.dynamics import MLPPredictor
-from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder
+from core.encoders import ConvEncoder, ViTEncoder
 from core.interfaces import Encoder, Predictor
 from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree
 from omegaconf import OmegaConf
@@ -80,32 +80,19 @@ def compute_loss(
 ) -> Float[Array, ""]:
     encoder, predictor = models
 
-    if isinstance(encoder, LidarEncoder):
-        obs_t = {
-            "lidar": batch["obs_stack_t"].astype(jnp.float32),
-            "telemetry": batch["telemetry_t"],
-        }
-    else:
-        # uint8 -> float32 here so the cast runs on-device after the (4x smaller)
-        # uint8 transfer, conserving PCIe bandwidth.
-        obs_t = {
-            "screen": batch["obs_stack_t"].astype(jnp.float32) / 255.0,
-            "telemetry": batch["telemetry_t"],
-        }
+    # Convert on-device so screen frames cross PCIe as uint8.
+    obs_t = {
+        "screen": batch["obs_stack_t"].astype(jnp.float32) / 255.0,
+        "telemetry": batch["telemetry_t"],
+    }
     num_target_steps = batch["obs_stack_targets"].shape[1]
     actions = batch["actions_seq"][:, :num_target_steps].astype(jnp.int32)
     z_t = jax.vmap(encoder)(obs_t)
 
-    if isinstance(encoder, LidarEncoder):
-        obs_targets = {
-            "lidar": batch["obs_stack_targets"].astype(jnp.float32),
-            "telemetry": batch["telemetry_targets"],
-        }
-    else:
-        obs_targets = {
-            "screen": batch["obs_stack_targets"].astype(jnp.float32) / 255.0,
-            "telemetry": batch["telemetry_targets"],
-        }
+    obs_targets = {
+        "screen": batch["obs_stack_targets"].astype(jnp.float32) / 255.0,
+        "telemetry": batch["telemetry_targets"],
+    }
     z_target_seq = jax.vmap(jax.vmap(encoder))(obs_targets)
     z_pred_seq = jax.vmap(
         lambda z0, acts: _rollout_latent_sequence(predictor, z0, acts)
@@ -427,7 +414,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--encoder",
-        choices=["vit", "conv", "lidar"],
+        choices=["vit", "conv"],
         default="vit",
         help="Encoder backbone (must match the checkpoint when resuming)",
     )
@@ -462,13 +449,11 @@ def main() -> None:
     peak_lr = train_cfg.pretrain.peak_lr
     seed = train_cfg.pretrain.seed
 
-    obs_type = "lidar" if args.encoder == "lidar" else "screen"
     dataset = SlidingWindowDataset(
         data_dir=args.data_dir,
         history_len=IMG_HIST_LEN,
         rollout_len=train_cfg.pretrain.rollout_len,
         discretize_actions=True,
-        obs_type=obs_type,
         max_cache_bytes=int(train_cfg.pretrain.max_cache_gb * 1024**3),
     )
     if len(dataset) == 0:
@@ -505,8 +490,6 @@ def main() -> None:
 
     if args.encoder == "vit":
         encoder = ViTEncoder(cfg.encoder, key_enc)
-    elif args.encoder == "lidar":
-        encoder = LidarEncoder(cfg.encoder, key_enc)
     else:
         encoder = ConvEncoder(cfg.encoder, key_enc)
     predictor = MLPPredictor(cfg.predictor, key_pred)

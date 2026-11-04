@@ -38,7 +38,6 @@ def load_actor(path_str: str | None, observation_space, action_space):
     # cfg_obj.POLICY is set at import time based on config.json:
     #   - grayscale images  → SquashedGaussianVanillaCNNActor
     #   - color images      → SquashedGaussianVanillaColorCNNActor
-    #   - lidar             → SquashedGaussianMLPActor
     policy_cls = get_tmrl_policy_class()
     actor = policy_cls(observation_space=observation_space, action_space=action_space)
     actor = actor.load(str(path), device="cpu")
@@ -70,7 +69,7 @@ class AgentCollector:
         )
 
         # tmrl --test uses OBS_PREPROCESSOR, which is
-        # obs_preprocessor_tm_act_in_obs for the full (non-lidar) env.
+        # obs_preprocessor_tm_act_in_obs for the full screen environment.
         obs_preprocessor = get_tmrl_obs_preprocessor()
 
         logging.info("Starting collection. Make sure you are loaded into the map.")

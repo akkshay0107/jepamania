@@ -11,9 +11,9 @@ JEPAMania separates functional deep learning components into decoupled workspace
 ### Core Pipeline
 
 1. **Observation & Telemetry Capture (`win-client`)**  
-   Screen frames (RGB) or LiDAR raycasts alongside 9-float vehicle telemetry (speed, gear, RPM, previous steering/throttle actions) are streamed from Trackmania at 20 Hz via Openplanet and `rtgym`.
+   Screen frames and nine telemetry values (speed, gear, RPM, and two previous controls) are streamed from Trackmania via Openplanet and `rtgym`.
 2. **Latent Encoding (`core.encoders`)**  
-   An observation encoder (`ViTEncoder`, `ConvEncoder`, or `LidarEncoder`) compresses visual stacks and telemetry into a compact latent embedding vector $z_t \in \mathbb{R}^{192}$.
+   A screen encoder (`ViTEncoder` or `ConvEncoder`) compresses frame stacks and telemetry into a compact latent embedding vector $z_t \in \mathbb{R}^{192}$.
 3. **Action-Conditioned Latent Rollout (`core.dynamics`)**  
    An autoregressive dynamics predictor (`MLPPredictor`) rolls forward future latent states $z_{t+k}$ across a $K$-step planning horizon given candidate action sequences without frame decoding.
 4. **Real-Time MPC Planning (`core.planners`)**  

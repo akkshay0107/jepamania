@@ -15,7 +15,7 @@ import optax
 from core.actions import GAS_BRAKE_VALUES_JAX, NUM_GAS_BRAKE
 from core.config import IMG_HIST_LEN, PolicyHeadConfig
 from core.dynamics import MLPPolicyHead
-from core.encoders import ConvEncoder, LidarEncoder, ViTEncoder
+from core.encoders import ConvEncoder, ViTEncoder
 from core.interfaces import Encoder as EncoderProtocol
 from jaxtyping import Array, Float
 
@@ -24,7 +24,7 @@ from train.config import PolicySFTConfig
 from train.dataloader import DataLoader, SlidingWindowDataset
 from train.pretrain import save_checkpoint
 
-ConcreteEncoder = Union[ViTEncoder, ConvEncoder, LidarEncoder]
+ConcreteEncoder = Union[ViTEncoder, ConvEncoder]
 Batch = Mapping[str, Union[np.ndarray, Array]]
 EXCLUDED_TERMINATIONS = frozenset({"manual", "respawn", "stuck", "truncated"})
 MIN_BOOTSTRAP_SUCCESS_REWARD = 99.0
@@ -102,10 +102,7 @@ def _read_policy_episode(
             return None
         episode_rewards = np.asarray(rewards[frame_start:frame_end], dtype=np.float32)
         max_reward = float(np.max(episode_rewards))
-        if (
-            not np.isfinite(max_reward)
-            or max_reward < MIN_BOOTSTRAP_SUCCESS_REWARD
-        ):
+        if not np.isfinite(max_reward) or max_reward < MIN_BOOTSTRAP_SUCCESS_REWARD:
             return None
     elif termination != "done":
         return None
@@ -186,7 +183,6 @@ def select_policy_sft_episodes(
 def make_policy_dataset(
     episodes: Sequence[PolicyEpisode],
     *,
-    obs_type: str,
     rollout_len: int,
     max_cache_bytes: int,
 ) -> SlidingWindowDataset:
@@ -197,7 +193,6 @@ def make_policy_dataset(
         history_len=IMG_HIST_LEN,
         rollout_len=rollout_len,
         discretize_actions=True,
-        obs_type=obs_type,
         load_rewards=True,
         max_cache_bytes=max_cache_bytes,
         episode_keys=[episode.dataset_key for episode in episodes],
@@ -205,12 +200,7 @@ def make_policy_dataset(
     )
 
 
-def _policy_observation(encoder: EncoderProtocol, batch: Batch) -> dict[str, Array]:
-    if isinstance(encoder, LidarEncoder):
-        return {
-            "lidar": jnp.asarray(batch["obs_stack_t"], dtype=jnp.float32),
-            "telemetry": jnp.asarray(batch["telemetry_t"], dtype=jnp.float32),
-        }
+def _policy_observation(batch: Batch) -> dict[str, Array]:
     return {
         "screen": jnp.asarray(batch["obs_stack_t"], dtype=jnp.float32) / 255.0,
         "telemetry": jnp.asarray(batch["telemetry_t"], dtype=jnp.float32),
@@ -220,9 +210,7 @@ def _policy_observation(encoder: EncoderProtocol, batch: Batch) -> dict[str, Arr
 def policy_logits(
     policy_head: RawPolicyHead, encoder: EncoderProtocol, batch: Batch
 ) -> Float[Array, "batch actions"]:
-    latents = jax.lax.stop_gradient(
-        jax.vmap(encoder)(_policy_observation(encoder, batch))
-    )
+    latents = jax.lax.stop_gradient(jax.vmap(encoder)(_policy_observation(batch)))
     return jax.vmap(policy_head.raw_logits)(latents)
 
 

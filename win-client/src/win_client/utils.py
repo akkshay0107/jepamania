@@ -1,61 +1,23 @@
 import platform
 
 import numpy as np
-from core.config import IMG_HIST_LEN, LIDAR_BEAMS, TELEMETRY_FEATURES
+from core.config import IMG_HIST_LEN, TELEMETRY_FEATURES
 
 # Spatial resolution expected by the encoder.
 IMG_SIZE: int = 64
 
 
-def _normalise_lidar(lidar: np.ndarray, keep_history: bool) -> np.ndarray:
-    """Return LiDAR as one scan or a fixed-length scan history."""
-    lidar = np.squeeze(np.asarray(lidar, dtype=np.float32))
-    if lidar.ndim == 1:
-        if lidar.size == LIDAR_BEAMS:
-            frames = lidar.reshape(1, LIDAR_BEAMS)
-        elif lidar.size == IMG_HIST_LEN * LIDAR_BEAMS:
-            frames = lidar.reshape(IMG_HIST_LEN, LIDAR_BEAMS)
-        else:
-            raise ValueError(
-                f"LiDAR observation has {lidar.size} values; expected "
-                f"{LIDAR_BEAMS} or {IMG_HIST_LEN * LIDAR_BEAMS}."
-            )
-    elif lidar.ndim == 2 and lidar.shape[1] == LIDAR_BEAMS:
-        frames = lidar
-    else:
-        raise ValueError(
-            "LiDAR observation must have shape (beams,), "
-            "(history, beams), or an equivalent flattened shape."
-        )
-
-    if not keep_history:
-        return frames[-1]
-
-    if frames.shape[0] < IMG_HIST_LEN:
-        frames = np.pad(
-            frames,
-            ((IMG_HIST_LEN - frames.shape[0], 0), (0, 0)),
-            mode="edge",
-        )
-    return frames[-IMG_HIST_LEN:]
-
-
-def obs_to_dict(
-    obs, obs_type: str = "screen", keep_history: bool = False
-) -> dict[str, np.ndarray]:
+def obs_to_dict(obs, keep_history: bool = False) -> dict[str, np.ndarray]:
     """
     Normalize a raw TMRL/rtgym observation into the model input schema.
 
     Arguments:
       obs: Raw observation returned by the environment.
-      obs_type: Sensor modality to extract, either ``screen`` or ``lidar``.
       keep_history: Whether to return the fixed-length history expected by an encoder.
 
     Returns:
-      A dictionary containing the selected sensor array and nine telemetry values.
+      A dictionary containing screen frames and nine telemetry values.
     """
-    if obs_type not in ("screen", "lidar"):
-        raise ValueError("obs_type must be either 'screen' or 'lidar'.")
 
     if isinstance(obs, dict):
         telemetry = np.asarray(obs["telemetry"], dtype=np.float32).reshape(-1)
@@ -67,13 +29,40 @@ def obs_to_dict(
                 f"Environment produced {len(telemetry)} telemetry floats, "
                 f"expected at most TELEMETRY_FEATURES={TELEMETRY_FEATURES}."
             )
-        if obs_type == "lidar":
-            return {
-                "lidar": _normalise_lidar(obs["lidar"], keep_history),
-                "telemetry": telemetry,
-            }
+        screen = np.asarray(obs["screen"], dtype=np.uint8)
+        if not keep_history:
+            if screen.ndim == 3:
+                screen = screen[-1:]
+            elif screen.ndim == 2:
+                screen = screen[np.newaxis, ...]
         else:
-            screen = np.asarray(obs["screen"], dtype=np.uint8)
+            if screen.ndim == 2:
+                screen = np.repeat(screen[np.newaxis, ...], IMG_HIST_LEN, axis=0)
+            elif screen.ndim == 3:
+                if screen.shape[0] < IMG_HIST_LEN:
+                    pad = IMG_HIST_LEN - screen.shape[0]
+                    screen = np.pad(screen, ((pad, 0), (0, 0), (0, 0)), mode="edge")
+                elif screen.shape[0] > IMG_HIST_LEN:
+                    screen = screen[-IMG_HIST_LEN:]
+        return {"screen": screen, "telemetry": telemetry}
+
+    if isinstance(obs, (tuple, list)) and len(obs) >= 1:
+        screen = None
+        telem_parts = []
+        for item in obs:
+            arr = np.asarray(item)
+            if screen is None and (arr.ndim >= 3 or arr.dtype == np.uint8):
+                screen = arr.astype(np.uint8)
+            else:
+                telem_parts.append(arr.flatten().astype(np.float32))
+
+        if screen is None:
+            screen = (
+                np.zeros((IMG_HIST_LEN, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
+                if keep_history
+                else np.zeros((1, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
+            )
+        else:
             if not keep_history:
                 if screen.ndim == 3:
                     screen = screen[-1:]
@@ -88,64 +77,6 @@ def obs_to_dict(
                         screen = np.pad(screen, ((pad, 0), (0, 0), (0, 0)), mode="edge")
                     elif screen.shape[0] > IMG_HIST_LEN:
                         screen = screen[-IMG_HIST_LEN:]
-            return {"screen": screen, "telemetry": telemetry}
-
-    if isinstance(obs, (tuple, list)) and len(obs) >= 1:
-        lidar = None
-        screen = None
-        if obs_type == "lidar":
-            telem_parts = []
-            for item in obs:
-                arr = np.asarray(item)
-                if lidar is None and (
-                    arr.size in (LIDAR_BEAMS, IMG_HIST_LEN * LIDAR_BEAMS)
-                    or (arr.ndim > 1 and arr.shape[-1] == LIDAR_BEAMS)
-                ):
-                    lidar = arr
-                else:
-                    telem_parts.append(arr.flatten().astype(np.float32))
-
-            if lidar is None:
-                lidar = np.zeros(
-                    (IMG_HIST_LEN, LIDAR_BEAMS) if keep_history else (LIDAR_BEAMS,),
-                    dtype=np.float32,
-                )
-            else:
-                lidar = _normalise_lidar(lidar, keep_history)
-        else:
-            telem_parts = []
-            for item in obs:
-                arr = np.asarray(item)
-                if screen is None and (arr.ndim >= 3 or arr.dtype == np.uint8):
-                    screen = arr.astype(np.uint8)
-                else:
-                    telem_parts.append(arr.flatten().astype(np.float32))
-
-            if screen is None:
-                screen = (
-                    np.zeros((IMG_HIST_LEN, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
-                    if keep_history
-                    else np.zeros((1, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
-                )
-            else:
-                if not keep_history:
-                    if screen.ndim == 3:
-                        screen = screen[-1:]
-                    elif screen.ndim == 2:
-                        screen = screen[np.newaxis, ...]
-                else:
-                    if screen.ndim == 2:
-                        screen = np.repeat(
-                            screen[np.newaxis, ...], IMG_HIST_LEN, axis=0
-                        )
-                    elif screen.ndim == 3:
-                        if screen.shape[0] < IMG_HIST_LEN:
-                            pad = IMG_HIST_LEN - screen.shape[0]
-                            screen = np.pad(
-                                screen, ((pad, 0), (0, 0), (0, 0)), mode="edge"
-                            )
-                        elif screen.shape[0] > IMG_HIST_LEN:
-                            screen = screen[-IMG_HIST_LEN:]
 
         if telem_parts:
             telemetry = np.concatenate(telem_parts, axis=0)
@@ -153,36 +84,21 @@ def obs_to_dict(
             telemetry = np.zeros(TELEMETRY_FEATURES, dtype=np.float32)
 
         if len(telemetry) < TELEMETRY_FEATURES:
-            if obs_type == "screen":
-                raise ValueError(
-                    "TMRL screen observation is missing its action history: "
-                    f"received {len(telemetry)} telemetry floats, expected "
-                    f"{TELEMETRY_FEATURES}. Ensure rtgym act_in_obs=True and "
-                    "act_buf_len=2."
-                )
-            pad_len = TELEMETRY_FEATURES - len(telemetry)
-            telemetry = np.pad(telemetry, (0, pad_len), mode="constant")
+            raise ValueError(
+                "TMRL screen observation is missing its action history: "
+                f"received {len(telemetry)} telemetry floats, expected "
+                f"{TELEMETRY_FEATURES}. Ensure rtgym act_in_obs=True and "
+                "act_buf_len=2."
+            )
         elif len(telemetry) > TELEMETRY_FEATURES:
             raise ValueError(
                 f"Environment produced {len(telemetry)} telemetry floats, "
                 f"expected at most TELEMETRY_FEATURES={TELEMETRY_FEATURES}. "
                 "Check the env observation layout against core.config."
             )
-
-        if obs_type == "lidar":
-            if lidar is None:
-                raise ValueError("Could not identify a LiDAR observation.")
-            return {"lidar": lidar, "telemetry": telemetry}
-        if screen is None:
-            raise ValueError("Could not identify a screen observation.")
         return {"screen": screen, "telemetry": telemetry}
 
     arr = np.asarray(obs)
-    if obs_type == "lidar":
-        return {
-            "lidar": _normalise_lidar(arr, keep_history),
-            "telemetry": np.zeros(TELEMETRY_FEATURES, dtype=np.float32),
-        }
 
     if not keep_history:
         if arr.ndim >= 3:

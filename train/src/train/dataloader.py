@@ -66,7 +66,6 @@ class SlidingWindowDataset:
         history_len: int = 4,
         rollout_len: int = 5,
         discretize_actions: bool = True,
-        obs_type: str = "screen",
         load_rewards: bool = False,
         include_terminal_windows: bool = False,
         max_cache_bytes: int = 4 * 1024**3,  # 4 GB RAM shard pool
@@ -81,7 +80,6 @@ class SlidingWindowDataset:
           history_len: Number of observation frames in each input history
           rollout_len: Number of action/reward steps to expose per sample
           discretize_actions: Whether continuous actions are converted to bins
-          obs_type: Observation modality, either ``screen`` or ``lidar``
           load_rewards: Whether reward arrays are loaded into each sample
           include_terminal_windows: Allow the last action in legacy episodes
             that have no separate final observation
@@ -93,9 +91,6 @@ class SlidingWindowDataset:
         Returns:
           None
         """
-        if obs_type not in ("screen", "lidar"):
-            raise ValueError("obs_type must be either 'screen' or 'lidar'.")
-        self.obs_type = obs_type
         self.data_dir = Path(data_dir)
         self.H = int(history_len)
         self.K = int(rollout_len)
@@ -155,8 +150,7 @@ class SlidingWindowDataset:
         for file_path in h5_files:
             try:
                 with h5py.File(file_path, "r") as f:
-                    obs_key = f"observations/{self.obs_type}"
-                    if "episode_id" not in f or obs_key not in f:
+                    if "episode_id" not in f or "observations/screen" not in f:
                         continue
 
                     episode_ids: np.ndarray = np.asarray(
@@ -317,7 +311,6 @@ class SlidingWindowDataset:
             ds.H = self.H
             ds.K = self.K
             ds.discretize_actions = self.discretize_actions
-            ds.obs_type = self.obs_type
             ds.load_rewards = self.load_rewards
             ds.include_terminal_windows = self.include_terminal_windows
             ds.max_cache_bytes = self.max_cache_bytes
@@ -373,7 +366,7 @@ class SlidingWindowDataset:
         Returns:
           Observation histories, actions, masks, and optional rewards.
         """
-        obs_ds = cast(h5py.Dataset, f[f"observations/{self.obs_type}"])
+        obs_ds = cast(h5py.Dataset, f["observations/screen"])
         telem_ds = cast(h5py.Dataset, f["observations/telemetry"])
         actions_ds = cast(h5py.Dataset, f["actions"])
 
@@ -381,8 +374,7 @@ class SlidingWindowDataset:
         slice_end = min(local_t + self.K + 1, frame_end)
         raw_chunk = np.asarray(obs_ds[slice_start:slice_end])
 
-        is_screen = self.obs_type == "screen"
-        if is_screen and raw_chunk.ndim >= 3 and raw_chunk.shape[1] == 1:
+        if raw_chunk.ndim >= 3 and raw_chunk.shape[1] == 1:
             raw_chunk = raw_chunk[:, 0]
 
         pad_len = self.H - ((local_t + 1) - slice_start)
@@ -478,7 +470,7 @@ class SlidingWindowDataset:
         Telemetry/actions/rewards are stored as float32 in the cache, so their
         footprint is element count times four bytes regardless of on-disk dtype.
         """
-        obs_ds = cast(h5py.Dataset, f[f"observations/{self.obs_type}"])
+        obs_ds = cast(h5py.Dataset, f["observations/screen"])
         total = int(np.prod(obs_ds.shape)) * obs_ds.dtype.itemsize
         float_datasets = ["observations/telemetry", "actions"]
         if self.load_rewards and "rewards" in f:
@@ -491,13 +483,9 @@ class SlidingWindowDataset:
         """Read a whole shard from disk into the array layout the pool serves."""
         shard = self.shards[shard_idx]
         with h5py.File(shard["file_path"], "r") as f:
-            obs_ds = cast(h5py.Dataset, f[f"observations/{self.obs_type}"])
+            obs_ds = cast(h5py.Dataset, f["observations/screen"])
             raw_obs = np.asarray(obs_ds[:])
-            if (
-                self.obs_type == "screen"
-                and raw_obs.ndim >= 3
-                and raw_obs.shape[1] == 1
-            ):
+            if raw_obs.ndim >= 3 and raw_obs.shape[1] == 1:
                 raw_obs = raw_obs[:, 0]
             telem = np.asarray(
                 cast(h5py.Dataset, f["observations/telemetry"])[:],

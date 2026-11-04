@@ -1,4 +1,4 @@
-"""Observation encoders and checkpoint loading for visual and LiDAR inputs."""
+"""Screen observation encoders and checkpoint loading."""
 
 import functools
 from pathlib import Path
@@ -12,7 +12,6 @@ from jaxtyping import Array, Float, PRNGKeyArray
 
 from core.config import (
     IMG_HIST_LEN,
-    LIDAR_BEAMS,
     TELEMETRY_FEATURES,
     EncoderConfig,
     PredictorConfig,
@@ -291,69 +290,12 @@ class ConvEncoder(eqx.Module):
         return self.fusion_mlp(x_fused)
 
 
-class LidarEncoder(eqx.Module):
-    lidar_mlp: eqx.nn.MLP
-    telemetry_mlp: eqx.nn.MLP
-    fusion_mlp: eqx.nn.MLP
-
-    def __init__(self, cfg: EncoderConfig, key: PRNGKeyArray):
-        key_lidar, key_telemetry, key_fusion = jax.random.split(key, 3)
-
-        lidar_in_size = IMG_HIST_LEN * LIDAR_BEAMS
-
-        self.lidar_mlp = eqx.nn.MLP(
-            in_size=lidar_in_size,
-            out_size=128,
-            width_size=256,
-            depth=2,
-            activation=jax.nn.silu,
-            key=key_lidar,
-        )
-
-        self.telemetry_mlp = eqx.nn.MLP(
-            in_size=TELEMETRY_FEATURES,
-            out_size=64,
-            width_size=128,
-            depth=2,
-            activation=jax.nn.silu,
-            key=key_telemetry,
-        )
-
-        fusion_in = 128 + 64
-        self.fusion_mlp = eqx.nn.MLP(
-            in_size=fusion_in,
-            out_size=cfg.latent_dim,
-            width_size=256,
-            depth=2,
-            activation=jax.nn.silu,
-            key=key_fusion,
-        )
-
-    def __call__(
-        self,
-        observations: Mapping[str, Any],
-    ) -> Float[Array, "latent_dim"]:
-        lidar = observations.get("lidar")
-        if lidar is None or lidar.size != IMG_HIST_LEN * LIDAR_BEAMS:
-            raise ValueError(
-                "LidarEncoder requires 'lidar' observation of total size "
-                f"{IMG_HIST_LEN * LIDAR_BEAMS}."
-            )
-        telemetry = normalize_telemetry(observations["telemetry"])
-
-        x_lidar = self.lidar_mlp(lidar.reshape(-1))
-        x_telemetry = self.telemetry_mlp(telemetry)
-
-        x_fused = jnp.concatenate([x_lidar, x_telemetry], axis=0)
-        return self.fusion_mlp(x_fused)
-
-
 def load_models_auto(
     path: Union[str, Path],
     key: PRNGKeyArray,
     encoder_cfg: Union[EncoderConfig, None] = None,
     predictor_cfg: Union[PredictorConfig, None] = None,
-) -> tuple[tuple[Union[ViTEncoder, ConvEncoder, LidarEncoder], MLPPredictor], str]:
+) -> tuple[tuple[Union[ViTEncoder, ConvEncoder], MLPPredictor], str]:
     """Auto-detects and deserializes a combined (encoder, predictor) checkpoint.
 
     Tries each encoder architecture in turn; the differing PyTree structures
@@ -370,7 +312,6 @@ def load_models_auto(
     for enc_cls, enc_name in (
         (ViTEncoder, "vit"),
         (ConvEncoder, "conv"),
-        (LidarEncoder, "lidar"),
     ):
         try:
             template = (enc_cls(enc_cfg, key_enc), MLPPredictor(pred_cfg, key_pred))
@@ -385,6 +326,6 @@ def load_models_auto(
         f"{name}: {type(error).__name__}: {error}" for name, error in errors
     )
     raise ValueError(
-        f"Could not load (encoder, predictor) pair from {path} as ViT, Conv, or "
-        f"Lidar. Attempts: {details}"
+        f"Could not load (encoder, predictor) pair from {path} as ViT or Conv. "
+        f"Attempts: {details}"
     ) from errors[-1][1]
