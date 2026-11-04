@@ -200,7 +200,6 @@ def train_bootstrap(
         rollout_len=boot_cfg.rollout_len,
         discretize_actions=True,
         load_rewards=True,
-        max_cache_bytes=int(boot_cfg.max_cache_gb * 1024**3),
         include_terminal_windows=True,
     )
 
@@ -212,7 +211,6 @@ def train_bootstrap(
         batch_size=boot_cfg.batch_size,
         shuffle=True,
         drop_last=True,
-        num_workers=boot_cfg.num_workers,
         seed=boot_cfg.seed,
     )
 
@@ -229,7 +227,6 @@ def train_bootstrap(
             },
         )
     global_step = 0
-    policy_dataset = None
     try:
         if value_head_path is not None:
             value_head = load_checkpoint(
@@ -353,7 +350,6 @@ def train_bootstrap(
         policy_dataset = make_policy_dataset(
             policy_episodes,
             rollout_len=boot_cfg.rollout_len,
-            max_cache_bytes=int(boot_cfg.max_cache_gb * 1024**3),
         )
         policy_head = train_policy_sft(
             models[0],
@@ -366,21 +362,6 @@ def train_bootstrap(
     finally:
         if manage_wandb:
             wandb.finish()
-        if (
-            "dataset" in locals()
-            and hasattr(dataset, "_pool")
-            and dataset._pool is not None
-        ):
-            dataset._pool.cache.clear()
-            dataset._pool.refcounts.clear()
-        if "dataloader" in locals():
-            del dataloader
-        if "dataset" in locals():
-            del dataset
-        if policy_dataset is not None:
-            policy_dataset._pool.cache.clear()
-            policy_dataset._pool.refcounts.clear()
-            del policy_dataset
 
     logging.info(f"Bootstrapping complete. Checkpoints written to {output_dir}")
     return models[0], models[1], models[2], policy_head

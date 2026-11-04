@@ -183,7 +183,6 @@ def make_policy_dataset(
     episodes: Sequence[PolicyEpisode],
     *,
     rollout_len: int,
-    max_cache_bytes: int,
 ) -> SlidingWindowDataset:
     data_files = tuple(dict.fromkeys(episode.file_path for episode in episodes))
     data_root = data_files[0].parent if data_files else Path(".")
@@ -193,7 +192,6 @@ def make_policy_dataset(
         rollout_len=rollout_len,
         discretize_actions=True,
         load_rewards=True,
-        max_cache_bytes=max_cache_bytes,
         episode_keys=[episode.dataset_key for episode in episodes],
         data_files=data_files,
     )
@@ -297,7 +295,6 @@ def train_policy_sft(
         batch_size=cfg.batch_size,
         shuffle=True,
         drop_last=False,
-        num_workers=cfg.num_workers,
         seed=0,
     )
     batches_per_epoch = len(dataloader)

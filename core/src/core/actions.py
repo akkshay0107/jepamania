@@ -138,15 +138,16 @@ def to_continuous_action_np(
     return np.stack([gas, brake, steer], axis=-1)
 
 
-def rescale_gas_np(actions: np.ndarray) -> np.ndarray:
-    """Rescales gas from [-1.0, 1.0] to [0.0, 1.0] if negative gas values are detected.
+def rescale_gas_np(actions: np.ndarray, *, axis: int | None = None) -> np.ndarray:
+    """Rescale signed gas to [0, 1], detecting it along the specified gas axis.
 
     Human Openplanet sessions record raw analog triggers in [-1.0, 1.0] where -1.0
     is unpressed and 1.0 is fully depressed. Agent actions are already in [0.0, 1.0].
     """
     out = actions.copy()
-    if np.any(out[..., 0] < -0.01):
-        out[..., 0] = (out[..., 0] + 1.0) / 2.0
+    gas = out[..., 0]
+    signed = np.any(gas < -0.01, axis=axis, keepdims=True)
+    out[..., 0] = np.where(signed, (gas + 1.0) / 2.0, gas)
     return out
 
 

@@ -448,7 +448,6 @@ def main() -> None:
         history_len=IMG_HIST_LEN,
         rollout_len=train_cfg.pretrain.rollout_len,
         discretize_actions=True,
-        max_cache_bytes=int(train_cfg.pretrain.max_cache_gb * 1024**3),
     )
     if len(dataset) == 0:
         raise SystemExit(f"No valid transitions found in {args.data_dir}")
@@ -467,7 +466,6 @@ def main() -> None:
         batch_size=batch_size,
         shuffle=True,
         drop_last=True,
-        num_workers=train_cfg.pretrain.num_workers,
         seed=seed,
     )
     val_dataloader = DataLoader(
@@ -475,7 +473,6 @@ def main() -> None:
         batch_size=batch_size,
         shuffle=False,
         drop_last=False,
-        num_workers=train_cfg.pretrain.num_workers,
         seed=seed,
     )
 

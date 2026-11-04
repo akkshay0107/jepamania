@@ -19,11 +19,9 @@ class PretrainConfig:
     batch_size: int = 256
     peak_lr: float = 3e-4
     rollout_len: int = 5
-    num_workers: int = 4
     seed: int = 42
     log_every: int = 50
     val_ratio: float = 0.1
-    max_cache_gb: float = 4.0
 
 
 @dataclass
@@ -36,11 +34,9 @@ class BootstrapConfig:
     lr_val: float = 1e-4
     value_weight: float = 0.5
     batch_size: int = 128
-    num_workers: int = 4
     seed: int = 42
     rollout_len: int = 5
     log_every: int = 50
-    max_cache_gb: float = 2.0
 
 
 @dataclass
@@ -49,7 +45,6 @@ class PolicySFTConfig:
     batch_size: int = 128
     lr_min: float = 1e-6
     lr_max: float = 1e-4
-    num_workers: int = 4
     min_frames: int = 450
     max_frames: int = 540
     log_every: int = 50
@@ -70,11 +65,9 @@ class FinetuneConfig:
     evaluation_episodes: int = 15
     promotion_min_improvement_frames: int = 5
     batch_size: int = 64
-    num_workers: int = 4
     seed: int = 42
     rollout_len: int = 5
     log_every: int = 50
-    max_cache_gb: float = 4.0
 
 
 @dataclass

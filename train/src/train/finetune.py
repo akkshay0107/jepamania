@@ -502,7 +502,6 @@ def mixed_replay_batches(
     bootstrap_dataset: SlidingWindowDataset,
     batch_size: int,
     bootstrap_ratio: float,
-    num_workers: int,
     seed: int,
 ):
     """Yield replay batches containing approximately the requested anchor ratio."""
@@ -513,7 +512,6 @@ def mixed_replay_batches(
         online_size,
         shuffle=True,
         drop_last=False,
-        num_workers=num_workers,
         seed=seed,
     )
     bootstrap_loader = DataLoader(
@@ -521,7 +519,6 @@ def mixed_replay_batches(
         bootstrap_size,
         shuffle=True,
         drop_last=False,
-        num_workers=num_workers,
         seed=seed + 1,
     )
     bootstrap_iterator = iter(bootstrap_loader)
@@ -620,7 +617,6 @@ def train_rl(
         rollout_len=ft_cfg.rollout_len,
         discretize_actions=True,
         load_rewards=True,
-        max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
         episode_ids=selected_episode_ids,
         include_terminal_windows=True,
     )
@@ -632,7 +628,6 @@ def train_rl(
         rollout_len=ft_cfg.rollout_len,
         discretize_actions=True,
         load_rewards=True,
-        max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
         include_terminal_windows=True,
     )
     if len(bootstrap_dataset) == 0:
@@ -648,7 +643,6 @@ def train_rl(
         rollout_len=ft_cfg.rollout_len,
         discretize_actions=True,
         load_rewards=True,
-        max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
         episode_ids=qualifying_ids,
         include_terminal_windows=True,
     )
@@ -661,7 +655,6 @@ def train_rl(
     human_dataset = make_policy_dataset(
         human_episodes,
         rollout_len=ft_cfg.rollout_len,
-        max_cache_bytes=int(ft_cfg.max_cache_gb * 1024**3),
     )
     if len(human_dataset) == 0:
         raise RuntimeError("No successful-human policy anchor transitions found")
@@ -726,7 +719,6 @@ def train_rl(
             batch_size=ft_cfg.batch_size,
             shuffle=True,
             drop_last=False,
-            num_workers=ft_cfg.num_workers,
             seed=ft_cfg.seed + 2,
         )
         online_policy_loader = (
@@ -735,7 +727,6 @@ def train_rl(
                 batch_size=ft_cfg.batch_size,
                 shuffle=True,
                 drop_last=False,
-                num_workers=ft_cfg.num_workers,
                 seed=ft_cfg.seed + 3,
             )
             if len(online_policy_dataset) > 0
@@ -755,7 +746,6 @@ def train_rl(
                 bootstrap_dataset,
                 ft_cfg.batch_size,
                 ft_cfg.bootstrap_anchor_ratio,
-                ft_cfg.num_workers,
                 ft_cfg.seed + epoch,
             )
             for replay_batch in replay_batches:
@@ -838,14 +828,6 @@ def train_rl(
     finally:
         if manage_wandb:
             wandb.finish()
-        for dataset in (
-            online_dataset,
-            bootstrap_dataset,
-            online_policy_dataset,
-            human_dataset,
-        ):
-            dataset._pool.cache.clear()
-            dataset._pool.refcounts.clear()
 
     logging.info(f"Fine-tuning complete. Checkpoints written to {output_dir}")
     return models, global_step
