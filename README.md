@@ -158,6 +158,7 @@ Interrupted runs resume from `checkpoints/rl/run_state.json`.
 Training and evaluation rollouts are stored separately so evaluation episodes
 never enter replay. The old `--rollout-file` option remains an alias for the
 training file.
+Replay uses all completed episodes in the training rollout file.
 
 ### Step 6: Checkpoint Export (`tar`)
 Package required configs and model checkpoints into a compressed archive for deployment across machines:
@@ -214,8 +215,6 @@ Defines Sub-JEPA sliced-subspace regularizers, learning rates, schedules, and da
 | `finetune.lr_enc` | `5.0e-6` | Small learning rate for backbone fine-tuning to preserve learned world dynamics. |
 | `finetune.lr_val` | `1.0e-4` | Learning rate for the Huber discounted return value head. |
 | `finetune.value_weight` | `0.5` | Relative loss multiplier between Sub-JEPA predictive loss and Huber value return loss. |
-| `finetune.replay_history_limit` | `32` | Maximum historical episodes mixed with every newly collected batch. |
-| `finetune.replay_recency_decay` | `0.95` | Per-iteration decay used by deterministic historical replay selection. |
 
 ---
 

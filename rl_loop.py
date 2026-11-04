@@ -14,11 +14,7 @@ import jax
 from core.config import load_config
 from train.config import load_train_config
 from train.finetune import train_rl
-from train.priority_dataloader import (
-    EpisodeSummary,
-    read_completed_episode_summaries,
-    select_replay_episodes,
-)
+from train.rollout_episodes import EpisodeSummary, read_completed_episode_summaries
 from win_client.env_patches import apply_online_rl_patches
 from win_client.game_session import GameSessionWorker
 from win_client.mpc_driver import MPCDriver
@@ -311,14 +307,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 save_run_state(args.checkpoints_dir, state)
 
             summaries = read_completed_episode_summaries(args.training_rollout_file)
-            selection = select_replay_episodes(
-                summaries,
-                new_episode_ids=pending,
-                current_iteration=state.iteration,
-                historical_limit=train_cfg.finetune.replay_history_limit,
-                recency_decay=train_cfg.finetune.replay_recency_decay,
-                seed=train_cfg.finetune.seed + state.iteration,
-            )
+            episode_ids = tuple(summary.episode_id for summary in summaries)
             output_dir = args.checkpoints_dir / f"iteration_{state.iteration:04d}"
             _, next_step = train_rl(
                 data_dir=args.training_rollout_file,
@@ -328,7 +317,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 policy_head_path=Path(state.policy_head_checkpoint),
                 model_cfg=model_cfg,
                 train_cfg=train_cfg,
-                episode_ids=selection.episode_ids,
+                episode_ids=episode_ids,
                 step_offset=state.global_step,
                 incumbent_median_frames=state.incumbent_median_frames,
             )

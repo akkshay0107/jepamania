@@ -75,8 +75,6 @@ class FinetuneConfig:
     rollout_len: int = 5
     log_every: int = 50
     max_cache_gb: float = 4.0
-    replay_history_limit: int = 32
-    replay_recency_decay: float = 0.95
 
 
 @dataclass

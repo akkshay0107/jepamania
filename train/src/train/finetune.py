@@ -36,7 +36,7 @@ from train.pretrain import (
     load_checkpoint,
     save_checkpoint,
 )
-from train.priority_dataloader import EpisodeSummary, read_completed_episode_summaries
+from train.rollout_episodes import EpisodeSummary, read_completed_episode_summaries
 
 TRAIN_ROOT = Path(__file__).resolve().parent.parent.parent
 DEFAULT_BOOTSTRAP_DATA_DIR = (

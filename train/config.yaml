@@ -59,5 +59,3 @@ finetune:
   rollout_len: 5
   log_every: 50
   max_cache_gb: 1.0
-  replay_history_limit: 32
-  replay_recency_decay: 0.95
