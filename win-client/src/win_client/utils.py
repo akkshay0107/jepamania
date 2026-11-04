@@ -1,10 +1,7 @@
 import platform
 
 import numpy as np
-from core.config import IMG_HIST_LEN, TELEMETRY_FEATURES
-
-# Spatial resolution expected by the encoder.
-IMG_SIZE: int = 64
+from core.config import IMG_HIST_LEN, IMG_SIZE, TELEMETRY_FEATURES
 
 
 def obs_to_dict(obs, keep_history: bool = False) -> dict[str, np.ndarray]:

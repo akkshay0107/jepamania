@@ -8,11 +8,9 @@ from typing import Any, Optional, cast
 
 import h5py
 import numpy as np
-from core.config import TELEMETRY_FEATURES
+from core.config import IMG_SIZE, TELEMETRY_FEATURES
 
 from win_client.settings import cfg
-
-IMG_SIZE: int = 64
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"

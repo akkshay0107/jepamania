@@ -6,7 +6,6 @@ from typing import Any, Optional
 
 import equinox as eqx
 import jax
-import numpy as np
 from core.actions import to_continuous_action_np
 from core.async_planner import AsyncPlannerWrapper
 from core.config import SubJepaConfig, load_config
@@ -109,14 +108,8 @@ class MPCDriver:
             encoder=self.encoder,
             predictor=self.predictor,
             planner=planner,
-            default_action=0,
             seed=cfg.mpc.seed,
         )
-
-    def _planner_observation(self, raw_obs: Any) -> dict[str, np.ndarray]:
-        observation = obs_to_dict(raw_obs, keep_history=True)
-        observation["screen"] = observation["screen"].astype(np.float32) / 255.0
-        return observation
 
     def collect(
         self,
@@ -140,11 +133,8 @@ class MPCDriver:
         if rollout_file is not None:
             writer = HDF5Writer(Path(rollout_file), append=True)
 
-        raw_obs, _ = env.reset()
         completed_ids: list[int] = []
         active_episode_id: Optional[int] = None
-        self.async_wrapper.reset()
-        self.async_wrapper.start()
 
         def start_episode() -> None:
             nonlocal active_episode_id
@@ -162,15 +152,21 @@ class MPCDriver:
                 }
             )
 
-        start_episode()
         try:
+            self.async_wrapper.reset()
+            self.async_wrapper.start()
+            raw_obs, _ = env.reset()
+            start_episode()
             while num_episodes is None or len(completed_ids) < num_episodes:
-                planner_obs = self._planner_observation(raw_obs)
-                recorded_obs = obs_to_dict(raw_obs)
-                action_index = self.async_wrapper.step(planner_obs)
-                action = to_continuous_action_np(action_index).astype(np.float32)
+                observation = obs_to_dict(raw_obs, keep_history=True)
+                action_index = self.async_wrapper.step(observation)
+                action = to_continuous_action_np(action_index)
                 raw_obs, reward, terminated, truncated, info = env.step(action)
                 if writer is not None:
+                    recorded_obs = {
+                        "screen": observation["screen"][-1:],
+                        "telemetry": observation["telemetry"],
+                    }
                     writer.append(recorded_obs, action, float(reward))
 
                 if not (terminated or truncated):
