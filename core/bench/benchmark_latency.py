@@ -13,7 +13,7 @@ from core.config import (
     PredictorConfig,
 )
 
-from core import ConvEncoder, MLPPredictor, ViTEncoder
+from core import MLPPredictor, ViTEncoder
 
 
 def benchmark(func, args, num_warmup=100, num_runs=1000):
@@ -34,24 +34,21 @@ def benchmark(func, args, num_warmup=100, num_runs=1000):
 
 def main():
     key = jax.random.PRNGKey(0)
-    key_encoder, key_predictor, key_data = jax.random.split(key, 3)
+    key_encoder, key_predictor, key_screen, key_telemetry, key_latent = (
+        jax.random.split(key, 5)
+    )
 
     enc_cfg = EncoderConfig()
-    encoder_conv = ConvEncoder(enc_cfg, key_encoder)
     encoder_vit = ViTEncoder(enc_cfg, key_encoder)
 
     pred_cfg = PredictorConfig()
     predictor = MLPPredictor(pred_cfg, key_predictor)
 
-    screen = jax.random.normal(key_data, (IMG_HIST_LEN, 64, 64))
-    telemetry = jax.random.normal(key_data, (TELEMETRY_FEATURES,))
+    screen = jax.random.normal(key_screen, (IMG_HIST_LEN, 64, 64))
+    telemetry = jax.random.normal(key_telemetry, (TELEMETRY_FEATURES,))
 
-    latent_state = jax.random.normal(key_data, (pred_cfg.latent_dim,))
+    latent_state = jax.random.normal(key_latent, (pred_cfg.latent_dim,))
     action = jnp.array(0, dtype=jnp.int32)
-
-    @eqx.filter_jit
-    def run_conv_encoder(screen_data, telemetry_data):
-        return encoder_conv({"screen": screen_data, "telemetry": telemetry_data})
 
     @eqx.filter_jit
     def run_vit_encoder(screen_data, telemetry_data):
@@ -60,9 +57,6 @@ def main():
     @eqx.filter_jit
     def run_predictor(latent, action_val):
         return predictor(latent, action_val)
-
-    print("Benchmarking Conv Encoder...")
-    conv_enc_latencies = benchmark(run_conv_encoder, (screen, telemetry))
 
     print("Benchmarking ViT Encoder...")
     vit_enc_latencies = benchmark(run_vit_encoder, (screen, telemetry))
@@ -79,25 +73,18 @@ def main():
         print(f"P95:  {np.percentile(latencies, 95):.4f} ms")
         print(f"P99:  {np.percentile(latencies, 99):.4f} ms")
 
-    print_stats("Conv Encoder", conv_enc_latencies)
     print_stats("ViT Encoder", vit_enc_latencies)
     print_stats("Predictor", pred_latencies)
 
-    plt.figure(figsize=(15, 5))
+    plt.figure(figsize=(10, 5))
 
-    plt.subplot(1, 3, 1)
-    plt.hist(conv_enc_latencies, bins=50, color="blue", alpha=0.7)
-    plt.title("Conv Encoder Latency Distribution")
-    plt.xlabel("Latency (ms)")
-    plt.ylabel("Frequency")
-
-    plt.subplot(1, 3, 2)
+    plt.subplot(1, 2, 1)
     plt.hist(vit_enc_latencies, bins=50, color="green", alpha=0.7)
     plt.title("ViT Encoder Latency Distribution")
     plt.xlabel("Latency (ms)")
     plt.ylabel("Frequency")
 
-    plt.subplot(1, 3, 3)
+    plt.subplot(1, 2, 2)
     plt.hist(pred_latencies, bins=50, color="orange", alpha=0.7)
     plt.title("Predictor Latency Distribution")
     plt.xlabel("Latency (ms)")

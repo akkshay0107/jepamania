@@ -13,7 +13,7 @@ JEPAMania separates functional deep learning components into decoupled workspace
 1. **Observation & Telemetry Capture (`win-client`)**  
    Screen frames and nine telemetry values (speed, gear, RPM, and two previous controls) are streamed from Trackmania via Openplanet and `rtgym`.
 2. **Latent Encoding (`core.encoders`)**  
-   A screen encoder (`ViTEncoder` or `ConvEncoder`) compresses frame stacks and telemetry into a compact latent embedding vector $z_t \in \mathbb{R}^{192}$.
+   The ViT screen encoder compresses frame stacks and telemetry into a compact latent embedding vector $z_t \in \mathbb{R}^{192}$.
 3. **Action-Conditioned Latent Rollout (`core.dynamics`)**  
    An autoregressive dynamics predictor (`MLPPredictor`) rolls forward future latent states $z_{t+k}$ across a $K$-step planning horizon given candidate action sequences without frame decoding.
 4. **Real-Time MPC Planning (`core.planners`)**  
@@ -82,13 +82,11 @@ Pretrain the joint `(Encoder, Predictor)` world model on recorded HDF5 shards.
 ```bash
 # Start fresh pretraining with Vision Transformer (ViT) encoder
 uv run --package train python -m train.pretrain \
-  --encoder vit \
   --data-dir win-client/data \
   --checkpoint-dir checkpoints/pretrain
 
 # Resume training from existing checkpoints
 uv run --package train python -m train.pretrain \
-  --encoder vit \
   --resume \
   --checkpoint-dir checkpoints/pretrain
 ```

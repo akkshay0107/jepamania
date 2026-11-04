@@ -30,7 +30,7 @@ from core.config import (
     load_config,
 )
 from core.dynamics import MLPPolicyHead, MLPPredictor, MLPValueHead
-from core.encoders import ConvEncoder, ViTEncoder, load_models_auto
+from core.encoders import ViTEncoder, load_world_model
 from jaxtyping import Array, Float
 from omegaconf import OmegaConf
 
@@ -71,20 +71,18 @@ DEFAULT_CHECKPOINT = (
 )
 DEFAULT_OUTPUT_DIR = TRAIN_ROOT.parent / "checkpoints" / "finetune"
 
-Encoder = Union[ViTEncoder, ConvEncoder]
-Predictor = MLPPredictor
-ValueModels = Tuple[Encoder, Predictor, MLPValueHead]
-SFTModels = Tuple[Encoder, Predictor, MLPValueHead, MLPPolicyHead]
+ValueModels = Tuple[ViTEncoder, MLPPredictor, MLPValueHead]
+SFTModels = Tuple[ViTEncoder, MLPPredictor, MLPValueHead, MLPPolicyHead]
 Batch = Mapping[str, Union[np.ndarray, Array]]
 
 
 def compute_value_loss(
     value_head: MLPValueHead,
-    encoder: Encoder,
+    encoder: ViTEncoder,
     batch: Batch,
     gamma: float,
     stop_grad_encoder: bool = False,
-    predictor: Optional[Predictor] = None,
+    predictor: Optional[MLPPredictor] = None,
 ) -> Float[Array, ""]:
     """Computes K-step discounted return value loss on z_t and predicted states."""
     obs_t = extract_obs(batch)
@@ -137,7 +135,7 @@ def make_warmup_step(optimizer: optax.GradientTransformation, gamma: float):
     @eqx.filter_jit
     def warmup_step(
         value_head: MLPValueHead,
-        frozen_encoder: Encoder,
+        frozen_encoder: ViTEncoder,
         frozen_predictor: Optional[MLPPredictor],
         opt_state: optax.OptState,
         batch: Batch,
@@ -187,10 +185,10 @@ def train_bootstrap(
     key = jax.random.PRNGKey(boot_cfg.seed)
     key_models, key_val, key_proj, key_policy, slice_rng = jax.random.split(key, 5)
 
-    (encoder, predictor), detected_type = load_models_auto(
+    encoder, predictor = load_world_model(
         checkpoint, key_models, model_cfg.encoder, model_cfg.predictor
     )
-    logging.info(f"Loaded Sub-JEPA models ({detected_type} encoder) from {checkpoint}")
+    logging.info("Loaded the ViT world model from %s", checkpoint)
 
     subspace_projectors = load_projectors(checkpoint, key_proj, latent_dim, loss_cfg)
     save_checkpoint(output_dir / "projectors.eqx", subspace_projectors)

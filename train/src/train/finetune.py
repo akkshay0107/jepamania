@@ -18,7 +18,7 @@ from core.config import (
     SubJepaConfig,
 )
 from core.dynamics import MLPPolicyHead, MLPPredictor, MLPValueHead
-from core.encoders import ConvEncoder, ViTEncoder, load_models_auto
+from core.encoders import ViTEncoder, load_world_model
 from jaxtyping import Array, Float
 from omegaconf import OmegaConf
 
@@ -44,9 +44,8 @@ DEFAULT_BOOTSTRAP_DATA_DIR = (
 )
 DEFAULT_SSL_HUMAN_DIR = TRAIN_ROOT.parent / "win-client" / "data" / "ssl" / "human"
 
-Encoder = Union[ViTEncoder, ConvEncoder]
-ValueModels = Tuple[Encoder, MLPPredictor, MLPValueHead]
-RLModels = Tuple[Encoder, MLPPredictor, MLPValueHead, MLPPolicyHead]
+ValueModels = Tuple[ViTEncoder, MLPPredictor, MLPValueHead]
+RLModels = Tuple[ViTEncoder, MLPPredictor, MLPValueHead, MLPPolicyHead]
 JointModels = Union[ValueModels, RLModels]
 Batch = Mapping[str, Union[np.ndarray, Array]]
 
@@ -603,10 +602,10 @@ def train_rl(
     key = jax.random.PRNGKey(ft_cfg.seed)
     key_models, key_val, key_policy, key_proj, slice_rng = jax.random.split(key, 5)
 
-    (encoder, predictor), detected_type = load_models_auto(
+    encoder, predictor = load_world_model(
         checkpoint, key_models, model_cfg.encoder, model_cfg.predictor
     )
-    logging.info(f"Loaded Sub-JEPA models ({detected_type} encoder) from {checkpoint}")
+    logging.info("Loaded the ViT world model from %s", checkpoint)
 
     subspace_projectors = load_projectors(checkpoint, key_proj, latent_dim, loss_cfg)
     save_checkpoint(output_dir / "projectors.eqx", subspace_projectors)

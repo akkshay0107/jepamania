@@ -1,8 +1,8 @@
-"""Screen observation encoders and checkpoint loading."""
+"""ViT screen encoder and world-model checkpoint loading."""
 
 import functools
 from pathlib import Path
-from typing import Any, Mapping, Union
+from typing import Any, Mapping
 
 import equinox as eqx
 import jax
@@ -231,101 +231,16 @@ class ViTEncoder(eqx.Module):
         return z_t
 
 
-class ConvEncoder(eqx.Module):
-    """A simpler model with convolutional backbone and late telemetry fusion."""
-
-    conv1: eqx.nn.Conv2d
-    conv2: eqx.nn.Conv2d
-    conv3: eqx.nn.Conv2d
-    telemetry_mlp: eqx.nn.MLP
-    fusion_mlp: eqx.nn.MLP
-
-    def __init__(self, cfg: EncoderConfig, key: PRNGKeyArray):
-        key_conv1, key_conv2, key_conv3, key_telemetry, key_fusion = jax.random.split(
-            key, 5
-        )
-
-        self.conv1 = eqx.nn.Conv2d(
-            IMG_HIST_LEN, 32, kernel_size=8, stride=4, key=key_conv1
-        )
-        self.conv2 = eqx.nn.Conv2d(32, 64, kernel_size=4, stride=2, key=key_conv2)
-        self.conv3 = eqx.nn.Conv2d(64, 64, kernel_size=3, stride=1, key=key_conv3)
-
-        flattened_img_size = 64 * 4 * 4
-
-        self.telemetry_mlp = eqx.nn.MLP(
-            in_size=TELEMETRY_FEATURES,
-            out_size=64,
-            width_size=128,
-            depth=2,
-            activation=jax.nn.silu,
-            key=key_telemetry,
-        )
-
-        fusion_in = flattened_img_size + 64
-        self.fusion_mlp = eqx.nn.MLP(
-            in_size=fusion_in,
-            out_size=cfg.latent_dim,
-            width_size=512,
-            depth=2,
-            activation=jax.nn.silu,
-            key=key_fusion,
-        )
-
-    def __call__(
-        self,
-        observations: Mapping[str, Any],
-    ) -> Float[Array, "latent_dim"]:
-        screen = observations["screen"]
-        telemetry = normalize_telemetry(observations["telemetry"])
-
-        x_screen = jax.nn.relu(self.conv1(screen))
-        x_screen = jax.nn.relu(self.conv2(x_screen))
-        x_screen = jax.nn.relu(self.conv3(x_screen))
-        x_screen = x_screen.reshape(-1)
-
-        x_telemetry = self.telemetry_mlp(telemetry)
-
-        x_fused = jnp.concatenate([x_screen, x_telemetry], axis=0)
-        return self.fusion_mlp(x_fused)
-
-
-def load_models_auto(
-    path: Union[str, Path],
+def load_world_model(
+    path: str | Path,
     key: PRNGKeyArray,
-    encoder_cfg: Union[EncoderConfig, None] = None,
-    predictor_cfg: Union[PredictorConfig, None] = None,
-) -> tuple[tuple[Union[ViTEncoder, ConvEncoder], MLPPredictor], str]:
-    """Auto-detects and deserializes a combined (encoder, predictor) checkpoint.
-
-    Tries each encoder architecture in turn; the differing PyTree structures
-    make deserialization fail for every class except the one the checkpoint
-    was written with.
-    """
+    encoder_cfg: EncoderConfig,
+    predictor_cfg: PredictorConfig,
+) -> tuple[ViTEncoder, MLPPredictor]:
+    """Load a ViT and predictor checkpoint using the supplied configuration."""
     path = Path(path)
-    if not path.exists():
+    if not path.is_file():
         raise FileNotFoundError(f"Model checkpoint not found: {path}")
-    enc_cfg = encoder_cfg or EncoderConfig()
-    pred_cfg = predictor_cfg or PredictorConfig()
     key_enc, key_pred = jax.random.split(key)
-    errors: list[tuple[str, Exception]] = []
-    for enc_cls, enc_name in (
-        (ViTEncoder, "vit"),
-        (ConvEncoder, "conv"),
-    ):
-        try:
-            template = (enc_cls(enc_cfg, key_enc), MLPPredictor(pred_cfg, key_pred))
-            loaded = eqx.tree_deserialise_leaves(path, template)
-            return loaded, enc_name
-        except Exception as error:
-            # Auto-detection necessarily attempts incompatible templates; retain
-            # each failure so a corrupt or mismatched checkpoint is diagnosable.
-            errors.append((enc_name, error))
-            continue
-    details = "; ".join(
-        f"{name}: {type(error).__name__}: {error}" for name, error in errors
-    )
-    raise ValueError(
-        f"Could not load (encoder, predictor) pair from {path} as ViT or Conv. "
-        f"Attempts: {details}"
-    ) from errors[-1][1]
+    template = (ViTEncoder(encoder_cfg, key_enc), MLPPredictor(predictor_cfg, key_pred))
+    return eqx.tree_deserialise_leaves(path, template)

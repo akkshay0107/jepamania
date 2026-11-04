@@ -15,7 +15,7 @@ import optax
 from core.actions import GAS_BRAKE_VALUES_JAX, NUM_GAS_BRAKE
 from core.config import IMG_HIST_LEN, PolicyHeadConfig
 from core.dynamics import MLPPolicyHead
-from core.encoders import ConvEncoder, ViTEncoder
+from core.encoders import ViTEncoder
 from core.interfaces import Encoder as EncoderProtocol
 from jaxtyping import Array, Float
 
@@ -24,7 +24,6 @@ from train.config import PolicySFTConfig
 from train.dataloader import DataLoader, SlidingWindowDataset
 from train.pretrain import save_checkpoint
 
-ConcreteEncoder = Union[ViTEncoder, ConvEncoder]
 Batch = Mapping[str, Union[np.ndarray, Array]]
 EXCLUDED_TERMINATIONS = frozenset({"manual", "respawn", "stuck", "truncated"})
 MIN_BOOTSTRAP_SUCCESS_REWARD = 99.0
@@ -270,7 +269,7 @@ def make_policy_sft_step(optimizer: optax.GradientTransformation):
 
 
 def train_policy_sft(
-    encoder: ConcreteEncoder,
+    encoder: ViTEncoder,
     dataset: SlidingWindowDataset,
     cfg: PolicySFTConfig,
     policy_cfg: PolicyHeadConfig,

@@ -10,9 +10,8 @@ import numpy as np
 from core.actions import to_continuous_action_np
 from core.async_planner import AsyncPlannerWrapper
 from core.config import SubJepaConfig, load_config
-from core.dynamics import MLPPolicyHead, MLPValueHead
-from core.encoders import load_models_auto
-from core.interfaces import Encoder, Predictor
+from core.dynamics import MLPPolicyHead, MLPPredictor, MLPValueHead
+from core.encoders import ViTEncoder, load_world_model
 from core.planners import create_planner
 
 from win_client.data_writer import HDF5Writer
@@ -26,20 +25,17 @@ def load_subjepa_checkpoint(
     checkpoint_path: str | Path,
     config_path: Optional[str | Path] = None,
     seed: int = 42,
-) -> tuple[Encoder, Predictor, str, SubJepaConfig]:
-    """Load a combined encoder/predictor checkpoint with encoder detection."""
+) -> tuple[ViTEncoder, MLPPredictor, SubJepaConfig]:
+    """Load the ViT world model and its configuration."""
     config_path = config_path or WIN_CLIENT_ROOT.parent / "core" / "config.yaml"
     model_cfg = load_config(str(config_path))
-    path = Path(checkpoint_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Model checkpoint not found: {path}")
-    models, detected_type = load_models_auto(
-        path,
+    encoder, predictor = load_world_model(
+        checkpoint_path,
         jax.random.PRNGKey(seed),
         model_cfg.encoder,
         model_cfg.predictor,
     )
-    return models[0], models[1], detected_type, model_cfg
+    return encoder, predictor, model_cfg
 
 
 def load_value_head_checkpoint(
@@ -94,10 +90,8 @@ class MPCDriver:
 
         self.output_dir = Path(output_dir) if output_dir else None
         self.max_episodes = max_episodes
-        self.encoder, self.predictor, self.encoder_type, self.model_cfg = (
-            load_subjepa_checkpoint(
-                self.checkpoint_path, config_path=config_path, seed=cfg.mpc.seed
-            )
+        self.encoder, self.predictor, self.model_cfg = load_subjepa_checkpoint(
+            self.checkpoint_path, config_path=config_path, seed=cfg.mpc.seed
         )
         self.value_head = load_value_head_checkpoint(
             self.value_head_path, config_path=config_path, seed=cfg.mpc.seed
@@ -162,7 +156,7 @@ class MPCDriver:
                     "iteration": iteration,
                     "map_name": cfg.agent.map_name,
                     "map_uid": cfg.agent.map_uid,
-                    "encoder_type": self.encoder_type,
+                    "encoder_type": "vit",
                     "planner_type": "cem",
                     "timestamp": datetime.datetime.now().isoformat(),
                 }

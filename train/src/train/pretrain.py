@@ -26,7 +26,7 @@ import numpy as np
 import optax
 from core.config import IMG_HIST_LEN, load_config
 from core.dynamics import MLPPredictor
-from core.encoders import ConvEncoder, ViTEncoder
+from core.encoders import ViTEncoder
 from core.interfaces import Encoder, Predictor
 from jaxtyping import Array, Float, Int, PRNGKeyArray, PyTree
 from omegaconf import OmegaConf
@@ -412,12 +412,6 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_DATA_DIR,
         help="Directory of HDF5 shards",
     )
-    parser.add_argument(
-        "--encoder",
-        choices=["vit", "conv"],
-        default="vit",
-        help="Encoder backbone (must match the checkpoint when resuming)",
-    )
     parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
     parser.add_argument(
         "--resume",
@@ -488,10 +482,7 @@ def main() -> None:
     key = jax.random.PRNGKey(seed)
     key_enc, key_pred, key_train = jax.random.split(key, 3)
 
-    if args.encoder == "vit":
-        encoder = ViTEncoder(cfg.encoder, key_enc)
-    else:
-        encoder = ConvEncoder(cfg.encoder, key_enc)
+    encoder = ViTEncoder(cfg.encoder, key_enc)
     predictor = MLPPredictor(cfg.predictor, key_pred)
 
     config_dict = {
