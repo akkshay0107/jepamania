@@ -11,11 +11,13 @@ IMG_SIZE: int = 64
 # (The Openplanet plugin sends 11 floats; distance and position feed the
 # reward function only and never reach the observation.)
 TELEMETRY_FEATURES: int = 9
+ACTION_HISTORY_FEATURES: int = 6
 
 # Gas / Brake -> discretized into 6 bins
 # Steering [-1.0, 1.0] -> discretized into 9 bins
 # so 54 distinct actions possible at any given moment of time
 NUM_ACTIONS: int = 54
+# Learned width; model states append the six known action-history values.
 LATENT_DIM: int = 128
 
 # In TMRL Trackmania (20 FPS), max progress reward per step is ~10.0 at top speed.

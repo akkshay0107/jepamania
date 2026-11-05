@@ -47,7 +47,7 @@ def main():
     screen = jax.random.normal(key_screen, (IMG_HIST_LEN, 64, 64))
     telemetry = jax.random.normal(key_telemetry, (TELEMETRY_FEATURES,))
 
-    latent_state = jax.random.normal(key_latent, (pred_cfg.latent_dim,))
+    latent_state = jax.random.normal(key_latent, (predictor.state_dim,))
     action = jnp.zeros(3, dtype=jnp.float32)
 
     @eqx.filter_jit

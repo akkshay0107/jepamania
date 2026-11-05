@@ -12,7 +12,6 @@ from jaxtyping import Array, Float, PRNGKeyArray
 
 from core.config import (
     IMG_HIST_LEN,
-    TELEMETRY_FEATURES,
     EncoderConfig,
     PredictorConfig,
 )
@@ -180,6 +179,8 @@ class AttentionPool(eqx.Module):
 
 
 class ViTEncoder(eqx.Module):
+    """Encode vision and physical telemetry, then append known control history."""
+
     latent_dim: int = eqx.field(static=True)
     conv_stem: ConvStem
     tel_proj: eqx.nn.Linear
@@ -195,7 +196,7 @@ class ViTEncoder(eqx.Module):
             in_channels=IMG_HIST_LEN, out_channels=cfg.latent_dim, key=key_stem
         )
 
-        self.tel_proj = eqx.nn.Linear(TELEMETRY_FEATURES, cfg.latent_dim, key=key_tel)
+        self.tel_proj = eqx.nn.Linear(3, cfg.latent_dim, key=key_tel)
 
         self.transformer = TransformerStack(
             latent_dim=cfg.latent_dim,
@@ -216,7 +217,8 @@ class ViTEncoder(eqx.Module):
         if self.latent_dim % self.pool.mha.num_heads != 0:
             raise ValueError("ViT width must be divisible by the number of heads.")
 
-    def __call__(self, observations: Mapping[str, Any]) -> Float[Array, "latent_dim"]:
+    def __call__(self, observations: Mapping[str, Any]) -> Float[Array, "state_dim"]:
+        """Return the learned latent followed by two chronological control triplets."""
         screen = observations["screen"]
         telemetry = normalize_telemetry(observations["telemetry"])
 
@@ -228,13 +230,13 @@ class ViTEncoder(eqx.Module):
         # Single telemetry token; it is distinguishable from the visual tokens
         # by the absence of the 2D positional embedding, so no type embedding
         # is needed.
-        tel_token = self.tel_proj(telemetry)[jnp.newaxis, :]
+        tel_token = self.tel_proj(telemetry[:3])[jnp.newaxis, :]
 
         tokens = jnp.concatenate([x_visual, tel_token], axis=0)
 
         tokens = self.transformer(tokens)
         z_t = self.pool(tokens)
-        return z_t
+        return jnp.concatenate([z_t, telemetry[3:]])
 
 
 def load_world_model(

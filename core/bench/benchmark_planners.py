@@ -28,7 +28,7 @@ def benchmark(func, args, num_warmup=10, num_runs=100):
 def main():
     print("Setting up models for benchmarking...")
     key = jax.random.PRNGKey(0)
-    key_pred, key_val, key_pol, key_plan = jax.random.split(key, 4)
+    key_pred, key_val, key_pol, key_state, key_plan = jax.random.split(key, 5)
 
     pred_cfg = PredictorConfig()
     predictor = MLPPredictor(pred_cfg, key_pred)
@@ -43,7 +43,7 @@ def main():
     def objective_fn(latent):
         return value_head(latent)
 
-    latent_state = jax.random.normal(key_plan, (pred_cfg.latent_dim,))
+    latent_state = jax.random.normal(key_state, (predictor.state_dim,))
 
     print(
         f"\n{'Planner':<20} | {'Seq_Len':<10} | {'Params':<30} | {'Mean (ms)':<10} |"

@@ -3,6 +3,7 @@ import functools
 import jax
 import jax.numpy as jnp
 import numpy as np
+from core.config import ACTION_HISTORY_FEATURES
 from jaxtyping import Array, Float, PRNGKeyArray
 
 
@@ -119,13 +120,24 @@ def sub_jepa_regularization(
 
 
 def sub_jepa_loss(
-    predicted_latents: Float[Array, "batch latent_dim"],
-    target_latents: Float[Array, "batch latent_dim"],
+    predicted_latents: Float[Array, "batch state_dim"],
+    target_latents: Float[Array, "batch state_dim"],
     subspace_projectors: Float[Array, "num_subspaces latent_dim subspace_dim"],
     num_slices: int,
     key: PRNGKeyArray,
     reg_weight: float = 1.0,
 ) -> Float[Array, ""]:
+    """Score learned latents, excluding any appended deterministic control history."""
+    latent_dim = subspace_projectors.shape[1]
+    if predicted_latents.shape != target_latents.shape:
+        raise ValueError("Predicted and target model states must have matching shapes.")
+    if target_latents.shape[-1] not in (
+        latent_dim,
+        latent_dim + ACTION_HISTORY_FEATURES,
+    ):
+        raise ValueError("State width must match the learned latent plus history.")
+    predicted_latents = predicted_latents[:, :latent_dim]
+    target_latents = target_latents[:, :latent_dim]
     pred_loss = jnp.mean(
         (predicted_latents - jax.lax.stop_gradient(target_latents)) ** 2
     )
