@@ -171,6 +171,13 @@ def compute_joint_loss(
         num_slices,
         slice_key,
         reg_weight,
+        target_mask=jnp.any(
+            jnp.asarray(
+                batch.get("target_mask_seq", jnp.ones(z_pred_sequence.shape[:2]))
+            )
+            > 0,
+            axis=1,
+        ).astype(jnp.float32),
     )
 
     v_t = jax.vmap(value_head)(z_t)

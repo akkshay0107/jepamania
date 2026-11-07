@@ -54,15 +54,15 @@ CheckpointT = TypeVar("CheckpointT")
 
 def _rollout_latent_sequence(
     predictor: Predictor,
-    z0: Float[Array, "latent_dim"],
+    z0: Float[Array, "state_dim"],
     actions: Float[Array, "K 3"],
-) -> Float[Array, "K latent_dim"]:
+) -> Float[Array, "K state_dim"]:
     """Rolls a single latent forward through K controls, returning all
     intermediate latents."""
 
     def step(
-        z: Float[Array, "latent_dim"], action: Float[Array, "3"]
-    ) -> Tuple[Float[Array, "latent_dim"], Float[Array, "latent_dim"]]:
+        z: Float[Array, "state_dim"], action: Float[Array, "3"]
+    ) -> Tuple[Float[Array, "state_dim"], Float[Array, "state_dim"]]:
         next_z = predictor(z, action)
         return next_z, next_z
 
@@ -107,6 +107,10 @@ def compute_loss(
         num_slices,
         slice_key,
         reg_weight,
+        target_mask=jnp.asarray(
+            batch.get("target_mask_seq", jnp.ones(z_pred_seq.shape[:2])),
+            dtype=jnp.float32,
+        ).reshape(-1),
     )
 
 

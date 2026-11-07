@@ -13,9 +13,9 @@ JEPAMania separates functional deep learning components into decoupled workspace
 1. **Observation & Telemetry Capture (`win-client`)**  
    Screen frames and nine telemetry values (speed, gear, RPM, and two previous controls) are streamed from Trackmania via Openplanet and `rtgym`.
 2. **Latent Encoding (`core.encoders`)**  
-   A convolutional stem turns four grayscale frames into a 4×4 grid of visual tokens. A two-block ViT processes these tokens and one telemetry token, then pools them into a 128-dimensional latent state.
+   A convolutional stem turns four grayscale frames into a 4×4 grid of visual tokens. A two-block, width-128 ViT processes these tokens and speed/gear/RPM telemetry. Its 128 learned values are packed with six known control-history values into a 134-value state.
 3. **Action-Conditioned Latent Rollout (`core.dynamics`)**  
-   A residual MLP predicts the change in latent state from gas, brake, and steering values. SSL uses the recorded controls directly. CEM searches the existing action grid and looks up the corresponding physical controls for each rollout.
+   A residual MLP predicts changes to the learned state from gas, brake, steering, and known history, then shifts history exactly. Sub-JEPA scores the 128 learned values using available future observations. SSL uses recorded physical controls; CEM searches the existing action grid.
 4. **Real-Time MPC Planning (`core.planners`)**  
    A Cross-Entropy Method (CEM) Model-Predictive Control planner evaluates candidate latent trajectories against fine-tuned value heads (`MLPValueHead`) or smoothness penalties. Latency is hardware-dependent and should be measured with the included benchmarks.
 5. **Cyclic Self-Improvement (`train` & `rl_loop.py`)**  

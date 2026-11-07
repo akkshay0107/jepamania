@@ -30,7 +30,7 @@ def generate_subspace_projectors(
     latent_dim: int,
     num_subspaces: int,
     subspace_dim: int,
-):
+) -> Float[Array, "num_subspaces latent_dim subspace_dim"]:
     """Generate the frozen orthogonal subspace bases used by Sub-JEPA."""
     keys_subspace = jax.random.split(key, num_subspaces)
     return _make_projector(keys_subspace, latent_dim, subspace_dim)
@@ -86,19 +86,30 @@ def get_epps_pulley_constants(
     return jnp.asarray(t_np), jnp.asarray(phi_np), jnp.asarray(weights_np)
 
 
-def epps_pulley_1d(h: Float[Array, "batch"]) -> Float[Array, ""]:
-    """Epps-Pulley normality test statistic along a 1D projection slice"""
+def _epps_pulley_1d(
+    h: Float[Array, "batch"], target_mask: Float[Array, "batch"]
+) -> Float[Array, ""]:
     t, phi, weights = get_epps_pulley_constants()
+    # At zero frequency the characteristic-function error is identically zero.
+    t, phi, weights = t[1:], phi[1:], weights[1:]
+    count = jnp.sum(target_mask)
+    normalizer = jnp.maximum(count, 1)
     x_t = h[:, None] * t[None, :]
-    cos_mean = jnp.mean(jnp.cos(x_t), axis=0)
-    sin_mean = jnp.mean(jnp.sin(x_t), axis=0)
+    # Unavailable projections are zero: subtract their unit cosine contributions.
+    cos_mean = (jnp.sum(jnp.cos(x_t), axis=0) - (h.shape[0] - count)) / normalizer
+    sin_mean = jnp.sum(jnp.sin(x_t), axis=0) / normalizer
 
     err = (cos_mean - phi) ** 2 + sin_mean**2
-    return jnp.dot(err, weights) * h.shape[0]
+    return jnp.dot(err, weights) * count
 
 
-_vmap_slices = jax.vmap(epps_pulley_1d, in_axes=1)
-_vmap_subspaces = jax.vmap(_vmap_slices, in_axes=0)
+def epps_pulley_1d(h: Float[Array, "batch"]) -> Float[Array, ""]:
+    """Return the sample-scaled Epps-Pulley statistic for one projection."""
+    return _epps_pulley_1d(h, jnp.ones_like(h))
+
+
+_vmap_slices = jax.vmap(_epps_pulley_1d, in_axes=(1, None))
+_vmap_subspaces = jax.vmap(_vmap_slices, in_axes=(0, None))
 
 
 def sub_jepa_regularization(
@@ -106,7 +117,13 @@ def sub_jepa_regularization(
     subspace_projectors: Float[Array, "num_subspaces latent_dim subspace_dim"],
     num_slices: int,
     key: PRNGKeyArray,
+    target_mask: Float[Array, "batch"] | None = None,
 ) -> Float[Array, ""]:
+    """Match available learned targets to Gaussian projections."""
+    if target_mask is None:
+        target_mask = jnp.ones(target_latents.shape[0], dtype=target_latents.dtype)
+    target_mask = (target_mask > 0).astype(target_latents.dtype)
+    target_latents = jnp.where(target_mask[:, None] > 0, target_latents, 0)
     subspace_latents = _project_into_subspace(target_latents, subspace_projectors)
     slice_projectors = sample_slice_projectors(
         key,
@@ -115,7 +132,7 @@ def sub_jepa_regularization(
         num_slices=num_slices,
     )
     sliced_latents = _project_into_slices(subspace_latents, slice_projectors)
-    ep_stats = _vmap_subspaces(sliced_latents)
+    ep_stats = _vmap_subspaces(sliced_latents, target_mask)
     return jnp.mean(ep_stats)
 
 
@@ -126,6 +143,7 @@ def sub_jepa_loss(
     num_slices: int,
     key: PRNGKeyArray,
     reg_weight: float = 1.0,
+    target_mask: Float[Array, "batch"] | None = None,
 ) -> Float[Array, ""]:
     """Score learned latents, excluding any appended deterministic control history."""
     latent_dim = subspace_projectors.shape[1]
@@ -136,12 +154,22 @@ def sub_jepa_loss(
         latent_dim + ACTION_HISTORY_FEATURES,
     ):
         raise ValueError("State width must match the learned latent plus history.")
-    predicted_latents = predicted_latents[:, :latent_dim]
-    target_latents = target_latents[:, :latent_dim]
-    pred_loss = jnp.mean(
-        (predicted_latents - jax.lax.stop_gradient(target_latents)) ** 2
+    if target_mask is None:
+        target_mask = jnp.ones(target_latents.shape[0], dtype=target_latents.dtype)
+    if target_mask.shape != target_latents.shape[:1]:
+        raise ValueError("Target availability must have one entry per model state.")
+    target_mask = (target_mask > 0).astype(target_latents.dtype)
+    predicted_latents = jnp.where(
+        target_mask[:, None] > 0, predicted_latents[:, :latent_dim], 0
+    )
+    target_latents = jnp.where(
+        target_mask[:, None] > 0, target_latents[:, :latent_dim], 0
+    )
+    prediction_error = predicted_latents - jax.lax.stop_gradient(target_latents)
+    pred_loss = jnp.sum(jnp.mean(prediction_error**2, axis=1)) / jnp.maximum(
+        jnp.sum(target_mask), 1
     )
     reg_loss = sub_jepa_regularization(
-        target_latents, subspace_projectors, num_slices, key
+        target_latents, subspace_projectors, num_slices, key, target_mask
     )
     return pred_loss + reg_weight * reg_loss
