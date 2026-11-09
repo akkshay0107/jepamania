@@ -11,11 +11,13 @@ import numpy as np
 from jaxtyping import Array, Float, PRNGKeyArray
 
 from core.config import (
+    ACTION_HISTORY_FEATURES,
     IMG_HIST_LEN,
+    TELEMETRY_SCALE,
     EncoderConfig,
     PredictorConfig,
 )
-from core.dynamics import MLPPredictor
+from core.dynamics import MLPPredictor, RewardQHead
 
 
 def normalize_telemetry(
@@ -24,7 +26,7 @@ def normalize_telemetry(
     """Scale raw telemetry consistently for training and inference, without clipping."""
     # Speed, gear, RPM, then two chronological [gas, brake, steer] actions.
     scales = jnp.asarray(
-        [100.0, 6.0, 10000.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], dtype=jnp.float32
+        (*TELEMETRY_SCALE, *((1.0,) * ACTION_HISTORY_FEATURES)), dtype=jnp.float32
     )
     return jnp.asarray(telemetry, dtype=jnp.float32) / scales
 
@@ -252,3 +254,6 @@ def load_world_model(
     key_enc, key_pred = jax.random.split(key)
     template = (ViTEncoder(encoder_cfg, key_enc), MLPPredictor(predictor_cfg, key_pred))
     return eqx.tree_deserialise_leaves(path, template)
+
+
+type DrivingModels = tuple[ViTEncoder, MLPPredictor, RewardQHead]

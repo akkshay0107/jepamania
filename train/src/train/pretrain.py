@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple, cast
 
@@ -15,7 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from core.actions import ACTION_GRID_NP
-from core.config import SubJepaConfig, load_config
+from core.config import PIXEL_SCALE, SubJepaConfig, load_config
 from core.dynamics import MLPPredictor
 from core.encoders import ViTEncoder, load_world_model
 from core.interfaces import Encoder, Predictor
@@ -68,7 +68,7 @@ def encode(
     encoder: Encoder, frames: Array | np.ndarray, telemetry: Array | np.ndarray
 ) -> Float[Array, "*leading state_dim"]:
     """Encode a batch or sequence while transferring compact uint8 frames."""
-    pixels = jnp.asarray(frames, dtype=jnp.float32) / 255.0
+    pixels = jnp.asarray(frames, dtype=jnp.float32) / PIXEL_SCALE
     telemetry = jnp.asarray(telemetry, dtype=jnp.float32)
     flat = jax.vmap(encoder)(
         {
@@ -158,7 +158,40 @@ def ssl_metrics(predicted, targets, batch, bases, key, loss: LossConfig) -> Metr
         "ssl": prediction + alpha * regularization,
         "prediction": prediction,
         "regularization": regularization,
+        "weighted_regularization": alpha * regularization,
     }
+
+
+def make_gradient_probe(objective: Callable, components: tuple[str, ...]):
+    """Measure component norms and directional agreement on a fixed batch."""
+
+    @eqx.filter_jit
+    def probe(state, key, *batches):
+        def values(models):
+            _, metrics = objective(models, state.targets, state.bases, key, *batches)
+            return jnp.stack([metrics[name] for name in components])
+
+        _, pullback = eqx.filter_vjp(values, state.models)
+        gradients = [
+            pullback(direction)[0][0]  # Compare gradients on the encoder.
+            for direction in jnp.eye(len(components), dtype=jnp.float32)
+        ]
+        norms = [optax.global_norm(gradient) for gradient in gradients]
+        result = dict(zip(components, norms, strict=True))
+        for i, first in enumerate(components):
+            for j in range(i):
+                pairs = zip(
+                    jax.tree.leaves(gradients[i]),
+                    jax.tree.leaves(gradients[j]),
+                    strict=True,
+                )
+                dot = sum(jnp.vdot(a, b) for a, b in pairs)
+                result[f"{first}_vs_{components[j]}"] = dot / jnp.maximum(
+                    norms[i] * norms[j], 1e-12
+                )
+        return result
+
+    return probe
 
 
 def make_update[ModelT, TargetT](
@@ -214,7 +247,7 @@ def make_optimizer(models, schedules: tuple[optax.ScalarOrSchedule, ...]):
         jax.tree.map(lambda _: f"group_{index}", eqx.filter(model, eqx.is_array))
         for index, model in enumerate(models)
     )
-    transforms = {
+    transforms: dict[Hashable, optax.GradientTransformation] = {
         f"group_{index}": optax.adamw(
             schedule,
             weight_decay=1e-4,
@@ -228,12 +261,19 @@ def make_optimizer(models, schedules: tuple[optax.ScalarOrSchedule, ...]):
 
 
 def new_state(models, optimizer, targets, key, latent_dim: int, loss: LossConfig):
+    if loss.num_subspaces <= 0 or loss.num_slices <= 0:
+        raise ValueError("SubJEPA requires positive subspace and slice counts.")
+    subspace_dim = loss.subspace_dim
+    if subspace_dim is None:
+        subspace_dim = latent_dim // loss.num_subspaces
+    if not 1 <= subspace_dim <= latent_dim:
+        raise ValueError("SubJEPA subspace width must fit the learned latent.")
     key, basis_key = jax.random.split(key)
     bases = generate_subspace_projectors(
         basis_key,
         latent_dim,
         loss.num_subspaces,
-        loss.subspace_dim or latent_dim // loss.num_subspaces,
+        subspace_dim,
     )
     return LearnerState(
         models,
@@ -245,13 +285,19 @@ def new_state(models, optimizer, targets, key, latent_dim: int, loss: LossConfig
     )
 
 
-def save_checkpoint(path: str | Path, tree: PyTree) -> None:
+def save_checkpoint(
+    path: str | Path, tree: PyTree, *, metadata: Mapping[str, object] | None = None
+) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     file = tempfile.NamedTemporaryFile(dir=path.parent, delete=False)
     temp = Path(file.name)
     try:
         with file:
+            if metadata is not None:
+                file.write(
+                    (json.dumps(metadata, allow_nan=False) + "\n").encode("utf-8")
+                )
             eqx.tree_serialise_leaves(file, tree)
             file.flush()
             os.fsync(file.fileno())
@@ -270,6 +316,8 @@ def log_json(path: Path, metrics: Mapping[str, object]) -> None:
 
 
 def legacy_splits(root: Path, rollout_len: int, val_ratio: float, seed: int):
+    if not 0 <= val_ratio < 1:
+        raise ValueError("Validation ratio must be in [0, 1).")
     paths = [root] if root.is_file() else sorted(root.rglob("*.h5"))
     groups: dict[str, list[Path]] = {}
     provenance = {}
@@ -286,6 +334,9 @@ def legacy_splits(root: Path, rollout_len: int, val_ratio: float, seed: int):
                 "source": source,
                 "recorded_map_name": str(attrs.get("map_name", "unknown")),
                 "recorded_map_uid": str(attrs.get("map_uid", "unknown")),
+                "source_revision": str(file.attrs.get("source_revision", "unknown")),
+                "source_sha256": str(file.attrs.get("source_sha256", "unknown")),
+                "size": path.stat().st_size,
             }
 
     train, validation = [], []
@@ -333,8 +384,6 @@ def run_pretrain(args, model_cfg: SubJepaConfig, config: TrainConfig) -> None:
     cfg = config.pretrain
     if cfg.updates <= 0 or cfg.batch_size <= 0 or cfg.log_every <= 0:
         raise ValueError("Updates, batch size and logging interval must be positive.")
-    if not 0 <= cfg.val_ratio < 1:
-        raise ValueError("Validation ratio must be in [0, 1).")
     train, validation, sources = legacy_splits(
         args.data_dir, cfg.rollout_len, cfg.val_ratio, cfg.seed
     )
@@ -363,6 +412,7 @@ def run_pretrain(args, model_cfg: SubJepaConfig, config: TrainConfig) -> None:
     objective = make_ssl_objective(config.loss)
     update = make_update(optimizer, objective, lambda _models, targets: targets)
     evaluate = eqx.filter_jit(objective)
+    probe = make_gradient_probe(objective, ("prediction", "weighted_regularization"))
     out = args.checkpoint_dir
     out.mkdir(parents=True, exist_ok=True)
     manifest_path = out / "run.json"
@@ -388,6 +438,7 @@ def run_pretrain(args, model_cfg: SubJepaConfig, config: TrainConfig) -> None:
     else:
         if manifest_path.exists():
             raise FileExistsError(f"Use --resume or a new run directory: {out}")
+        save_checkpoint(checkpoint, (state, 0))
         manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         start = 0
 
@@ -396,6 +447,10 @@ def run_pretrain(args, model_cfg: SubJepaConfig, config: TrainConfig) -> None:
         if validation
         else None
     )
+    diagnostic_batch = sample_legacy(
+        train, min(4, cfg.batch_size), np.random.default_rng(cfg.seed + 1)
+    )[0]
+    diagnostic_key = jax.random.key(cfg.seed + 1)
     for attempt in range(start, cfg.updates):
         rng = np.random.default_rng(np.random.SeedSequence([cfg.seed, attempt]))
         batch, indices = sample_legacy(train, cfg.batch_size, rng)
@@ -407,7 +462,9 @@ def run_pretrain(args, model_cfg: SubJepaConfig, config: TrainConfig) -> None:
                 {"attempt": attempt + 1, "rejected_batch": indices},
             )
         elif report_step:
-            report = {name: float(value) for name, value in metrics.items()}
+            report: dict[str, object] = {
+                name: float(value) for name, value in metrics.items()
+            }
             report.update(
                 {
                     "updates": int(state.updates),
@@ -431,6 +488,12 @@ def run_pretrain(args, model_cfg: SubJepaConfig, config: TrainConfig) -> None:
                         for name, value in val_metrics.items()
                     }
                 )
+            report["encoder_gradients"] = {
+                name: float(value)
+                for name, value in probe(
+                    state, diagnostic_key, diagnostic_batch
+                ).items()
+            }
             log_json(out / "metrics.jsonl", report)
             print(json.dumps(report), flush=True)
         if report_step:

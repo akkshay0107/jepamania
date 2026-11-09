@@ -1,186 +1,195 @@
-from typing import Any, Callable, Optional, Tuple
+"""Categorical CEM with learned interval rewards and a terminal Q estimate."""
+
+from typing import TYPE_CHECKING, NamedTuple
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jax.tree_util import Partial
-from jaxtyping import Array, Float, Int, PRNGKeyArray
+from jaxtyping import Array, PRNGKeyArray
 
-from core.actions import ACTION_GRID_JAX, unit_transition_cost_matrix
+from core.actions import ACTION_GRID_JAX
 from core.config import NUM_ACTIONS, PlannerConfig
-from core.interfaces import Predictor
+from core.dynamics import MLPPredictor, RewardQHead, search_transition
+
+if TYPE_CHECKING:
+    from typing import Annotated as Bool
+    from typing import Annotated as Float
+    from typing import Annotated as Int
+else:
+    from jaxtyping import Bool, Float, Int
+
+GUIDED_SAMPLES = 32
+UNIFORM_MIX = 0.05
 
 
-def _compute_sequence_penalties(
-    action_seqs: Int[Array, "... sequence_len"],
-    smoothness_weight: float,
-    prev_action: Optional[Int[Array, ""]] = None,
-) -> Float[Array, "..."]:
-    if smoothness_weight <= 0.0:
-        return jnp.zeros(action_seqs.shape[:-1], dtype=jnp.float32)
+class Plan(NamedTuple):
+    actions: Int[Array, "horizon"]
+    probabilities: Float[Array, "horizon actions"]
+    valid: Bool[Array, ""]
 
-    cost_matrix = smoothness_weight * unit_transition_cost_matrix()
-    transitions = cost_matrix[action_seqs[..., :-1], action_seqs[..., 1:]]
-    penalties = jnp.sum(transitions, axis=-1)
 
-    if prev_action is not None:
-        first_actions = action_seqs[..., 0]
-        penalties = penalties + cost_matrix[prev_action, first_actions]
+def uniform_mix(probs: Float[Array, "... actions"]) -> Float[Array, "... actions"]:
+    return (1 - UNIFORM_MIX) * probs + UNIFORM_MIX / NUM_ACTIONS
 
-    return penalties
+
+def sample_actions(probs: Float[Array, "... actions"], key: PRNGKeyArray):
+    # One uniform per draw suffices for a positive categorical distribution.
+    draws = jax.random.uniform(key, probs.shape[:-1])
+    cumulative = jnp.cumsum(probs[..., :-1], axis=-1)
+    return jnp.sum(draws[..., None] >= cumulative, axis=-1, dtype=jnp.int32)
+
+
+def _discounted_sum(rewards: Float[Array, "horizon ..."], gamma: float):
+    discounts = gamma ** jnp.arange(rewards.shape[0], dtype=jnp.float32)
+    return discounts @ rewards
+
+
+def rollout_reward(
+    predictor: MLPPredictor,
+    head: RewardQHead,
+    root: Float[Array, "state_dim"],
+    actions: Int[Array, "horizon"],
+    gamma: float,
+) -> tuple[Float[Array, ""], Float[Array, "state_dim"]]:
+    def step(state, action):
+        rewards, _ = head.for_search(state)
+        return search_transition(predictor, state, ACTION_GRID_JAX[action]), rewards[
+            action
+        ]
+
+    tail, rewards = jax.lax.scan(step, root, actions)
+    return _discounted_sum(rewards, gamma), tail
 
 
 class CEMPlanner(eqx.Module):
-    """
-    Iteratively samples action sequences from a parameterized distribution,
-    evaluates them, and updates the distribution towards high-reward trajectories.
-    """
+    horizon: int = eqx.field(static=True)
+    iterations: int = eqx.field(static=True)
+    samples: int = eqx.field(static=True)
+    elites: int = eqx.field(static=True)
+    elite_weight: float = eqx.field(static=True)
+    gamma: float = eqx.field(static=True)
 
-    predictor: Predictor
-    objective_fn: Callable[[Float[Array, "latent_dim"]], Float[Array, ""]]
-    sequence_len: int = eqx.field(static=True)
-    num_iters: int = eqx.field(static=True)
-    num_samples: int = eqx.field(static=True)
-    num_elites: int = eqx.field(static=True)
-    alpha: float = eqx.field(static=True)
-    policy_head: Optional[
-        Callable[[Float[Array, "latent_dim"]], Float[Array, "NUM_ACTIONS"]]
-    ] = None
-    smoothness_weight: float = eqx.field(default=0.0, static=True)
+    def __init__(self, config: PlannerConfig, gamma: float) -> None:
+        self.horizon = config.sequence_len
+        self.iterations = config.cem_iters
+        self.samples = config.cem_samples
+        self.elites = config.cem_elites
+        self.elite_weight = config.cem_alpha
+        self.gamma = gamma
 
-    def __init__(
-        self,
-        predictor: Predictor,
-        objective_fn: Callable[[Float[Array, "latent_dim"]], Float[Array, ""]],
-        sequence_len: int,
-        num_iters: int,
-        num_samples: int,
-        num_elites: int,
-        alpha: float,
-        policy_head: Optional[
-            Callable[[Float[Array, "latent_dim"]], Float[Array, "NUM_ACTIONS"]]
-        ] = None,
-        smoothness_weight: float = 0.0,
-    ) -> None:
-        if sequence_len <= 0:
-            raise ValueError("CEM sequence_len must be positive.")
-        if num_iters <= 0:
-            raise ValueError("CEM num_iters must be positive.")
-        if num_samples <= 0:
-            raise ValueError("CEM num_samples must be positive.")
-        if not 0 < num_elites <= num_samples:
-            raise ValueError("CEM num_elites must be in [1, num_samples].")
-        if not 0.0 <= alpha <= 1.0:
-            raise ValueError("CEM alpha must be in [0, 1].")
-        if smoothness_weight < 0.0:
-            raise ValueError("CEM smoothness_weight must be non-negative.")
-
-        self.predictor = predictor
-        self.objective_fn = objective_fn
-        self.sequence_len = sequence_len
-        self.num_iters = num_iters
-        self.num_samples = num_samples
-        self.num_elites = num_elites
-        self.alpha = alpha
-        self.policy_head = policy_head
-        self.smoothness_weight = smoothness_weight
-
-    def _step_fn(
-        self,
-        latent: Float[Array, "latent_dim"],
-        action: Float[Array, "3"],
-    ) -> Tuple[Float[Array, "latent_dim"], None]:
-        next_state = self.predictor(latent, action)
-        return next_state, None
-
-    def _rollout_fn(
-        self,
-        actions: Float[Array, "sequence_len 3"],
-        current_latent_state: Float[Array, "latent_dim"],
-    ) -> Float[Array, ""]:
-        scan_step = Partial(self._step_fn)
-        final_latent, _ = jax.lax.scan(scan_step, current_latent_state, actions)
-        return self.objective_fn(final_latent)
-
-    def _cem_iter_fn(
-        self,
-        logits: Float[Array, "sequence_len NUM_ACTIONS"],
-        iter_key: PRNGKeyArray,
-        *,
-        current_latent_state: Float[Array, "latent_dim"],
-        prev_action: Optional[Int[Array, ""]] = None,
-    ) -> Tuple[Float[Array, "sequence_len NUM_ACTIONS"], Int[Array, "sequence_len"]]:
-        action_seqs = jax.random.categorical(
-            iter_key, logits, shape=(self.num_samples, self.sequence_len)
-        )
-        rollout_wrapper = Partial(
-            self._rollout_fn, current_latent_state=current_latent_state
-        )
-        scores = jax.vmap(rollout_wrapper)(ACTION_GRID_JAX[action_seqs])
-        if self.smoothness_weight > 0.0:
-            penalties = _compute_sequence_penalties(
-                action_seqs, self.smoothness_weight, prev_action
+    def __check_init__(self) -> None:
+        if min(self.horizon, self.iterations, self.elites) <= 0:
+            raise ValueError(
+                "CEM horizon, iterations, and elite count must be positive."
             )
-            scores = scores - penalties
+        if self.samples < GUIDED_SAMPLES + 2 + self.elites:
+            raise ValueError(
+                "CEM needs slots for guided sequences and retained elites."
+            )
+        if not 0 < self.elite_weight <= 1 or not 0 < self.gamma <= 1:
+            raise ValueError("CEM elite weight and discount must be in (0, 1].")
 
-        _, topk_indices = jax.lax.top_k(scores, self.num_elites)
-        elites = action_seqs[topk_indices]
+    def empty_plan(self) -> Plan:
+        return Plan(
+            jnp.zeros(self.horizon, dtype=jnp.int32),
+            jnp.full((self.horizon, NUM_ACTIONS), 1 / NUM_ACTIONS, dtype=jnp.float32),
+            jnp.asarray(False),
+        )
 
-        elite_one_hot = jax.nn.one_hot(elites, NUM_ACTIONS)
-        elite_probs = jnp.mean(elite_one_hot, axis=0)
+    def score(
+        self,
+        predictor: MLPPredictor,
+        head: RewardQHead,
+        root: Float[Array, "state_dim"],
+        actions: Int[Array, "horizon"],
+    ) -> Float[Array, ""]:
+        reward, tail = rollout_reward(predictor, head, root, actions, self.gamma)
+        _, tail_q = head.for_search(tail)
+        return reward + self.gamma**self.horizon * jnp.max(tail_q)
 
-        current_probs = jax.nn.softmax(logits, axis=-1)
-        updated_probs = (1 - self.alpha) * current_probs + self.alpha * elite_probs
+    def _guided(self, predictor, head, root, key):
+        states = jnp.broadcast_to(root, (GUIDED_SAMPLES + 1, root.shape[0]))
 
-        updated_logits = jnp.log(updated_probs + 1e-6)
-        return updated_logits, elites[0]
+        def step(states, step_key):
+            rewards, q = jax.vmap(head.for_search)(states)
+            scale = jnp.maximum(jnp.std(q, axis=-1, keepdims=True), 0.1)
+            probs = uniform_mix(jax.nn.softmax((q - q.mean(-1, keepdims=True)) / scale))
+            actions = sample_actions(probs, step_key)
+            actions = actions.at[0].set(jnp.argmax(q[0]))
+            next_states = jax.vmap(search_transition, in_axes=(None, 0, 0))(
+                predictor, states, ACTION_GRID_JAX[actions]
+            )
+            selected_rewards = jnp.take_along_axis(rewards, actions[:, None], axis=-1)[
+                :, 0
+            ]
+            return next_states, (actions, selected_rewards)
+
+        tail, (actions, rewards) = jax.lax.scan(
+            step, states, jax.random.split(key, self.horizon)
+        )
+        _, tail_q = jax.vmap(head.for_search)(tail)
+        scores = _discounted_sum(
+            rewards, self.gamma
+        ) + self.gamma**self.horizon * jnp.max(tail_q, axis=-1)
+        return actions.T, scores
 
     def __call__(
         self,
-        current_latent_state: Float[Array, "latent_dim"],
-        **kwargs: Any,
-    ) -> Int[Array, "sequence_len"]:
-        key: Optional[PRNGKeyArray] = kwargs.get("key")
-        if key is None:
-            raise ValueError("CEMPlanner requires a PRNGKey passed as 'key' in kwargs.")
-
-        prev_action: Optional[Int[Array, ""]] = kwargs.get("prev_action")
-
-        init_logits = jnp.zeros((self.sequence_len, NUM_ACTIONS))
-        if self.policy_head is not None:
-            prior_probs = self.policy_head(current_latent_state)
-            # Epsilon-mixing guarantees probs > 0, so log is perfectly safe
-            init_logits = init_logits.at[0].set(jnp.log(prior_probs))
-
-        cem_iter_wrapper = Partial(
-            self._cem_iter_fn,
-            current_latent_state=current_latent_state,
-            prev_action=prev_action,
+        predictor: MLPPredictor,
+        head: RewardQHead,
+        root: Float[Array, "state_dim"],
+        previous: Plan,
+        key: PRNGKeyArray,
+    ) -> Plan:
+        shifted_probs = jnp.concatenate(
+            (previous.probabilities[1:], jnp.full((1, NUM_ACTIONS), 1 / NUM_ACTIONS))
         )
+        random_count = self.samples - GUIDED_SAMPLES - 1
+        starting_elites = jnp.zeros((self.elites, self.horizon), dtype=jnp.int32)
 
-        keys = jax.random.split(key, self.num_iters)
-        _, best_seqs = jax.lax.scan(cem_iter_wrapper, init_logits, keys)
+        def iteration(carry, item):
+            probs, best, best_score, old_elites = carry
+            index, iter_key = item
+            guided_key, search_key = jax.random.split(iter_key)
+            guided, guided_scores = self._guided(predictor, head, root, guided_key)
+            frequencies = jax.nn.one_hot(guided[1:], NUM_ACTIONS).mean(axis=0)
+            initial = uniform_mix(
+                jnp.where(
+                    previous.valid, 0.5 * (frequencies + shifted_probs), frequencies
+                )
+            )
+            probs = jnp.where(index == 0, initial, probs)
+            random = sample_actions(
+                jnp.broadcast_to(probs, (random_count, *probs.shape)), search_key
+            )
+            shifted_best = jnp.concatenate((previous.actions[1:], guided[0, -1:]))
+            reserved = jnp.where(previous.valid, shifted_best, random[0])
+            retained = jnp.where(index > 0, old_elites, random[1 : self.elites + 1])
+            search_candidates = jnp.concatenate(
+                (reserved[None], retained, random[self.elites + 1 :])
+            )
+            search_scores = jax.vmap(self.score, in_axes=(None, None, None, 0))(
+                predictor, head, root, search_candidates
+            )
+            candidates = jnp.concatenate((guided, search_candidates))
+            scores = jnp.concatenate((guided_scores, search_scores))
+            elite_scores, elite_indices = jax.lax.top_k(scores, self.elites)
+            elites = candidates[elite_indices]
+            elite_frequency = jax.nn.one_hot(elites, NUM_ACTIONS).mean(axis=0)
+            probs = uniform_mix(
+                (1 - self.elite_weight) * probs + self.elite_weight * elite_frequency
+            )
+            best = jnp.where(elite_scores[0] > best_score, elites[0], best)
+            return (probs, best, jnp.maximum(best_score, elite_scores[0]), elites), None
 
-        return best_seqs[-1]
-
-
-def create_planner(
-    cfg: PlannerConfig,
-    predictor: Predictor,
-    objective_fn: Callable[[Float[Array, "latent_dim"]], Float[Array, ""]],
-    policy_head: Optional[
-        Callable[[Float[Array, "latent_dim"]], Float[Array, "NUM_ACTIONS"]]
-    ] = None,
-) -> Any:
-    """Instantiates the CEM trajectory planner from a PlannerConfig."""
-    return CEMPlanner(
-        predictor=predictor,
-        objective_fn=objective_fn,
-        policy_head=policy_head,
-        sequence_len=cfg.sequence_len,
-        smoothness_weight=cfg.smoothness_weight,
-        num_iters=cfg.cem_iters,
-        num_samples=cfg.cem_samples,
-        num_elites=cfg.cem_elites,
-        alpha=cfg.cem_alpha,
-    )
+        (probs, best, _, _), _ = jax.lax.scan(
+            iteration,
+            (
+                previous.probabilities,
+                previous.actions,
+                jnp.asarray(-jnp.inf),
+                starting_elites,
+            ),
+            (jnp.arange(self.iterations), jax.random.split(key, self.iterations)),
+        )
+        return Plan(best, probs, jnp.asarray(True))

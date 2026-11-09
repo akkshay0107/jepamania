@@ -1,14 +1,12 @@
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Float, PRNGKeyArray
+from jaxtyping import Array, Bool, Float, PRNGKeyArray
 
 from core.config import (
     ACTION_HISTORY_FEATURES,
     NUM_ACTIONS,
-    PolicyHeadConfig,
     PredictorConfig,
-    ValueHeadConfig,
 )
 
 
@@ -58,58 +56,66 @@ class MLPPredictor(eqx.Module):
         return jnp.concatenate([next_latent, next_history])
 
 
-class MLPValueHead(eqx.Module):
-    value_mlp: eqx.nn.MLP
+class RewardQHead(eqx.Module):
+    """Predict interval rewards and returns for the same discrete actions."""
 
-    def __init__(self, cfg: ValueHeadConfig, key: PRNGKeyArray):
-        self.value_mlp = eqx.nn.MLP(
-            in_size=cfg.latent_dim + ACTION_HISTORY_FEATURES,
-            out_size=1,
-            width_size=cfg.hidden_dim,
-            depth=3,
-            activation=jax.nn.silu,
-            key=key,
+    latent_dim: int = eqx.field(static=True)
+    hidden: tuple[eqx.nn.Linear, eqx.nn.Linear]
+    reward: eqx.nn.Linear
+    q: eqx.nn.Linear
+
+    def __init__(self, latent_dim: int, key: PRNGKeyArray) -> None:
+        self.latent_dim = latent_dim
+        first, second, reward, value = jax.random.split(key, 4)
+        width = 256
+        self.hidden = (
+            eqx.nn.Linear(latent_dim + ACTION_HISTORY_FEATURES, width, key=first),
+            eqx.nn.Linear(width, width, key=second),
         )
 
-    def __call__(self, latent_state: Float[Array, "state_dim"]) -> Float[Array, ""]:
-        return self.value_mlp(latent_state).squeeze(axis=-1)
+        def zero_projection(output_key):
+            projection = eqx.nn.Linear(width, NUM_ACTIONS, key=output_key)
+            return eqx.tree_at(
+                lambda layer: (layer.weight, layer.bias),
+                projection,
+                (
+                    jnp.zeros_like(projection.weight),
+                    jnp.zeros(NUM_ACTIONS, dtype=projection.weight.dtype),
+                ),
+            )
 
+        self.reward = zero_projection(reward)
+        self.q = zero_projection(value)
 
-class MLPPolicyHead(eqx.Module):
-    policy_mlp: eqx.nn.MLP
-    temperature: float = eqx.field(static=True)
-    epsilon: float = eqx.field(static=True)
-
-    def __init__(self, cfg: PolicyHeadConfig, key: PRNGKeyArray):
-        if cfg.temperature <= 0.0:
-            raise ValueError("Policy temperature must be positive.")
-        if not 0.0 <= cfg.epsilon <= 1.0:
-            raise ValueError("Policy epsilon must be in [0, 1].")
-
-        self.policy_mlp = eqx.nn.MLP(
-            in_size=cfg.latent_dim + ACTION_HISTORY_FEATURES,
-            out_size=NUM_ACTIONS,
-            width_size=cfg.hidden_dim,
-            depth=3,
-            activation=jax.nn.silu,
-            key=key,
-        )
-        self.temperature = cfg.temperature
-        self.epsilon = cfg.epsilon
-
-    def raw_logits(
-        self, latent_state: Float[Array, "state_dim"]
-    ) -> Float[Array, "NUM_ACTIONS"]:
-        """Return unsmoothed categorical logits for training."""
-        return self.policy_mlp(latent_state)
+    def __check_init__(self) -> None:
+        if self.latent_dim <= 0:
+            raise ValueError("Learned latent width must be positive.")
 
     def __call__(
-        self, latent_state: Float[Array, "state_dim"]
-    ) -> Float[Array, "NUM_ACTIONS"]:
-        """
-        Returns smoothed probabilities using temperature scaling and epsilon mixing.
-        """
-        logits = self.raw_logits(latent_state)
-        scaled_logits = logits / self.temperature
-        probs = jax.nn.softmax(scaled_logits)
-        return self.epsilon / NUM_ACTIONS + (1.0 - self.epsilon) * probs
+        self, state: Float[Array, "state_dim"]
+    ) -> tuple[Float[Array, "actions"], Float[Array, "actions"]]:
+        features = state
+        for layer in self.hidden:
+            features = jax.nn.silu(layer(features))
+        return self.reward(features), self.q(features)
+
+    def for_search(
+        self, state: Float[Array, "state_dim"]
+    ) -> tuple[Float[Array, "actions"], Float[Array, "actions"]]:
+        reward, q = self(state)
+        absorbing = is_absorbing(state, self.latent_dim)
+        return jnp.where(absorbing, 0.0, reward), jnp.where(absorbing, 0.0, q)
+
+
+def is_absorbing(state: Float[Array, "state_dim"], latent_dim: int) -> Bool[Array, ""]:
+    return jnp.all(state[:latent_dim] == 0)
+
+
+def search_transition(
+    predictor: MLPPredictor, state: Float[Array, "state_dim"], action: Float[Array, "3"]
+) -> Float[Array, "state_dim"]:
+    next_state = predictor(state, action)
+    absorbing = is_absorbing(state, predictor.latent_dim) | is_absorbing(
+        next_state, predictor.latent_dim
+    )
+    return jnp.where(absorbing, jnp.zeros_like(next_state), next_state)

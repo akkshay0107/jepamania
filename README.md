@@ -17,20 +17,9 @@ JEPAMania separates functional deep learning components into decoupled workspace
 3. **Action-Conditioned Latent Rollout (`core.dynamics`)**  
    A residual MLP predicts changes to the learned state from gas, brake, steering, and known history, then shifts history exactly. Sub-JEPA scores the 128 learned values using available future observations. SSL uses recorded physical controls; CEM searches the existing action grid.
 4. **Real-Time MPC Planning (`core.planners`)**  
-   A Cross-Entropy Method (CEM) Model-Predictive Control planner evaluates candidate latent trajectories against fine-tuned value heads (`MLPValueHead`) or smoothness penalties. Latency is hardware-dependent and should be measured with the included benchmarks.
-5. **Cyclic Self-Improvement (`train` & `rl_loop.py`)**  
-   Recorded gameplay shards feed self-supervised **Sub-JEPA Sliced-Subspace Pretraining** and downstream joint **Value/Policy Fine-Tuning** to continually improve driving performance.
-
-### Key Architectural Highlights
-
-- **Sliced-Subspace Regularization**:  
-  To prevent representational collapse without contrastive negative pairs, Sub-JEPA projects embeddings across $M$ orthogonal subspaces and $S$ 1D slices, matching predicted latents against target latents stably.
-- **Real-Time Latent Planning**:  
-  Executes up to 128 parallel rollout trajectories per control tick using JAX `vmap`/`jit` for low-latency decision making.
-- **Closed-Loop Cyclic RL**:  
-  Starts from an existing fine-tuned model and interleaves online MPC rollout
-  collection with joint latent and value-head updates.
-
+   Categorical CEM scores a short latent rollout by its predicted rewards and the best Q-value at its endpoint. The driver executes the first action and replans from the next real observation.
+5. **Online Learning (`train` and `rl_loop.py`)**
+   The learner continues SubJEPA alongside reward prediction and Double DQN. A shared readout predicts reward and Q for each of the 54 actions. The game uses one frozen model snapshot per episode while the learner updates separately.
 ---
 
 ## 2. Environment Setup & Installation
@@ -76,152 +65,52 @@ uv run --package win-client python win-client/record.py --mode human
 uv run --package win-client python win-client/record.py --mode agent
 ```
 
-### Step 2: Self-Supervised Sub-JEPA Pretraining (`train/src/train/pretrain.py`)
-Pretrain the joint `(Encoder, Predictor)` world model on recorded HDF5 shards.
-
-Start a fresh checkpoint directory when switching from the previous architecture. The compact model needs new world-model, optimizer, and bootstrap checkpoints.
+### Step 2. Pretrain the encoder and dynamics
 
 ```bash
-# Start fresh pretraining with Vision Transformer (ViT) encoder
-uv run --package train python -m train.pretrain \
+uv run python -m train.pretrain \
   --data-dir win-client/data \
   --checkpoint-dir checkpoints/pretrain
-
-# Resume training from existing checkpoints
-uv run --package train python -m train.pretrain \
-  --resume \
-  --checkpoint-dir checkpoints/pretrain
 ```
 
-### Step 3: Prepare the Fine-Tuned Starting Checkpoint (`train/src/train/bootstrap.py`)
+Use `--initialize path/to/world_model.eqx` to warm-start E/F or `--resume` with the original configuration to resume the same run. `world_model.eqx` and `projectors.eqx` are the inputs for online learning. `learner.eqx` also saves the optimizer and random stream.
 
-Online RL requires an existing model, value head, and frozen projectors in
-`checkpoints/finetune/`:
+The defaults use 24 complete five-step windows per batch, balanced by legacy source. `loss.reg_weight` specifies the coefficient at 120 encoded targets. The learner scales it by the actual number of targets in each window group.
 
-```bash
-checkpoints/finetune/ft_model_latest.eqx
-checkpoints/finetune/ft_value_head_latest.eqx
-checkpoints/finetune/ft_policy_head_latest.eqx
-checkpoints/finetune/projectors.eqx
-```
+### Step 3. Collect and learn online on Windows
 
-`projectors.eqx` stores only the frozen orthogonal subspace bases. Sub-JEPA
-samples fresh slice directions during each loss pass. Resumed pretraining may
-therefore start with a discontinuous slice-sampling stream.
-
-Run supervised value bootstrapping and optional joint fine-tuning on pre-recorded dataset rollouts to produce this starting checkpoint:
-
-```bash
-# Bootstrap value head from a pretrained model checkpoint
-uv run --package train python -m train.bootstrap \
-  --checkpoint checkpoints/pretrain/pretrain_model_latest.eqx \
-  --data-dir win-client/data/rl/bootstrap \
-  --output-dir checkpoints/finetune
-```
-
-The online loop (`rl_loop.py`) starts from this four-component checkpoint and mixes
-the configured bootstrap replay anchor into each online update.
-
-### Step 4: Real-Time Autonomous MPC Driving (`win-client/run.py`)
-Deploy the trained latent world model to drive autonomously in live Trackmania.
-
-```bash
-# Run Cross-Entropy Method (CEM) MPC driver
-uv run --package win-client python win-client/run.py \
-  --checkpoint-path checkpoints/finetune/ft_model_latest.eqx \
-  --value-head-path checkpoints/finetune/ft_value_head_latest.eqx \
-  --policy-head-path checkpoints/finetune/ft_policy_head_latest.eqx
-```
-
-The CEM planner and its hyperparameters are read from `core/config.yaml`.
-Add `--record-rollouts` to record standalone MPC trajectories.
-
-### Step 5: Cyclic Online RL Loop (`rl_loop.py`)
-Orchestrate alternating phases of MPC rollout collection and joint model fine-tuning automatically:
+Enable TMRL's virtual gamepad so the game can execute the steering and throttle levels in the 54-action table.
 
 ```bash
 uv run python rl_loop.py \
-  --initial-model checkpoints/finetune/ft_model_latest.eqx \
-  --initial-value-head checkpoints/finetune/ft_value_head_latest.eqx \
-  --initial-policy-head checkpoints/finetune/ft_policy_head_latest.eqx \
-  --training-rollout-file win-client/data/rl/rollouts/online_training.h5 \
-  --evaluation-rollout-file win-client/data/rl/rollouts/online_evaluations.h5 \
-  --checkpoints-dir checkpoints/rl \
-  --iterations 5 \
-  --episodes-per-iteration 5
+  --initialize checkpoints/pretrain/world_model.eqx \
+  --data-dir win-client/data \
+  --run-dir checkpoints/online
 ```
 
-The loop keeps one TMRL environment alive for the full run. While JAX is
-fine-tuning, an idle brake heartbeat continues consuming Openplanet observations
-so the next collection does not reconnect through a stale 10-second timeout.
-Interrupted runs resume from `checkpoints/rl/run_state.json`.
-Training and evaluation rollouts are stored separately so evaluation episodes
-never enter replay. The old `--rollout-file` option remains an alias for the
-training file.
-Replay uses all completed episodes in the training rollout file.
+The first 4,096 decisions fill replay with held random actions. Joint updates then use recorded rewards and action IDs, with legacy and online windows sharing the SSL objective. The default reward charges 0.001 per step, adds 1 for a finish, and subtracts 1 for a genuine game failure. The 120-second limit is a collection cut, so the learner bootstraps from its final observation.
 
-### Step 6: Checkpoint Export (`tar`)
-Package required configs and model checkpoints into a compressed archive for deployment across machines:
+Use `--resume` in place of `--initialize` to reopen the run. Keep the `replay/` shards with the learner checkpoint. The run records model snapshots and separate evaluation summaries. `finetune.ablation` can be set to `frozen-encoder` or `rl-only` for matched trials from the same E/F initialization.
+
+### Step 4. Drive with a frozen snapshot
 
 ```bash
-# Export checkpoints and configs into a compressed tar archive
-tar -czvf train_checkpoints.tar.gz checkpoints/ core/config.yaml train/config.yaml win-client/settings.yaml
-
-# Extract checkpoint archive on target deployment host
-tar -xzvf train_checkpoints.tar.gz
+uv run python win-client/run.py \
+  --checkpoint-path checkpoints/online/driver.eqx \
+  --controller mpc
 ```
 
----
+The driver export includes the action table, preprocessing, model settings, and planner settings. Choose `--controller q` to evaluate greedy Q at the same cadence. Measure local inference after warmup with `uv run python core/bench/benchmark_planners.py`.
 
-## 4. Tweaking Configurations
+## 4. Configuration
 
-JEPAMania uses hierarchical YAML configuration files cleanly separated by concern. Rather than editing code directly, modify the parameters in the configuration files below to customize architectures, training objectives, and runtime behavior.
+[core/config.yaml](core/config.yaml) sets the encoder, predictor, and planner. The default CEM uses a five-step horizon, 128 candidates, four iterations, and 16 elites. Keep the planning horizon at or below the trained rollout horizon.
 
-### Core Architecture & Planner Settings ([core/config.yaml](core/config.yaml))
-
-Controls neural network dimensions, transformer backbones, and default latent planning parameters.
-
-| Parameter | Default | Tuning Guidance |
-| :--- | :--- | :--- |
-| `encoder.latent_dim` | `128` | Shared latent width for the encoder, predictor, value head, and policy head. |
-| `encoder.transformer.num_layers` | `2` | Number of ViT self-attention blocks used for spatial observation encoding. |
-| `encoder.transformer.num_heads` | `4` | Number of attention heads in each ViT block. |
-| `encoder.transformer.mlp_ratio` | `2.0` | Feed-forward expansion in each ViT block. |
-| `predictor.hidden_dim` | `128` | Width of each of the three hidden layers in the latent transition MLP. |
-| `planner.sequence_len` | `5` | MPC planning horizon ($K$ steps forward into the future). |
-| `planner.cem_iters` | `4` | Number of CEM distribution-refinement iterations per control tick. |
-| `planner.cem_samples` | `128` | Candidate action sequences sampled per CEM iteration. |
-| `planner.cem_elites` | `25` | Highest-scoring candidate sequences used to update the CEM distribution. |
-
----
-
-### Training & Fine-Tuning Hyperparameters ([train/config.yaml](train/config.yaml))
-
-Defines Sub-JEPA sliced-subspace regularizers, learning rates, schedules, and dataloader settings.
-
-| Parameter | Default | Tuning Guidance |
-| :--- | :--- | :--- |
-| `loss.num_subspaces` | `16` | Number of orthogonal subspace projections ($M$) for Sub-JEPA loss calculation. |
-| `loss.num_slices` | `256` | Number of fresh 1D slices ($S$) sampled per subspace and training pass. |
-| `loss.reg_weight` | `0.02` | Gaussian regularization weight preventing representation collapse. |
-| `pretrain.epochs` | `10` | Number of self-supervised pretraining epochs over recorded shards. |
-| `pretrain.batch_size` | `256` | Transition batch size during pretraining. |
-| `pretrain.peak_lr` | `3.0e-4` | Peak AdamW learning rate for joint encoder/predictor pretraining (10% linear warmup, 90% cosine decay to 1% peak). |
-| `pretrain.rollout_len` | `5` | Autoregressive transition steps predicted during pretraining. |
-| `policy_sft.lr_min` | `3.0e-6` | Final AdamW learning rate for policy-head SFT after warmup and cosine decay. |
-| `policy_sft.lr_max` | `3.0e-4` | Peak AdamW learning rate for policy-head SFT (10% linear warmup, 90% cosine decay). |
-| `bootstrap.warmup_epochs` | `5` | Number of supervised value-head warmup epochs over historical rollouts before online RL. |
-| `bootstrap.joint_epochs` | `5` | Number of joint fine-tuning epochs of encoder, predictor, and value head during bootstrapping. |
-| `finetune.joint_epochs` | `4` | Epochs for joint end-to-end fine-tuning per online RL iteration. |
-| `finetune.lr_enc` | `5.0e-6` | Small learning rate for backbone fine-tuning to preserve learned world dynamics. |
-| `finetune.lr_val` | `1.0e-4` | Learning rate for the Huber discounted return value head. |
-| `finetune.value_weight` | `0.5` | Relative loss multiplier between Sub-JEPA predictive loss and Huber value return loss. |
-
----
+[train/config.yaml](train/config.yaml) sets the SSL and joint learning rates, regularizer, update and decision budgets, and evaluation frequency. The default trial evaluates every 10,000 accepted decisions.
 
 ### Windows Runtime & Client Deployment ([win-client/settings.yaml](win-client/settings.yaml))
 
-Manages real-time telemetry filtering, exploration noise, stuck reset monitoring, and live MPC execution.
+Controls the human and SAC data recorders.
 
 | Parameter | Default | Tuning Guidance |
 | :--- | :--- | :--- |
@@ -230,7 +119,6 @@ Manages real-time telemetry filtering, exploration noise, stuck reset monitoring
 | `episode_monitor.stuck_speed_kmh` | `3.0` | Speed threshold below which the car is considered stuck. |
 | `episode_monitor.stuck_window_frames`| `80` | Frames below `stuck_speed_kmh` before triggering an automatic episode reset (`80` frames ≈ 4s at 20 Hz). |
 | `episode_monitor.max_frames_per_episode`| `1800` | Hard reset limit per episode (`1800` frames = 1.5 minutes at 20 Hz). |
-| `mpc.checkpoint_path` | `null` | Path to combined Sub-JEPA checkpoint (`.eqx`). Trajectory planning algorithm and hyperparameters live in `core/config.yaml`. |
 
 ---
 

@@ -5,6 +5,8 @@ from omegaconf import OmegaConf
 # Fixed TMRL Constants (TM2020FULL)
 IMG_HIST_LEN: int = 4
 IMG_SIZE: int = 64
+PIXEL_SCALE: int = 255
+TELEMETRY_SCALE: tuple[float, float, float] = (100.0, 6.0, 10000.0)
 # The TMRL Full env observation carries exactly 9 telemetry floats:
 # speed, gear, rpm, plus rtgym's two-action chronological buffer (3 floats
 # each). The older buffered action comes first, followed by the most recent.
@@ -20,13 +22,8 @@ NUM_ACTIONS: int = 54
 # Learned width; model states append the six known action-history values.
 LATENT_DIM: int = 128
 
-# In TMRL Trackmania (20 FPS), max progress reward per step is ~10.0 at top speed.
-# Fixed terminal penalty for getting stuck or exceeding max frames is 10x in negative.
-MAX_STEP_REWARD: float = 10.0
+# The legacy recorder marks failed collection episodes for inspection.
 FAILURE_PENALTY: float = -100.0
-
-# Fixed Return Constants
-LAMBDA_RETURN_DECAY: float = 0.95
 
 
 @dataclass
@@ -49,36 +46,18 @@ class PredictorConfig:
 
 
 @dataclass
-class ValueHeadConfig:
-    latent_dim: int = LATENT_DIM
-    hidden_dim: int = 256
-
-
-@dataclass
-class PolicyHeadConfig:
-    latent_dim: int = LATENT_DIM
-    hidden_dim: int = 256
-    temperature: float = 2.0
-    epsilon: float = 0.05
-
-
-@dataclass
 class PlannerConfig:
-    sequence_len: int = 15
-    smoothness_weight: float = 0.5
-    # Cross-Entropy Method (CEM)
-    cem_iters: int = 3
-    cem_samples: int = 100
-    cem_elites: int = 10
-    cem_alpha: float = 0.1
+    sequence_len: int = 5
+    cem_iters: int = 4
+    cem_samples: int = 128
+    cem_elites: int = 16
+    cem_alpha: float = 0.7
 
 
 @dataclass
 class SubJepaConfig:
     encoder: EncoderConfig = field(default_factory=EncoderConfig)
     predictor: PredictorConfig = field(default_factory=PredictorConfig)
-    value_head: ValueHeadConfig = field(default_factory=ValueHeadConfig)
-    policy_head: PolicyHeadConfig = field(default_factory=PolicyHeadConfig)
     planner: PlannerConfig = field(default_factory=PlannerConfig)
 
 

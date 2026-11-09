@@ -26,57 +26,25 @@ class PretrainConfig:
 
 
 @dataclass
-class BootstrapConfig:
-    warmup_epochs: int = 10
-    joint_epochs: int = 10
-    gamma: float = 0.990
-    lr_warmup: float = 3e-4
-    lr_enc: float = 5e-6
-    lr_val: float = 1e-4
-    value_weight: float = 0.5
-    batch_size: int = 128
-    seed: int = 42
-    rollout_len: int = 5
-    log_every: int = 50
-
-
-@dataclass
-class PolicySFTConfig:
-    epochs: int = 100
-    batch_size: int = 128
-    lr_min: float = 1e-6
-    lr_max: float = 1e-4
-    min_frames: int = 450
-    max_frames: int = 540
-    log_every: int = 50
-
-
-@dataclass
 class FinetuneConfig:
-    joint_epochs: int = 5
-    gamma: float = 0.990
-    lr_enc: float = 5e-6
-    lr_val: float = 1e-4
-    lr_policy: float = 3e-5
-    value_weight: float = 0.5
-    policy_weight: float = 1.0
-    human_anchor_ratio: float = 0.5
-    bootstrap_anchor_ratio: float = 0.25
-    max_advantage_weight: float = 20.0
-    evaluation_episodes: int = 15
-    promotion_min_improvement_frames: int = 5
-    batch_size: int = 64
+    ablation: str = "joint"
+    gamma: float = 0.997
+    lr_enc: float = 3e-5
+    lr_pred: float = 1e-4
+    lr_head: float = 3e-4
+    batch_size: int = 24
     seed: int = 42
-    rollout_len: int = 5
-    log_every: int = 50
+    log_every: int = 250
+    fill_decisions: int = 4096
+    decisions: int = 100_000
+    evaluation_every: int = 10_000
+    evaluation_episodes: int = 5
 
 
 @dataclass
 class TrainConfig:
     loss: LossConfig = field(default_factory=LossConfig)
     pretrain: PretrainConfig = field(default_factory=PretrainConfig)
-    bootstrap: BootstrapConfig = field(default_factory=BootstrapConfig)
-    policy_sft: PolicySFTConfig = field(default_factory=PolicySFTConfig)
     finetune: FinetuneConfig = field(default_factory=FinetuneConfig)
 
 

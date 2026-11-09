@@ -9,7 +9,7 @@ import numpy as np
 ACTION_HISTORY_LEN = 2
 
 
-def configure_rtgym_action_history() -> None:
+def configure_rtgym_action_history(*, online: bool = False) -> None:
     """
     Configure TMRL's native chronological action buffer.
     """
@@ -33,6 +33,13 @@ def configure_rtgym_action_history() -> None:
             "reset_act_buf": True,
         }
     )
+    if online:
+        from win_client.game_session import GAME_HZ, MAX_EPISODE_STEPS
+
+        if not tmrl_config.PRAGMA_GAMEPAD:
+            raise RuntimeError("Online driving requires TMRL's virtual gamepad.")
+        rtgym_config["time_step_duration"] = 1 / GAME_HZ
+        rtgym_config["ep_max_length"] = MAX_EPISODE_STEPS
     tmrl_config.ACT_BUF_LEN = ACTION_HISTORY_LEN
 
     # TMRL 0.7.1 materializes CONFIG_DICT at import time.  Keep it aligned if
@@ -57,7 +64,8 @@ def _patched_safe_keyres() -> None:
         try:
             win32gui.SetForegroundWindow(hwnd)
         except Exception:
-            pass
+            # Windows can deny foreground activation while another app owns focus.
+            logging.debug("Trackmania foreground activation denied.")
         time.sleep(0.05)
         if win32gui.GetForegroundWindow() == hwnd:
             if hasattr(ck, "_original_keyres"):
@@ -120,40 +128,42 @@ def _monitor_step(
     return rew, terminated, reason
 
 
-def _collection_get_obs_rew_terminated_info(self):
-    data, img = self.grab_data_and_img()
-    speed_val = float(data[0])
-    speed = np.array([speed_val], dtype="float32")
-    gear = np.array([data[9]], dtype="float32")
-    rpm = np.array([data[10]], dtype="float32")
-
-    curr_pos = np.array([data[2], data[3], data[4]], dtype=np.float32)
-    _rew, _tmrl_terminated = self.reward_function.compute_reward(pos=curr_pos)
-
-    self.img_hist.append(img)
-    imgs = np.array(list(self.img_hist))
-    obs = [speed, gear, rpm, imgs]
-
-    end_of_track = bool(data[8])
-
-    teleported = False
-    if hasattr(self, "prev_pos") and self.prev_pos is not None:
-        dist = float(np.linalg.norm(curr_pos - self.prev_pos))
-        if dist > 25.0:
-            teleported = True
-    self.prev_pos = curr_pos
-
-    rew, terminated, reason = _monitor_step(
-        self, speed_val, end_of_track, teleported, base_rew=0.0
-    )
-
-    info = {
-        "action": np.array([data[5], data[6], data[7]], dtype="float32"),
-        "end_of_track": end_of_track,
-        "teleported": teleported,
-        "termination_reason": reason,
+def _capture_trackmania(self):
+    data, image = self.grab_data_and_img()
+    speed = np.array([data[0]], dtype=np.float32)
+    gear = np.array([data[9]], dtype=np.float32)
+    rpm = np.array([data[10]], dtype=np.float32)
+    position = np.asarray(data[2:5], dtype=np.float32)
+    previous = getattr(self, "prev_pos", None)
+    teleported = previous is not None and np.linalg.norm(position - previous) > 25.0
+    self.prev_pos = position
+    self.img_hist.append(image)
+    observation = [speed, gear, rpm, np.asarray(self.img_hist)]
+    return observation, {
+        "action": np.asarray(data[5:8], dtype=np.float32),
+        "end_of_track": bool(data[8]),
+        "teleported": bool(teleported),
     }
-    return obs, rew, terminated, info
+
+
+def _collection_get_obs_rew_terminated_info(self):
+    obs, info = _capture_trackmania(self)
+    reward, terminated, reason = _monitor_step(
+        self, float(obs[0][0]), info["end_of_track"], info["teleported"], base_rew=0.0
+    )
+    info["termination_reason"] = reason
+    return obs, reward, terminated, info
+
+
+def _online_get_obs_rew_terminated_info(self):
+    obs, info = _capture_trackmania(self)
+    finished = info["end_of_track"]
+    teleported = info["teleported"]
+    info["termination_reason"] = (
+        "done" if finished else "respawn" if teleported else None
+    )
+    # The driving adapter owns the fixed replay reward and terminal semantics.
+    return obs, np.float32(0.0), finished or teleported, info
 
 
 def apply_data_collection_patches() -> None:
@@ -163,113 +173,40 @@ def apply_data_collection_patches() -> None:
     an episode terminated when crossing the finish line (end_of_track)
     or when an in-game manual respawn/teleport is detected.
     """
-    if platform.system() != "Windows":
-        return
-
-    try:
-        configure_rtgym_action_history()
-        import tmrl.custom.tm.utils.control_keyboard as ck  # type: ignore[import-not-found]
-        from tmrl.custom.tm.tm_gym_interfaces import (  # type: ignore[import-not-found]
-            TM2020Interface,
-        )
-
-        TM2020Interface.get_obs_rew_terminated_info = (
-            _collection_get_obs_rew_terminated_info
-        )
-
-        if not hasattr(TM2020Interface, "_original_reset"):
-            TM2020Interface._original_reset = TM2020Interface.reset
-
-        def _patched_reset(self, *args, **kwargs):
-            self.prev_pos = None
-            self._ep_frame_count = 0
-            self._stuck_counter = 0
-            self._warmup_counter = 0
-            return self._original_reset(*args, **kwargs)
-
-        TM2020Interface.reset = _patched_reset
-
-        if not hasattr(ck, "_original_keyres"):
-            ck._original_keyres = ck.keyres
-        ck.keyres = _patched_safe_keyres
-
-        logging.info("Applied TMRL Data Collection patches cleanly.")
-    except Exception as error:
-        logging.exception("Failed to apply TMRL Data Collection patches")
-        raise RuntimeError("TMRL data collection patches were not applied") from error
+    _apply_patches(online=False)
 
 
 def apply_online_rl_patches() -> None:
-    """Apply TMRL patches for online RL training phase.
+    """Expose game events at the ordinary 20 Hz cadence."""
+    _apply_patches(online=True)
 
-    Preserves shaped reward computation and online progress evaluation.
-    """
+
+def _apply_patches(*, online: bool) -> None:
     if platform.system() != "Windows":
         return
 
-    try:
-        configure_rtgym_action_history()
-        import tmrl.custom.tm.utils.control_keyboard as ck  # type: ignore[import-not-found]
-        from tmrl.custom.tm.tm_gym_interfaces import (  # type: ignore[import-not-found]
-            TM2020Interface,
-        )
+    configure_rtgym_action_history(online=online)
+    import tmrl.custom.tm.utils.control_keyboard as ck  # type: ignore[import-not-found]
+    from tmrl.custom.tm.tm_gym_interfaces import (  # type: ignore[import-not-found]
+        TM2020Interface,
+    )
 
-        def _online_rl_get_obs_rew_terminated_info(self):
-            data, img = self.grab_data_and_img()
-            speed_val = float(data[0])
-            speed = np.array([speed_val], dtype="float32")
-            gear = np.array([data[9]], dtype="float32")
-            rpm = np.array([data[10]], dtype="float32")
+    TM2020Interface.get_obs_rew_terminated_info = (
+        _online_get_obs_rew_terminated_info
+        if online
+        else _collection_get_obs_rew_terminated_info
+    )
+    if not hasattr(TM2020Interface, "_original_reset"):
+        TM2020Interface._original_reset = TM2020Interface.reset
 
-            curr_pos = np.array([data[2], data[3], data[4]], dtype=np.float32)
-            base_rew, _ = self.reward_function.compute_reward(pos=curr_pos)
+    def reset(self, *args, **kwargs):
+        self.prev_pos = None
+        self._ep_frame_count = 0
+        self._stuck_counter = 0
+        self._warmup_counter = 0
+        return self._original_reset(*args, **kwargs)
 
-            self.img_hist.append(img)
-            imgs = np.array(list(self.img_hist))
-            obs = [speed, gear, rpm, imgs]
-
-            end_of_track = bool(data[8])
-
-            teleported = False
-            if hasattr(self, "prev_pos") and self.prev_pos is not None:
-                dist = float(np.linalg.norm(curr_pos - self.prev_pos))
-                if dist > 25.0:
-                    teleported = True
-            self.prev_pos = curr_pos
-
-            rew, terminated, reason = _monitor_step(
-                self, speed_val, end_of_track, teleported, base_rew=float(base_rew)
-            )
-
-            info = {
-                "action": np.array([data[5], data[6], data[7]], dtype="float32"),
-                "end_of_track": end_of_track,
-                "teleported": teleported,
-                "termination_reason": reason,
-            }
-            return obs, rew, terminated, info
-
-        TM2020Interface.get_obs_rew_terminated_info = (
-            _online_rl_get_obs_rew_terminated_info
-        )
-
-        if not hasattr(TM2020Interface, "_original_reset"):
-            TM2020Interface._original_reset = TM2020Interface.reset
-
-        def _patched_reset(self, *args, **kwargs):
-            self.prev_pos = None
-            self._ep_frame_count = 0
-            self._stuck_counter = 0
-            self._warmup_counter = 0
-            return self._original_reset(*args, **kwargs)
-
-        TM2020Interface.reset = _patched_reset
-
-        if not hasattr(ck, "_original_keyres"):
-            ck._original_keyres = ck.keyres
-        ck.keyres = _patched_safe_keyres
-
-        logging.info("Applied TMRL Online RL patches cleanly.")
-    except Exception as error:
-        logging.exception("Failed to apply TMRL Online RL patches")
-        raise RuntimeError("TMRL online RL patches were not applied") from error
+    TM2020Interface.reset = reset
+    if not hasattr(ck, "_original_keyres"):
+        ck._original_keyres = ck.keyres
+    ck.keyres = _patched_safe_keyres

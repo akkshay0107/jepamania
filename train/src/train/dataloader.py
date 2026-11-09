@@ -237,6 +237,17 @@ class SlidingWindowDataset:
     def episode_keys(self) -> list[tuple[str, int]]:
         return [(str(self.shards[ep.shard]), ep.episode_id) for ep in self._episodes]
 
+    def include_online_shard(self, path: Path) -> None:
+        """Index a newly published immutable shard once."""
+        if self.view not in ("online_ssl", "rl"):
+            raise ValueError("Only online views can receive new shards.")
+        episodes = self._index_shard(path, len(self.shards), None, False)
+        if episodes:
+            self.shards += (path,)
+            counts = np.cumsum([ep.num_windows for ep in episodes], dtype=np.int64)
+            self._episodes += tuple(episodes)
+            self._offsets = np.concatenate((self._offsets, self._offsets[-1] + counts))
+
     def __getitem__(self, idx: int) -> Batch:
         return {
             name: values[0] for name, values in self.read_batch(np.array([idx])).items()

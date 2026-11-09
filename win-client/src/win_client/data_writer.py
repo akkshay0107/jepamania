@@ -25,6 +25,7 @@ class HDF5Writer:
         filepath: Path,
         chunk_size: int = cfg.hdf5_chunk_size,
         append: bool = False,
+        online_reward: str | None = None,
     ) -> None:
         """Open an asynchronous writer for a rollout shard.
 
@@ -32,12 +33,16 @@ class HDF5Writer:
           filepath: HDF5 file to create or extend.
           chunk_size: Number of frames written in one HDF5 resize operation.
           append: Whether to continue an existing schema-compatible shard.
+          online_reward: Reward definition for an online shard with final observations.
 
         Returns:
           None.
         """
         self.filepath = filepath
         self.chunk_size = chunk_size
+        if append and online_reward is not None:
+            raise ValueError("Online replay shards are immutable.")
+        self.online_reward = online_reward
 
         # Queue shared between main thread (producer) and writer thread (consumer).
         self._queue: queue.Queue = queue.Queue()
@@ -46,6 +51,7 @@ class HDF5Writer:
         self._obs_buf: list[np.ndarray] = []
         self._telemetry_buf: list[np.ndarray] = []
         self._action_buf: list[np.ndarray] = []
+        self._action_id_buf: list[int] = []
         self._reward_buf: list[float] = []
         self._episode_id_buf: list[int] = []
 
@@ -123,6 +129,16 @@ class HDF5Writer:
                 dtype=np.int32,
             )
             self._file.create_group("metadata")
+            if online_reward is not None:
+                self._file.attrs["final_observation_only"] = True
+                self._file.attrs["reward_convention"] = online_reward
+                self._file.create_dataset(
+                    "action_ids",
+                    shape=(0,),
+                    maxshape=(None,),
+                    chunks=(chunk_size,),
+                    dtype=np.int32,
+                )
 
         self._thread = threading.Thread(target=self._writer_loop, daemon=True)
         self._thread.start()
@@ -145,7 +161,7 @@ class HDF5Writer:
         )
         return self._current_episode_id
 
-    def end_episode(self, termination: str = "done") -> None:
+    def end_episode(self, termination: str = "done", *, done: bool = False) -> None:
         """
         Signal the end of the current episode.
 
@@ -159,6 +175,7 @@ class HDF5Writer:
                 "_type": "episode_end",
                 "episode_id": self._current_episode_id,
                 "termination": termination,
+                "done": done,
             }
         )
 
@@ -167,6 +184,8 @@ class HDF5Writer:
         obs_dict: dict[str, np.ndarray],
         action: np.ndarray,
         reward: float = 0.0,
+        *,
+        action_id: int = -1,
     ) -> None:
         """Queue a single frame for writing."""
         qsize = self._queue.qsize()
@@ -182,6 +201,7 @@ class HDF5Writer:
             "telemetry": np.copy(obs_dict["telemetry"]),
             "action": np.copy(action).astype(np.float32),
             "reward": float(reward),
+            "action_id": action_id,
             "episode_id": self._current_episode_id,
         }
         self._queue.put(frame_data)
@@ -239,6 +259,8 @@ class HDF5Writer:
                     meta = pending.pop(ep_id)
                     meta["frame_end"] = self.current_size
                     meta["termination"] = token["termination"]
+                    if self.online_reward is not None:
+                        meta["done"] = token["done"]
 
                     # h5py groups and attributes typing is loose in pyright
                     grp = cast(h5py.Group, self._file["metadata"]).create_group(
@@ -257,6 +279,8 @@ class HDF5Writer:
                 self._telemetry_buf.append(token["telemetry"])
                 self._action_buf.append(token["action"])
                 self._reward_buf.append(token["reward"])
+                if self.online_reward is not None:
+                    self._action_id_buf.append(token["action_id"])
                 self._episode_id_buf.append(token["episode_id"])
 
                 if len(self._obs_buf) >= self.chunk_size:
@@ -284,6 +308,10 @@ class HDF5Writer:
         actions_ds.resize(new_size, axis=0)
         rewards_ds.resize(new_size, axis=0)
         ep_id_ds.resize(new_size, axis=0)
+        if self.online_reward is not None:
+            action_ids = cast(h5py.Dataset, self._file["action_ids"])
+            action_ids.resize(new_size, axis=0)
+            action_ids[self.current_size : new_size] = self._action_id_buf
 
         obs_ds[self.current_size : new_size] = np.stack(self._obs_buf)
         telem_ds[self.current_size : new_size] = np.stack(self._telemetry_buf)
@@ -301,6 +329,7 @@ class HDF5Writer:
         self._telemetry_buf.clear()
         self._action_buf.clear()
         self._reward_buf.clear()
+        self._action_id_buf.clear()
         self._episode_id_buf.clear()
 
 

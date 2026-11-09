@@ -1,62 +1,51 @@
-"""Read completed episode metadata from rollout files."""
+"""Publish complete game episodes in the existing HDF5 recording layout."""
 
-from dataclasses import dataclass
+import os
 from pathlib import Path
-from typing import cast
 
-import h5py
-
-
-def _attr_text(value: object) -> str:
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return str(value)
+from core.actions import ACTION_GRID_NP, NEUTRAL_ACTION
+from win_client.data_writer import HDF5Writer
+from win_client.game_session import REWARD_DEFINITION
+from win_client.mpc_driver import Episode
+from win_client.settings import cfg
 
 
-@dataclass(frozen=True)
-class EpisodeSummary:
-    episode_id: int
-    iteration: int
-    transition_count: int
-    termination: str = ""
-    source: str = ""
-
-
-def read_completed_episode_summaries(
-    rollout_file: str | Path,
-) -> list[EpisodeSummary]:
-    """Read only episodes whose completion metadata has valid frame bounds."""
-    path = Path(rollout_file)
-    if not path.exists():
-        return []
-
-    summaries: list[EpisodeSummary] = []
-    with h5py.File(path, "r") as file:
-        if "metadata" not in file or "rewards" not in file:
-            return summaries
-        frame_count = len(cast(h5py.Dataset, file["rewards"]))
-        metadata = cast(h5py.Group, file["metadata"])
-        for name in metadata.keys():
-            if not name.startswith("episode_"):
-                continue
-            group = cast(h5py.Group, metadata[name])
-            attrs = group.attrs
-            if not {"frame_start", "frame_end", "termination"}.issubset(attrs):
-                continue
-            episode_id_text = name.removeprefix("episode_")
-            if not episode_id_text.isdigit():
-                continue
-            frame_start = int(attrs["frame_start"])  # pyright: ignore[reportArgumentType]
-            frame_end = int(attrs["frame_end"])  # pyright: ignore[reportArgumentType]
-            if frame_start < 0 or frame_end <= frame_start or frame_end > frame_count:
-                continue
-            summaries.append(
-                EpisodeSummary(
-                    episode_id=int(episode_id_text),
-                    iteration=int(attrs.get("iteration", -1)),  # pyright: ignore[reportArgumentType]
-                    transition_count=frame_end - frame_start,
-                    termination=_attr_text(attrs["termination"]),
-                    source=_attr_text(attrs.get("source", "")),
-                )
+def publish_episode(path: Path, episode: Episode, metadata: dict[str, object]) -> Path:
+    """Atomically expose a shard to readers after writing its real final observation."""
+    if not episode.actions or len(episode.observations) != len(episode.actions) + 1:
+        raise ValueError("An online episode requires at least one complete transition.")
+    temp = path.with_suffix(".part")
+    if path.exists():
+        raise FileExistsError(path)
+    writer = HDF5Writer(temp, online_reward=REWARD_DEFINITION)
+    try:
+        try:
+            writer.new_episode(
+                {
+                    "source": "online",
+                    "map_name": cfg.agent.map_name,
+                    "map_uid": cfg.agent.map_uid,
+                    **metadata,
+                }
             )
-    return sorted(summaries, key=lambda summary: summary.episode_id)
+            for obs, action, reward in zip(
+                episode.observations[:-1], episode.actions, episode.rewards, strict=True
+            ):
+                writer.append(
+                    {"screen": obs["screen"][-1:], "telemetry": obs["telemetry"]},
+                    ACTION_GRID_NP[action],
+                    reward,
+                    action_id=action,
+                )
+            final = episode.observations[-1]
+            writer.append(
+                {"screen": final["screen"][-1:], "telemetry": final["telemetry"]},
+                ACTION_GRID_NP[NEUTRAL_ACTION],
+            )
+            writer.end_episode(episode.reason, done=episode.done)
+        finally:
+            writer.close()
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+    return path

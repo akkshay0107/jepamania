@@ -1,5 +1,3 @@
-import functools
-
 import equinox as eqx
 import jax.numpy as jnp
 import numpy as np
@@ -141,20 +139,3 @@ def rescale_gas_np(actions: np.ndarray, *, axis: int | None = None) -> np.ndarra
     signed = np.any(gas < -0.01, axis=axis, keepdims=True)
     out[..., 0] = np.where(signed, (gas + 1.0) / 2.0, gas)
     return out
-
-
-@functools.lru_cache(maxsize=1)
-def _unit_transition_cost_matrix_np() -> np.ndarray:
-    gas_brake = ACTION_GRID_NP[:, 0:2]
-    steer = ACTION_GRID_NP[:, 2]
-
-    norm_steer_sq = np.square((steer[:, None] - steer[None, :]) / 2.0)
-    norm_gb_sq = (
-        np.sum(np.square(gas_brake[:, None, :] - gas_brake[None, :, :]), axis=-1) / 2.0
-    )
-    return (0.8 * norm_steer_sq + 0.2 * norm_gb_sq).astype(np.float32)
-
-
-def unit_transition_cost_matrix() -> Float[Array, "NUM_ACTIONS NUM_ACTIONS"]:
-    """Computes normalized cost of transition from action to action across time steps"""
-    return jnp.asarray(_unit_transition_cost_matrix_np())

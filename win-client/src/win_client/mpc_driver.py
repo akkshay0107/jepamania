@@ -1,211 +1,219 @@
-"""Real-time latent MPC control and rollout collection for Trackmania."""
+"""Local synchronous Q and MPC inference using immutable model snapshots."""
 
-import datetime
+import json
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Literal, cast
 
 import equinox as eqx
 import jax
-from core.actions import to_continuous_action_np
-from core.async_planner import AsyncPlannerWrapper
-from core.config import SubJepaConfig, load_config
-from core.dynamics import MLPPolicyHead, MLPPredictor, MLPValueHead
-from core.encoders import ViTEncoder, load_world_model
-from core.planners import create_planner
+import jax.numpy as jnp
+import numpy as np
+from core.actions import ACTION_GRID_NP
+from core.config import (
+    ACTION_HISTORY_FEATURES,
+    IMG_HIST_LEN,
+    IMG_SIZE,
+    PIXEL_SCALE,
+    TELEMETRY_SCALE,
+    SubJepaConfig,
+)
+from core.dynamics import MLPPredictor, RewardQHead
+from core.encoders import DrivingModels, ViTEncoder
+from core.planners import CEMPlanner, Plan
+from omegaconf import OmegaConf
 
-from win_client.data_writer import HDF5Writer
-from win_client.settings import cfg
-from win_client.utils import get_tmrl_env, obs_to_dict
+from win_client.game_session import MAX_EPISODE_STEPS, DrivingEnvironment, Observation
 
-WIN_CLIENT_ROOT = Path(__file__).resolve().parent.parent.parent
+type Controller = Literal["q", "mpc"]
+
+PREPROCESSING = {
+    "frames": IMG_HIST_LEN,
+    "image_size": IMG_SIZE,
+    "pixel_scale": PIXEL_SCALE,
+    "telemetry_scale": list(TELEMETRY_SCALE),
+    "past_controls": ACTION_HISTORY_FEATURES // 3,
+}
 
 
-def load_subjepa_checkpoint(
-    checkpoint_path: str | Path,
-    config_path: Optional[str | Path] = None,
-    seed: int = 42,
-) -> tuple[ViTEncoder, MLPPredictor, SubJepaConfig]:
-    """Load the ViT world model and its configuration."""
-    config_path = config_path or WIN_CLIENT_ROOT.parent / "core" / "config.yaml"
-    model_cfg = load_config(str(config_path))
-    encoder, predictor = load_world_model(
-        checkpoint_path,
-        jax.random.PRNGKey(seed),
-        model_cfg.encoder,
-        model_cfg.predictor,
+def make_driving_models(config: SubJepaConfig, key) -> DrivingModels:
+    if config.encoder.latent_dim != config.predictor.latent_dim:
+        raise ValueError("The encoder and predictor must use the same learned width.")
+    encoder_key, predictor_key, head_key = jax.random.split(key, 3)
+    return (
+        ViTEncoder(config.encoder, encoder_key),
+        MLPPredictor(config.predictor, predictor_key),
+        RewardQHead(config.encoder.latent_dim, head_key),
     )
-    return encoder, predictor, model_cfg
 
 
-def load_value_head_checkpoint(
-    value_head_path: str | Path,
-    config_path: Optional[str | Path] = None,
-    seed: int = 42,
-) -> MLPValueHead:
-    """Load a serialized value head."""
-    path = Path(value_head_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Value head checkpoint not found: {path}")
-    config_path = config_path or WIN_CLIENT_ROOT.parent / "core" / "config.yaml"
-    model_cfg = load_config(str(config_path))
-    template = MLPValueHead(model_cfg.value_head, jax.random.PRNGKey(seed))
-    return eqx.tree_deserialise_leaves(path, template)
+def load_driver(path: Path, seed: int):
+    with path.open("rb") as file:
+        metadata = json.loads(file.readline())
+        if (
+            metadata["version"] != 1
+            or metadata["action_table"] != ACTION_GRID_NP.tolist()
+        ):
+            raise ValueError("Unsupported driving checkpoint action table or version.")
+        if metadata["preprocessing"] != PREPROCESSING:
+            raise ValueError("Unsupported driving checkpoint preprocessing.")
+        config = cast(
+            SubJepaConfig,
+            OmegaConf.merge(OmegaConf.structured(SubJepaConfig), metadata["model"]),
+        )
+        template = make_driving_models(config, jax.random.key(seed))
+        models = eqx.tree_deserialise_leaves(file, template)
+    return MPCDriver(CEMPlanner(config.planner, metadata["gamma"]), seed), models
 
 
-def load_policy_head_checkpoint(
-    policy_head_path: str | Path,
-    config_path: Optional[str | Path] = None,
-    seed: int = 42,
-) -> MLPPolicyHead:
-    """Load a serialized policy head."""
-    path = Path(policy_head_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Policy head checkpoint not found: {path}")
-    config_path = config_path or WIN_CLIENT_ROOT.parent / "core" / "config.yaml"
-    model_cfg = load_config(str(config_path))
-    template = MLPPolicyHead(model_cfg.policy_head, jax.random.PRNGKey(seed))
-    return eqx.tree_deserialise_leaves(path, template)
+def _encode(encoder: ViTEncoder, observation: Observation):
+    return encoder(
+        {
+            "screen": jnp.asarray(observation["screen"], dtype=jnp.float32)
+            / PIXEL_SCALE,
+            "telemetry": jnp.asarray(observation["telemetry"], dtype=jnp.float32),
+        }
+    )
+
+
+@eqx.filter_jit
+def greedy_action(encoder: ViTEncoder, head: RewardQHead, obs: Observation):
+    _, q = head.for_search(_encode(encoder, obs))
+    return jnp.argmax(q)
+
+
+@eqx.filter_jit
+def search_action(
+    planner: CEMPlanner, models: DrivingModels, obs: Observation, plan: Plan, key
+):
+    encoder, predictor, head = models
+    key, search_key = jax.random.split(key)
+    next_plan = planner(predictor, head, _encode(encoder, obs), plan, search_key)
+    return next_plan.actions[0], next_plan, key
 
 
 class MPCDriver:
-    """Run asynchronous MPC against an environment supplied by its owner."""
+    def __init__(self, planner: CEMPlanner, seed: int) -> None:
+        self.planner = planner
+        self.seed = seed
+        self.key = jax.random.key(seed)
+        self.empty = planner.empty_plan()
+        self.plan = self.empty
 
-    def __init__(
-        self,
-        checkpoint_path: Optional[str | Path] = None,
-        value_head_path: Optional[str | Path] = None,
-        policy_head_path: Optional[str | Path] = None,
-        config_path: Optional[str | Path] = None,
-        output_dir: Optional[str | Path] = None,
-        max_episodes: Optional[int] = None,
-    ) -> None:
-        self.checkpoint_path = checkpoint_path or cfg.mpc.checkpoint_path
-        self.value_head_path = value_head_path or cfg.mpc.value_head_path
-        self.policy_head_path = policy_head_path or cfg.mpc.policy_head_path
-        if not all((self.checkpoint_path, self.value_head_path, self.policy_head_path)):
-            raise ValueError(
-                "Model, value-head, and policy-head checkpoints are required"
+    def reset(self, episode_seed: int | None = None) -> None:
+        self.plan = self.empty
+        if episode_seed is not None:
+            self.key = jax.random.fold_in(jax.random.key(self.seed), episode_seed)
+
+    def select(
+        self, models: DrivingModels, observation: Observation, controller: Controller
+    ) -> int:
+        encoder, _, head = models
+        if controller == "q":
+            return int(greedy_action(encoder, head, observation))
+        action, self.plan, self.key = search_action(
+            self.planner, models, observation, self.plan, self.key
+        )
+        return int(action)
+
+    def warmup(self, models: DrivingModels) -> None:
+        observation = {
+            "screen": np.zeros((IMG_HIST_LEN, IMG_SIZE, IMG_SIZE), dtype=np.uint8),
+            "telemetry": np.zeros(3 + ACTION_HISTORY_FEATURES, dtype=np.float32),
+        }
+        encoder, _, head = models
+        greedy_action(encoder, head, observation).block_until_ready()
+        jax.block_until_ready(
+            search_action(
+                self.planner, models, observation, self.empty, jax.random.key(0)
             )
-
-        self.output_dir = Path(output_dir) if output_dir else None
-        self.max_episodes = max_episodes
-        self.encoder, self.predictor, self.model_cfg = load_subjepa_checkpoint(
-            self.checkpoint_path, config_path=config_path, seed=cfg.mpc.seed
-        )
-        self.value_head = load_value_head_checkpoint(
-            self.value_head_path, config_path=config_path, seed=cfg.mpc.seed
-        )
-        self.policy_head = load_policy_head_checkpoint(
-            self.policy_head_path, config_path=config_path, seed=cfg.mpc.seed
-        )
-        planner = create_planner(
-            self.model_cfg.planner,
-            self.predictor,
-            self.value_head,
-            policy_head=self.policy_head,
-        )
-        self.async_wrapper = AsyncPlannerWrapper(
-            encoder=self.encoder,
-            predictor=self.predictor,
-            planner=planner,
-            seed=cfg.mpc.seed,
         )
 
-    def collect(
-        self,
-        env: Any,
-        rollout_file: Optional[str | Path],
-        num_episodes: Optional[int],
-        iteration: int,
-    ) -> tuple[int, ...]:
-        """Collect episodes without taking ownership of the environment.
 
-        Arguments:
-          env: Environment instance that supplies reset and step operations
-          rollout_file: Optional HDF5 destination for completed episode data
-          num_episodes: Number of completed episodes to collect, or ``None``
-          iteration: Online-loop iteration recorded in episode metadata
+@dataclass
+class Episode:
+    observations: list[Observation]
+    actions: list[int]
+    rewards: list[float]
+    done: bool
+    reason: str
+    inference_ms: list[float]
+    action_errors: list[float]
+    elapsed_seconds: float
 
-        Returns:
-          Episode IDs completed during this collection request
-        """
-        writer: Optional[HDF5Writer] = None
-        if rollout_file is not None:
-            writer = HDF5Writer(Path(rollout_file), append=True)
+    def summary(self, gamma: float) -> dict[str, object]:
+        steps = len(self.actions)
+        return {
+            "steps": steps,
+            "reason": self.reason,
+            "finished": self.reason == "done",
+            "finish_seconds": self.elapsed_seconds if self.reason == "done" else None,
+            "elapsed_seconds": self.elapsed_seconds,
+            "done": self.done,
+            "return": float(np.dot(self.rewards, gamma ** np.arange(steps))),
+            "inference_p99_ms": (
+                float(np.percentile(self.inference_ms, 99))
+                if self.inference_ms
+                else None
+            ),
+            "action_mismatch_rate": (
+                float(np.mean(np.asarray(self.action_errors) > 0.05))
+                if self.action_errors
+                else None
+            ),
+        }
 
-        completed_ids: list[int] = []
-        active_episode_id: Optional[int] = None
 
-        def start_episode() -> None:
-            nonlocal active_episode_id
-            if writer is None:
-                return
-            active_episode_id = writer.new_episode(
-                {
-                    "source": "mpc_driver",
-                    "iteration": iteration,
-                    "map_name": cfg.agent.map_name,
-                    "map_uid": cfg.agent.map_uid,
-                    "encoder_type": "vit",
-                    "planner_type": "cem",
-                    "timestamp": datetime.datetime.now().isoformat(),
-                }
-            )
+def drive_episode(
+    env: DrivingEnvironment,
+    select: Callable[[Observation], int],
+    *,
+    max_steps: int = MAX_EPISODE_STEPS,
+    keep_observations: bool = True,
+) -> Episode:
+    observation = env.reset()
+    started = time.perf_counter()
+    result = Episode(
+        [_record_observation(observation)] if keep_observations else [],
+        [],
+        [],
+        False,
+        "budget",
+        [],
+        [],
+        0.0,
+    )
+    while len(result.actions) < max_steps:
+        inference_start = time.perf_counter()
+        action = select(observation)
+        result.inference_ms.append(1000 * (time.perf_counter() - inference_start))
+        step = env.step(action)
+        if step.observation is None:
+            result.reason = "missing_observation"
+            break
+        observation = step.observation
+        if step.action_id is None:
+            if keep_observations:
+                result.observations[0] = _record_observation(observation)
+        else:
+            if keep_observations:
+                result.observations.append(_record_observation(observation))
+            result.actions.append(step.action_id)
+            result.rewards.append(step.reward)
+        if step.action_error is not None:
+            result.action_errors.append(step.action_error)
+        if step.reason is not None:
+            result.done = step.done
+            result.reason = step.reason
+            break
+    result.elapsed_seconds = time.perf_counter() - started
+    return result
 
-        try:
-            self.async_wrapper.reset()
-            self.async_wrapper.start()
-            raw_obs, _ = env.reset()
-            start_episode()
-            while num_episodes is None or len(completed_ids) < num_episodes:
-                observation = obs_to_dict(raw_obs, keep_history=True)
-                action_index = self.async_wrapper.step(observation)
-                action = to_continuous_action_np(action_index)
-                raw_obs, reward, terminated, truncated, info = env.step(action)
-                if writer is not None:
-                    recorded_obs = {
-                        "screen": observation["screen"][-1:],
-                        "telemetry": observation["telemetry"],
-                    }
-                    writer.append(recorded_obs, action, float(reward))
 
-                if not (terminated or truncated):
-                    continue
-                reason = info.get(
-                    "termination_reason", "truncated" if truncated else "done"
-                )
-                if writer is not None:
-                    writer.end_episode(termination=reason)
-                    if active_episode_id is None:
-                        raise RuntimeError("Writer lost the active episode ID")
-                    completed_ids.append(active_episode_id)
-                    active_episode_id = None
-                elif num_episodes is not None:
-                    completed_ids.append(len(completed_ids))
-                if num_episodes is not None and len(completed_ids) >= num_episodes:
-                    break
-                raw_obs, _ = env.reset()
-                self.async_wrapper.reset()
-                start_episode()
-        finally:
-            self.async_wrapper.stop()
-            if writer is not None:
-                # Missing completion metadata keeps interrupted data out of replay.
-                writer.close()
-        return tuple(completed_ids)
-
-    def run(self) -> None:
-        """Run standalone autonomous driving with an owned environment."""
-        env = get_tmrl_env()
-        try:
-            rollout_file = None
-            if cfg.mpc.record_rollouts or self.output_dir is not None:
-                output_dir = self.output_dir or Path("win-client/data/rl/rollouts")
-                if output_dir.suffix == ".h5":
-                    rollout_file = output_dir
-                else:
-                    output_dir.mkdir(parents=True, exist_ok=True)
-                    rollout_file = output_dir / "online_rollouts.h5"
-            self.collect(env, rollout_file, self.max_episodes, iteration=0)
-        finally:
-            env.close()
+def _record_observation(observation: Observation) -> Observation:
+    return {
+        "screen": observation["screen"][-1:].copy(),
+        "telemetry": observation["telemetry"],
+    }

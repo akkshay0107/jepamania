@@ -9,20 +9,9 @@ predictor:
   latent_dim: 128
   hidden_dim: 128
 
-value_head:
-  latent_dim: 128
-  hidden_dim: 256
-
-policy_head:
-  latent_dim: 128
-  hidden_dim: 256
-  temperature: 2.0
-  epsilon: 0.05
-
 planner:
   sequence_len: 5
-  smoothness_weight: 0.0
   cem_iters: 4
   cem_samples: 128
-  cem_elites: 25
+  cem_elites: 16
   cem_alpha: 0.7

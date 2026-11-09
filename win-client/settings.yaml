@@ -22,11 +22,3 @@ episode_monitor:
   stuck_window_frames: 80 # How many consecutive frames below stuck_speed_kmh (80 frames = 4s at 20Hz)
   max_frames_per_episode: 1800 # Hard reset limit per episode (1800 frames = 1.5 minutes at 20Hz)
   episodes_per_shard: 50 # Number of episodes to save per file shard before starting a new file
-
-# Online MPC Deployment settings
-mpc:
-  checkpoint_path: "checkpoints/finetune/ft_model_latest.eqx" # Combined encoder/predictor checkpoint
-  value_head_path: "checkpoints/finetune/ft_value_head_latest.eqx" # Fine-tuned value head checkpoint
-  policy_head_path: "checkpoints/finetune/ft_policy_head_latest.eqx" # Behavior-cloned policy head checkpoint
-  record_rollouts: false
-  seed: 42

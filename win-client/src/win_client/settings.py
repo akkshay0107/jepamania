@@ -39,13 +39,6 @@ _DEFAULTS = {
         # Number of completed episodes to record per HDF5 shard file.
         "episodes_per_shard": 50,
     },
-    "mpc": {
-        "checkpoint_path": None,
-        "value_head_path": None,
-        "policy_head_path": None,
-        "record_rollouts": False,
-        "seed": 42,
-    },
 }
 
 yaml_path = BASE_DIR / "settings.yaml"

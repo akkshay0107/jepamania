@@ -1,6 +1,6 @@
 from typing import Any, Mapping, Protocol, runtime_checkable
 
-from jaxtyping import Array, Float, Int
+from jaxtyping import Array, Float
 
 
 @runtime_checkable
@@ -24,20 +24,3 @@ class Predictor(Protocol):
     def __call__(
         self, latent_state: Float[Array, "latent_dim"], action: Float[Array, "3"]
     ) -> Float[Array, "latent_dim"]: ...
-
-
-@runtime_checkable
-class Planner(Protocol):
-    """
-    Protocol for an action Planner.
-    Returns a sequence of actions. For single-step plans, return a sequence of length 1.
-    """
-
-    @property
-    def sequence_len(self) -> int: ...
-
-    def __call__(
-        self,
-        current_latent_state: Float[Array, "latent_dim"],
-        **kwargs: Any,
-    ) -> Int[Array, "sequence_len"]: ...

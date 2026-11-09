@@ -1,126 +1,115 @@
-"""Long-lived TMRL session that remains responsive between MPC collections."""
+"""Synchronous discrete actions and explicit Trackmania episode boundaries."""
 
-import queue
-import threading
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable, Optional
+from collections import deque
+from typing import Any, NamedTuple
 
 import numpy as np
+from core.actions import ACTION_GRID_NP
+from core.config import IMG_HIST_LEN, IMG_SIZE
 
-from win_client.utils import get_tmrl_env
+from win_client.utils import obs_to_dict
 
-IDLE_ACTION = np.asarray([0.0, 0.0, 0.0], dtype=np.float32)
-
-
-@dataclass
-class _CollectionRequest:
-    driver: Any
-    rollout_file: Path
-    num_episodes: int
-    iteration: int
-    finished: threading.Event = field(default_factory=threading.Event)
-    result: Optional[tuple[int, ...]] = None
-    error: Optional[BaseException] = None
+REWARD_DEFINITION = "step:-0.001,finish:+1,genuine_failure:-1"
+IDLE_ACTION = np.zeros(3, dtype=np.float32)
+GAME_HZ = 20
+MAX_EPISODE_STEPS = GAME_HZ * 120
+COLLECTION_CUTS = frozenset({"stuck", "frame_budget", "respawn", "timeout"})
+type Observation = dict[str, np.ndarray]
 
 
-class GameSessionWorker:
-    """Own a TMRL environment and keep its Openplanet stream active."""
+class Step(NamedTuple):
+    observation: Observation | None
+    action_id: int | None
+    reward: float
+    done: bool
+    reason: str | None
+    action_error: float | None
 
-    def __init__(self, env_factory: Callable[[], Any] = get_tmrl_env) -> None:
-        self._env_factory = env_factory
-        self._requests: queue.Queue[_CollectionRequest] = queue.Queue()
-        self._stop = threading.Event()
-        self._ready = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-        self._startup_error: Optional[BaseException] = None
-        self._fatal_error: Optional[BaseException] = None
 
-    def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(
-            target=self._run, name="tmrl-game-session", daemon=True
+class DrivingEnvironment:
+    """Build histories from the observations and controls of one episode."""
+
+    def __init__(self, env: Any) -> None:
+        self.env = env
+        self.frames: deque[np.ndarray] = deque(maxlen=IMG_HIST_LEN)
+        self.controls: deque[np.ndarray] = deque(maxlen=2)
+        self.steps = 0
+        self.pending_action: int | None = None
+        interface = getattr(env, "unwrapped", env)
+        self.native_rtgym = type(interface).__module__.startswith("rtgym.")
+
+    def _observation(self, raw: Any, *, reset: bool = False) -> Observation:
+        obs = obs_to_dict(raw)
+        if obs["screen"].shape != (1, IMG_SIZE, IMG_SIZE):
+            raise ValueError("The game must return a grayscale 64×64 observation.")
+        frame = obs["screen"][0].copy()
+        if reset:
+            self.frames.clear()
+            self.frames.extend([frame] * IMG_HIST_LEN)
+        else:
+            self.frames.append(frame)
+        return {
+            "screen": np.stack(self.frames),
+            "telemetry": np.concatenate((obs["telemetry"][:3], *self.controls)),
+        }
+
+    def reset(self) -> Observation:
+        self.steps = 0
+        self.pending_action = None
+        self.controls.clear()
+        self.controls.extend([IDLE_ACTION] * 2)
+        raw, _ = self.env.reset()
+        if raw is None:
+            raise RuntimeError("The game reset did not return an observation.")
+        return self._observation(raw, reset=True)
+
+    def step(self, action_id: int) -> Step:
+        if not 0 <= action_id < len(ACTION_GRID_NP):
+            raise ValueError(f"Action ID outside the discrete table: {action_id}")
+        action = ACTION_GRID_NP[action_id]
+        try:
+            raw, _, terminated, truncated, info = self.env.step(action.copy())
+        except (TimeoutError, ConnectionError):
+            return Step(None, None, 0.0, False, "missing_observation", None)
+        self.steps += 1
+        if raw is None:
+            return Step(None, None, 0.0, False, "missing_observation", None)
+
+        applied_id: int | None = action_id
+        if self.native_rtgym:
+            # Native step returns the completed interval while sending the next action.
+            applied_id, self.pending_action = self.pending_action, action_id
+
+        reason = info.get("termination_reason")
+        finished = bool(info.get("end_of_track") or reason == "done")
+        failure = bool(
+            info.get("genuine_failure")
+            or (terminated and reason not in COLLECTION_CUTS and not finished)
         )
-        self._thread.start()
-        self._ready.wait()
-        if self._startup_error is not None:
-            raise RuntimeError(
-                "Unable to start the TMRL game session"
-            ) from self._startup_error
-
-    def collect(
-        self, driver: Any, rollout_file: Path, num_episodes: int, iteration: int
-    ) -> list[int]:
-        if self._thread is None:
-            raise RuntimeError("Game session has not been started")
-        if self._fatal_error is not None:
-            raise RuntimeError("TMRL heartbeat has failed") from self._fatal_error
-        request = _CollectionRequest(
-            driver=driver,
-            rollout_file=Path(rollout_file),
-            num_episodes=int(num_episodes),
-            iteration=int(iteration),
+        done = finished or failure
+        if finished:
+            reason = "done"
+        elif failure:
+            reason = "failure"
+        elif reason not in COLLECTION_CUTS:
+            reason = "timeout" if truncated or self.steps >= MAX_EPISODE_STEPS else None
+        reward = -0.001 + float(finished) - float(failure and not finished)
+        if applied_id is None:
+            # Reset primes a neutral interval before any selected action has run.
+            return Step(
+                self._observation(raw, reset=True), None, reward, done, reason, None
+            )
+        applied_action = ACTION_GRID_NP[applied_id]
+        self.controls.append(applied_action)
+        measured = info.get("action")
+        action_error = (
+            None
+            if measured is None
+            else float(np.max(np.abs(measured - applied_action)))
         )
-        self._requests.put(request)
-        request.finished.wait()
-        if request.error is not None:
-            raise RuntimeError("MPC rollout collection failed") from request.error
-        return list(request.result or ())
+        return Step(
+            self._observation(raw), applied_id, reward, done, reason, action_error
+        )
 
     def close(self) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join()
-            self._thread = None
-
-    def _run(self) -> None:
-        env = None
-        try:
-            env = self._env_factory()
-            env.reset()
-        except BaseException as error:
-            self._startup_error = error
-            self._ready.set()
-            if env is not None:
-                env.close()
-            return
-
-        self._ready.set()
-        try:
-            while not self._stop.is_set():
-                try:
-                    request = self._requests.get_nowait()
-                except queue.Empty:
-                    # Idle control deliberately has no writer or rollout metadata.
-                    _, _, terminated, truncated, _ = env.step(IDLE_ACTION)
-                    if terminated or truncated:
-                        env.reset()
-                    continue
-
-                try:
-                    request.result = tuple(
-                        request.driver.collect(
-                            env,
-                            request.rollout_file,
-                            request.num_episodes,
-                            request.iteration,
-                        )
-                    )
-                    env.reset()
-                except BaseException as error:
-                    request.error = error
-                finally:
-                    request.finished.set()
-        except BaseException as error:
-            self._fatal_error = error
-            while True:
-                try:
-                    pending = self._requests.get_nowait()
-                except queue.Empty:
-                    break
-                pending.error = error
-                pending.finished.set()
-        finally:
-            if env is not None:
-                env.close()
+        self.env.close()

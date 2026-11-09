@@ -1,66 +1,38 @@
-"""
-Entry point for real-time Sub-JEPA MPC speedrunning on Windows.
-
-Deploys the pretrained JAX/Equinox world model to drive Trackmania
-autonomously using asynchronous trajectory optimization.
-"""
+"""Drive Trackmania with a frozen Q or MPC model snapshot."""
 
 import argparse
-import logging
+import json
+from pathlib import Path
 
-from win_client.env_patches import apply_data_collection_patches
-from win_client.mpc_driver import MPCDriver
-from win_client.settings import cfg
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Trackmania Windows Sub-JEPA Real-Time MPC Driver"
-    )
-    parser.add_argument(
-        "--checkpoint-path",
-        type=str,
-        default=None,
-        help="Path to combined Sub-JEPA .eqx checkpoint.",
-    )
-    parser.add_argument(
-        "--value-head-path",
-        type=str,
-        default=None,
-        help="Optional path to pretrained MLPValueHead checkpoint.",
-    )
-    parser.add_argument(
-        "--policy-head-path",
-        type=str,
-        default=None,
-        help="Path to behavior-cloned MLPPolicyHead checkpoint.",
-    )
-    parser.add_argument(
-        "--record-rollouts",
-        action="store_true",
-        help="Record live MPC rollouts to HDF5 shards.",
-    )
-    return parser.parse_args()
+from win_client.env_patches import apply_online_rl_patches
+from win_client.game_session import DrivingEnvironment
+from win_client.mpc_driver import drive_episode, load_driver
+from win_client.utils import get_tmrl_env
 
 
 def main() -> None:
-    args = parse_args()
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkpoint-path", type=Path, required=True)
+    parser.add_argument("--controller", choices=("q", "mpc"), default="mpc")
+    parser.add_argument("--episodes", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=42)
+    args = parser.parse_args()
 
-    apply_data_collection_patches()
-
-    logging.info("Initializing Sub-JEPA Real-Time MPC Driver...")
-    if args.record_rollouts:
-        cfg.mpc.record_rollouts = True
-
-    driver = MPCDriver(
-        checkpoint_path=args.checkpoint_path,
-        value_head_path=args.value_head_path,
-        policy_head_path=args.policy_head_path,
-    )
-    driver.run()
+    driver, models = load_driver(args.checkpoint_path, args.seed)
+    driver.warmup(models)
+    apply_online_rl_patches()
+    env = DrivingEnvironment(get_tmrl_env())
+    try:
+        for _ in range(args.episodes):
+            driver.reset()
+            episode = drive_episode(
+                env,
+                lambda obs: driver.select(models, obs, args.controller),
+                keep_observations=False,
+            )
+            print(json.dumps(episode.summary(driver.planner.gamma)), flush=True)
+    finally:
+        env.close()
 
 
 if __name__ == "__main__":

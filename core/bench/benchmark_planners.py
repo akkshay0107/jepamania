@@ -1,86 +1,63 @@
+"""Measure warmed-up encoding, Q inference, and MPC on the local driver."""
+
 import time
 
 import equinox as eqx
 import jax
 import numpy as np
-from core.config import PolicyHeadConfig, PredictorConfig, ValueHeadConfig
-from core.dynamics import MLPPolicyHead, MLPPredictor, MLPValueHead
+from core.config import IMG_HIST_LEN, IMG_SIZE, TELEMETRY_FEATURES, load_config
 from core.planners import CEMPlanner
+from win_client.mpc_driver import (
+    MPCDriver,
+    _encode,
+    greedy_action,
+    make_driving_models,
+    search_action,
+)
 
 
-def benchmark(func, args, num_warmup=10, num_runs=100):
-    # Warmup to ensure fully compiled XLA execution
-    for _ in range(num_warmup):
-        res = func(*args)
-        jax.block_until_ready(res)
-
-    latencies = []
-    for _ in range(num_runs):
+def benchmark(call, iterations: int = 100):
+    for _ in range(12):
+        jax.block_until_ready(call())
+    elapsed = []
+    for _ in range(iterations):
         start = time.perf_counter()
-        res = func(*args)
-        jax.block_until_ready(res)
-        end = time.perf_counter()
-        latencies.append((end - start) * 1000.0)
-
-    return np.array(latencies)
+        jax.block_until_ready(call())
+        elapsed.append(1000 * (time.perf_counter() - start))
+    return np.percentile(elapsed, [50, 95, 99])
 
 
-def main():
-    print("Setting up models for benchmarking...")
-    key = jax.random.PRNGKey(0)
-    key_pred, key_val, key_pol, key_state, key_plan = jax.random.split(key, 5)
-
-    pred_cfg = PredictorConfig()
-    predictor = MLPPredictor(pred_cfg, key_pred)
-
-    val_cfg = ValueHeadConfig()
-    value_head = MLPValueHead(val_cfg, key_val)
-
-    pol_cfg = PolicyHeadConfig()
-    policy_head = MLPPolicyHead(pol_cfg, key_pol)
-
-    # Pure value-guided objective: just use the predicted value
-    def objective_fn(latent):
-        return value_head(latent)
-
-    latent_state = jax.random.normal(key_state, (predictor.state_dim,))
-
-    print(
-        f"\n{'Planner':<20} | {'Seq_Len':<10} | {'Params':<30} | {'Mean (ms)':<10} |"
-        f" {'Max (ms)':<10}"
-    )
-    print("-" * 90)
-
-    cem_configs = [
-        {"seq": 10, "iters": 2, "samples": 50},
-        {"seq": 10, "iters": 3, "samples": 50},
-        {"seq": 10, "iters": 3, "samples": 100},
-        {"seq": 10, "iters": 3, "samples": 200},
-        {"seq": 10, "iters": 5, "samples": 100},
-    ]
-
-    for cfg in cem_configs:
-        planner = CEMPlanner(
-            predictor=predictor,
-            objective_fn=objective_fn,
-            policy_head=policy_head,
-            sequence_len=cfg["seq"],
-            num_iters=cfg["iters"],
-            num_samples=cfg["samples"],
-            num_elites=max(1, cfg["samples"] // 4),
-            alpha=0.1,
-        )
-
-        @eqx.filter_jit
-        def run_cem_planner(state, p_key):
-            return planner(state, key=p_key)
-
-        latencies = benchmark(run_cem_planner, (latent_state, key_plan))
-        params_str = f"iters={cfg['iters']}, samples={cfg['samples']}"
-        print(
-            f"{'CEM':<20} | {cfg['seq']:<10} | {params_str:<30} |"
-            f" {np.mean(latencies):<10.2f} | {np.max(latencies):<10.2f}"
-        )
+def main() -> None:
+    config = load_config("core/config.yaml")
+    init, obs_key = jax.random.split(jax.random.key(42))
+    models = make_driving_models(config, init)
+    encoder, _, head = models
+    planner = CEMPlanner(config.planner, 0.997)
+    driver = MPCDriver(planner, 42)
+    rng = np.random.default_rng(42)
+    obs = {
+        "screen": rng.integers(
+            0, 256, (IMG_HIST_LEN, IMG_SIZE, IMG_SIZE), dtype=np.uint8
+        ),
+        "telemetry": np.zeros(TELEMETRY_FEATURES, dtype=np.float32),
+    }
+    device_obs = jax.device_put(obs)
+    encode = eqx.filter_jit(_encode)
+    plan = planner.empty_plan()
+    driver.warmup(models)
+    calls = {
+        "device encoding": lambda: encode(encoder, device_obs),
+        "device Q + encoding": lambda: greedy_action(encoder, head, device_obs),
+        "device MPC + encoding": lambda: search_action(
+            planner, models, device_obs, plan, obs_key
+        ),
+        "host Q + transfer": lambda: driver.select(models, obs, "q"),
+        "host MPC + transfer": lambda: driver.select(models, obs, "mpc"),
+    }
+    print(f"Backend {jax.default_backend()} | milliseconds after warmup")
+    for name, call in calls.items():
+        p50, p95, p99 = benchmark(call)
+        print(f"{name:<24} p50={p50:6.2f} p95={p95:6.2f} p99={p99:6.2f}")
 
 
 if __name__ == "__main__":

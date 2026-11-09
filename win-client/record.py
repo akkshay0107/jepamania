@@ -10,10 +10,7 @@ import logging
 from pathlib import Path
 
 from win_client.agent_recorder import AgentCollector
-from win_client.env_patches import (
-    apply_data_collection_patches,
-    apply_online_rl_patches,
-)
+from win_client.env_patches import apply_data_collection_patches
 from win_client.human_recorder import HumanRecorder
 
 
@@ -30,11 +27,6 @@ def parse_args() -> argparse.Namespace:
             "'agent' for trained RL policy rollout."
         ),
     )
-    parser.add_argument(
-        "--bootstrap",
-        action="store_true",
-        help="Record bootstrap episodes into data/rl/bootstrap.",
-    )
     return parser.parse_args()
 
 
@@ -45,14 +37,9 @@ def main() -> None:
     )
 
     client_root = Path(__file__).resolve().parent
-    if args.bootstrap:
-        apply_online_rl_patches()
-        output_dir = client_root / "data" / "rl" / "bootstrap"
-        logging.info(f"Bootstrap recording enabled → writing to {output_dir}")
-    else:
-        apply_data_collection_patches()
-        output_dir = client_root / "data" / "ssl" / args.mode
-        logging.info(f"SSL recording enabled → writing to {output_dir}")
+    apply_data_collection_patches()
+    output_dir = client_root / "data" / "ssl" / args.mode
+    logging.info("SSL recording enabled → writing to %s", output_dir)
 
     if args.mode == "human":
         logging.info("Initializing Human Play Recorder...")
