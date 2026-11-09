@@ -136,16 +136,15 @@ def sub_jepa_regularization(
     return jnp.mean(ep_stats)
 
 
-def sub_jepa_loss(
+def sub_jepa_components(
     predicted_latents: Float[Array, "batch state_dim"],
     target_latents: Float[Array, "batch state_dim"],
     subspace_projectors: Float[Array, "num_subspaces latent_dim subspace_dim"],
     num_slices: int,
     key: PRNGKeyArray,
-    reg_weight: float = 1.0,
     target_mask: Float[Array, "batch"] | None = None,
-) -> Float[Array, ""]:
-    """Score learned latents, excluding any appended deterministic control history."""
+) -> tuple[Float[Array, ""], Float[Array, ""]]:
+    """Return prediction and Gaussian losses on learned coordinates."""
     latent_dim = subspace_projectors.shape[1]
     if predicted_latents.shape != target_latents.shape:
         raise ValueError("Predicted and target model states must have matching shapes.")
@@ -172,4 +171,24 @@ def sub_jepa_loss(
     reg_loss = sub_jepa_regularization(
         target_latents, subspace_projectors, num_slices, key, target_mask
     )
-    return pred_loss + reg_weight * reg_loss
+    return pred_loss, reg_loss
+
+
+def sub_jepa_loss(
+    predicted_latents: Float[Array, "batch state_dim"],
+    target_latents: Float[Array, "batch state_dim"],
+    subspace_projectors: Float[Array, "num_subspaces latent_dim subspace_dim"],
+    num_slices: int,
+    key: PRNGKeyArray,
+    reg_weight: float | Float[Array, ""] = 1.0,
+    target_mask: Float[Array, "batch"] | None = None,
+) -> Float[Array, ""]:
+    prediction, regularization = sub_jepa_components(
+        predicted_latents,
+        target_latents,
+        subspace_projectors,
+        num_slices,
+        key,
+        target_mask,
+    )
+    return prediction + reg_weight * regularization

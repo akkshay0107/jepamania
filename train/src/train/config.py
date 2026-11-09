@@ -15,12 +15,13 @@ class LossConfig:
 
 @dataclass
 class PretrainConfig:
-    epochs: int = 10
-    batch_size: int = 256
-    peak_lr: float = 3e-4
+    updates: int = 1536
+    batch_size: int = 24
+    lr_enc: float = 1e-4
+    lr_pred: float = 3e-4
     rollout_len: int = 5
     seed: int = 42
-    log_every: int = 50
+    log_every: int = 250
     val_ratio: float = 0.1
 
 

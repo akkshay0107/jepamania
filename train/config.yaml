@@ -5,9 +5,10 @@ loss:
   reg_weight: 0.02
 
 pretrain:
-  epochs: 20
-  batch_size: 256
-  peak_lr: 3.0e-4
+  updates: 1536
+  batch_size: 24
+  lr_enc: 1.0e-4
+  lr_pred: 3.0e-4
   rollout_len: 5
   seed: 42
   log_every: 250

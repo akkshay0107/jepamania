@@ -1,514 +1,457 @@
-# ruff: noqa: E402
-"""
-Offline Sub-JEPA pretraining loop.
-
-Optimizes an (Encoder, Predictor) pair jointly: the encoder embeds the
-observation at time t and at t+K, the predictor rolls the latent forward
-through the K recorded action tokens, and the Sub-JEPA loss matches the
-rolled-out latent against the target latent while regularizing the target
-distribution to prevent collapse.
-"""
+"""Offline SubJEPA updates, reproducible sampling, and model checkpoints."""
 
 import argparse
-import sys
-import time
+import json
+import os
+import tempfile
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Optional, Tuple, TypeVar, Union
-
-TRAIN_ROOT = Path(__file__).resolve().parent.parent.parent
-if str(TRAIN_ROOT) not in sys.path:
-    sys.path.insert(0, str(TRAIN_ROOT))
+from typing import TYPE_CHECKING, NamedTuple, cast
 
 import equinox as eqx
+import h5py
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-from core.config import IMG_HIST_LEN, load_config
+from core.actions import ACTION_GRID_NP
+from core.config import SubJepaConfig, load_config
 from core.dynamics import MLPPredictor
-from core.encoders import ViTEncoder
+from core.encoders import ViTEncoder, load_world_model
 from core.interfaces import Encoder, Predictor
-from jaxtyping import Array, Float, PRNGKeyArray, PyTree
+from jaxtyping import Array, PRNGKeyArray, PyTree
 from omegaconf import OmegaConf
 
-import wandb
-from train.config import LossConfig, load_train_config
-from train.dataloader import DataLoader, SlidingWindowDataset
-from train.loss import generate_subspace_projectors, sub_jepa_loss
+from train.config import LossConfig, TrainConfig, load_train_config
+from train.dataloader import SlidingWindowDataset
+from train.loss import generate_subspace_projectors, sub_jepa_components
 
-DEFAULT_CONFIG = TRAIN_ROOT.parent / "core" / "config.yaml"
-DEFAULT_TRAIN_CONFIG = TRAIN_ROOT / "config.yaml"
-DEFAULT_DATA_DIR = TRAIN_ROOT.parent / "win-client" / "data"
-DEFAULT_CHECKPOINT_DIR = TRAIN_ROOT.parent / "checkpoints" / "pretrain"
+if TYPE_CHECKING:
+    from typing import Annotated as Float
+    from typing import Annotated as Int
+else:
+    from jaxtyping import Float, Int
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_CONFIG = REPO_ROOT / "core/config.yaml"
+DEFAULT_TRAIN_CONFIG = REPO_ROOT / "train/config.yaml"
+DEFAULT_DATA_DIR = REPO_ROOT / "win-client/data"
+DEFAULT_CHECKPOINT_DIR = REPO_ROOT / "checkpoints/pretrain"
+
+type Models = tuple[Encoder, Predictor]
+type Batch = Mapping[str, np.ndarray | Array]
+type Metrics = dict[str, Float[Array, ""]]
 
 
-# (encoder, predictor) — both are Equinox modules, so the tuple is a PyTree.
-Models = Tuple[Encoder, Predictor]
-# Batches cross the JIT boundary: host-side NumPy in, traced Arrays inside.
-# Mapping (read-only, covariant) lets both views satisfy the same signature.
-Batch = Mapping[str, Union[np.ndarray, Array]]
-
-# Checkpoints hold either the (encoder, predictor) models or an optax state.
-CheckpointT = TypeVar("CheckpointT")
+class LearnerState[ModelT, TargetT](NamedTuple):
+    models: ModelT
+    optimizer: optax.OptState
+    targets: TargetT
+    bases: Float[Array, "subspaces latent_dim subspace_dim"]
+    key: PRNGKeyArray
+    updates: Int[Array, ""]
 
 
 def _rollout_latent_sequence(
     predictor: Predictor,
     z0: Float[Array, "state_dim"],
-    actions: Float[Array, "K 3"],
-) -> Float[Array, "K state_dim"]:
-    """Rolls a single latent forward through K controls, returning all
-    intermediate latents."""
+    actions: Float[Array, "steps 3"],
+) -> Float[Array, "steps state_dim"]:
+    def step(state, action):
+        next_state = predictor(state, action)
+        return next_state, next_state
 
-    def step(
-        z: Float[Array, "state_dim"], action: Float[Array, "3"]
-    ) -> Tuple[Float[Array, "state_dim"], Float[Array, "state_dim"]]:
-        next_z = predictor(z, action)
-        return next_z, next_z
+    return jax.lax.scan(step, z0, actions)[1]
 
-    _, z_seq = jax.lax.scan(step, z0, actions)
-    return z_seq
+
+def encode(
+    encoder: Encoder, frames: Array | np.ndarray, telemetry: Array | np.ndarray
+) -> Float[Array, "*leading state_dim"]:
+    """Encode a batch or sequence while transferring compact uint8 frames."""
+    pixels = jnp.asarray(frames, dtype=jnp.float32) / 255.0
+    telemetry = jnp.asarray(telemetry, dtype=jnp.float32)
+    flat = jax.vmap(encoder)(
+        {
+            "screen": pixels.reshape(-1, *pixels.shape[-3:]),
+            "telemetry": telemetry.reshape(-1, telemetry.shape[-1]),
+        }
+    )
+    return flat.reshape(*pixels.shape[:-3], flat.shape[-1])
+
+
+def encode_rollout(models: Models, batch: Batch):
+    encoder, predictor = models
+    roots = encode(encoder, batch["obs_stack_t"], batch["telemetry_t"])
+    targets = encode(encoder, batch["obs_stack_targets"], batch["telemetry_targets"])
+    actions = jnp.asarray(batch["actions_seq"][:, : targets.shape[1]], jnp.float32)
+    predicted = jax.vmap(_rollout_latent_sequence, in_axes=(None, 0, 0))(
+        predictor, roots, actions
+    )
+    return roots, predicted, targets
+
+
+def ssl_components(
+    predicted: Float[Array, "batch steps state_dim"],
+    targets: Float[Array, "batch steps state_dim"],
+    bases: Float[Array, "subspaces latent_dim subspace_dim"],
+    num_slices: int,
+    key: PRNGKeyArray,
+    mask: np.ndarray | Array | None = None,
+) -> tuple[Float[Array, ""], Float[Array, ""]]:
+    return sub_jepa_components(
+        predicted.reshape(-1, predicted.shape[-1]),
+        targets.reshape(-1, targets.shape[-1]),
+        bases,
+        num_slices,
+        key,
+        None if mask is None else jnp.asarray(mask).reshape(-1),
+    )
 
 
 def compute_loss(
     models: Models,
     batch: Batch,
-    subspace_projectors: Float[Array, "num_subspaces latent_dim subspace_dim"],
+    subspace_projectors: Float[Array, "subspaces latent_dim subspace_dim"],
     num_slices: int,
     reg_weight: float,
     slice_key: PRNGKeyArray,
 ) -> Float[Array, ""]:
-    encoder, predictor = models
-
-    # Convert on-device so screen frames cross PCIe as uint8.
-    obs_t = {
-        "screen": batch["obs_stack_t"].astype(jnp.float32) / 255.0,
-        "telemetry": batch["telemetry_t"],
-    }
-    num_target_steps = batch["obs_stack_targets"].shape[1]
-    actions = jnp.asarray(batch["actions_seq"][:, :num_target_steps], dtype=jnp.float32)
-    z_t = jax.vmap(encoder)(obs_t)
-
-    obs_targets = {
-        "screen": batch["obs_stack_targets"].astype(jnp.float32) / 255.0,
-        "telemetry": batch["telemetry_targets"],
-    }
-    z_target_seq = jax.vmap(jax.vmap(encoder))(obs_targets)
-    z_pred_seq = jax.vmap(
-        lambda z0, acts: _rollout_latent_sequence(predictor, z0, acts)
-    )(z_t, actions)
-
-    z_pred_flat = z_pred_seq.reshape(-1, z_pred_seq.shape[-1])
-    z_target_flat = z_target_seq.reshape(-1, z_target_seq.shape[-1])
-    return sub_jepa_loss(
-        z_pred_flat,
-        z_target_flat,
+    _, predicted, targets = encode_rollout(models, batch)
+    prediction, regularization = ssl_components(
+        predicted,
+        targets,
         subspace_projectors,
         num_slices,
         slice_key,
-        reg_weight,
-        target_mask=jnp.asarray(
-            batch.get("target_mask_seq", jnp.ones(z_pred_seq.shape[:2])),
-            dtype=jnp.float32,
-        ).reshape(-1),
+        batch.get("target_mask_seq"),
     )
+    return prediction + reg_weight * regularization
 
 
-def make_train_step(
-    optimizer: optax.GradientTransformation,
-    subspace_projectors: Float[Array, "num_subspaces latent_dim subspace_dim"],
-    num_slices: int,
-    reg_weight: float,
-):
-    """Builds a JIT-compiled, purely functional optimization step."""
+def make_train_step(optimizer, subspace_projectors, num_slices, reg_weight):
+    """Build the scalar SSL step used by the saved diagnostic and local checks."""
 
     @eqx.filter_jit
-    def train_step(
-        models: Models,
-        opt_state: optax.OptState,
-        batch: Batch,
-        slice_key: PRNGKeyArray,
-    ) -> Tuple[Models, optax.OptState, Float[Array, ""]]:
+    def train_step(models, opt_state, batch, slice_key):
         loss, grads = eqx.filter_value_and_grad(compute_loss)(
             models, batch, subspace_projectors, num_slices, reg_weight, slice_key
         )
-        params = eqx.filter(models, eqx.is_array)
-        updates, new_opt_state = optimizer.update(grads, opt_state, params)
-        new_models = eqx.apply_updates(models, updates)
-        return new_models, new_opt_state, loss
+        updates, opt_state = optimizer.update(
+            grads, opt_state, eqx.filter(models, eqx.is_array)
+        )
+        return eqx.apply_updates(models, updates), opt_state, loss
 
     return train_step
 
 
-def save_checkpoint(path: Union[str, Path], tree: PyTree) -> None:
-    """Serializes a PyTree (model weights or optimizer state) via Equinox."""
+def alpha_for(batch: Batch, reference_weight: float) -> float:
+    batch_size, steps = batch["actions_seq"].shape[:2]
+    return reference_weight * 120 / (batch_size * steps)
+
+
+def ssl_metrics(predicted, targets, batch, bases, key, loss: LossConfig) -> Metrics:
+    prediction, regularization = ssl_components(
+        predicted, targets, bases, loss.num_slices, key
+    )
+    alpha = alpha_for(batch, loss.reg_weight)
+    return {
+        "ssl": prediction + alpha * regularization,
+        "prediction": prediction,
+        "regularization": regularization,
+    }
+
+
+def make_update[ModelT, TargetT](
+    optimizer: optax.GradientTransformation,
+    objective: Callable,
+    update_targets: Callable[[ModelT, TargetT], TargetT],
+):
+    """Differentiate once and commit weights, optimizer and targets together."""
+
+    @eqx.filter_jit
+    def step(state: LearnerState[ModelT, TargetT], *batches: Batch):
+        key, subkey = jax.random.split(state.key)
+        (loss, metrics), gradients = eqx.filter_value_and_grad(objective, has_aux=True)(
+            state.models, state.targets, state.bases, subkey, *batches
+        )
+        norm = optax.global_norm(gradients)
+        params, static = eqx.partition(state.models, eqx.is_array)
+        target_params, target_static = eqx.partition(state.targets, eqx.is_array)
+        updates, optimizer_state = optimizer.update(gradients, state.optimizer, params)
+        models = eqx.apply_updates(state.models, updates)
+        accepted = (
+            jnp.isfinite(loss)
+            & jnp.isfinite(norm)
+            & jnp.isfinite(optax.global_norm(updates))
+        )
+
+        def apply(_):
+            return (
+                eqx.filter(models, eqx.is_array),
+                optimizer_state,
+                eqx.filter(update_targets(models, state.targets), eqx.is_array),
+                state.updates + 1,
+            )
+
+        def reject(_):
+            return params, state.optimizer, target_params, state.updates
+
+        params, optimizer_state, target_params, count = jax.lax.cond(
+            accepted, apply, reject, operand=None
+        )
+        models = eqx.combine(params, static)
+        targets = eqx.combine(target_params, target_static)
+        return (
+            LearnerState(models, optimizer_state, targets, state.bases, key, count),
+            {**metrics, "loss": loss, "grad_norm": norm, "accepted": accepted},
+        )
+
+    return step
+
+
+def make_optimizer(models, schedules: tuple[optax.ScalarOrSchedule, ...]):
+    labels = tuple(
+        jax.tree.map(lambda _: f"group_{index}", eqx.filter(model, eqx.is_array))
+        for index, model in enumerate(models)
+    )
+    transforms = {
+        f"group_{index}": optax.adamw(
+            schedule,
+            weight_decay=1e-4,
+            mask=lambda params: jax.tree.map(lambda value: value.ndim >= 2, params),
+        )
+        for index, schedule in enumerate(schedules)
+    }
+    return optax.chain(
+        optax.clip_by_global_norm(10), optax.partition(transforms, labels)
+    )
+
+
+def new_state(models, optimizer, targets, key, latent_dim: int, loss: LossConfig):
+    key, basis_key = jax.random.split(key)
+    bases = generate_subspace_projectors(
+        basis_key,
+        latent_dim,
+        loss.num_subspaces,
+        loss.subspace_dim or latent_dim // loss.num_subspaces,
+    )
+    return LearnerState(
+        models,
+        optimizer.init(eqx.filter(models, eqx.is_array)),
+        targets,
+        bases,
+        jax.random.key_data(key),
+        jnp.asarray(0, dtype=jnp.int32),
+    )
+
+
+def save_checkpoint(path: str | Path, tree: PyTree) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    eqx.tree_serialise_leaves(path, tree)
+    file = tempfile.NamedTemporaryFile(dir=path.parent, delete=False)
+    temp = Path(file.name)
+    try:
+        with file:
+            eqx.tree_serialise_leaves(file, tree)
+            file.flush()
+            os.fsync(file.fileno())
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
-def load_checkpoint(path: Union[str, Path], template: CheckpointT) -> CheckpointT:
-    """Loads leaves into a freshly constructed template of matching structure."""
+def load_checkpoint[T](path: str | Path, template: T) -> T:
     return eqx.tree_deserialise_leaves(Path(path), template)
 
 
-def _last_epoch_index(checkpoint_dir: Path) -> int:
-    """Highest epoch number among existing weight checkpoints, or 0."""
-    indices = []
-    for path in checkpoint_dir.glob("pretrain_model_ep*.eqx"):
-        suffix = path.stem.removeprefix("pretrain_model_ep")
-        if suffix.isdigit():
-            indices.append(int(suffix))
-    return max(indices, default=0)
+def log_json(path: Path, metrics: Mapping[str, object]) -> None:
+    with path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(metrics, allow_nan=False) + "\n")
 
 
-def _make_lr_schedule(learning_rate: float, total_steps: int) -> optax.Schedule:
-    """Warm up for 10% of the run, then decay over its remaining steps."""
-    return optax.warmup_cosine_decay_schedule(
-        init_value=0.0,
-        peak_value=learning_rate,
-        warmup_steps=int(total_steps * 0.10),
-        # Optax includes warmup in decay_steps.
-        decay_steps=total_steps,
-        end_value=learning_rate * 0.01,
-    )
-
-
-def _restart_lr_schedule(opt_state: optax.OptState) -> optax.OptState:
-    """Restart the schedule for additional epochs while retaining Adam history."""
-    return jax.tree.map(
-        lambda state: (
-            state._replace(count=jnp.zeros_like(state.count))
-            if isinstance(state, optax.ScaleByScheduleState)
-            else state
-        ),
-        opt_state,
-        is_leaf=lambda state: isinstance(state, optax.ScaleByScheduleState),
-    )
-
-
-def train(
-    models: Models,
-    dataloader: Iterable[Dict[str, np.ndarray]],
-    *,
-    latent_dim: int,
-    loss_cfg: LossConfig,
-    num_epochs: int,
-    learning_rate: float,
-    key: PRNGKeyArray,
-    checkpoint_dir: Union[str, Path],
-    log_every: int = 50,
-    resume: bool = False,
-    val_dataloader: Optional[Iterable[Dict[str, np.ndarray]]] = None,
-    config_dict: Optional[Dict[str, Any]] = None,
-) -> Models:
-    """
-    Runs offline pretraining and returns the trained (encoder, predictor).
-
-    The combined (encoder, predictor) pair is written to `checkpoint_dir`
-    after every epoch as `pretrain_model_ep{n}.eqx` plus a rolling
-    `pretrain_model_latest.eqx` (and `pretrain_model_best.eqx` on validation
-    improvement), with the optimizer state in `pretrain_optstate_latest.eqx`
-    and the frozen subspace projectors in `projectors.eqx`. Slice directions are
-    resampled per training pass and are not serialized.
-
-    With `resume=True`, weights, optimizer state, and projectors are restored
-    from the rolling files and epoch numbering continues from the highest
-    existing epoch checkpoint; `num_epochs` more epochs are then trained.
-    The learning-rate schedule restarts for these additional epochs; Adam's
-    moments and bias-correction count are preserved.
-
-    Arguments:
-      models: Tuple containing (encoder, predictor) Equinox modules
-      dataloader: Iterable yielding transition batches
-      latent_dim: Dimensionality of latent embedding representation
-      loss_cfg: Loss configuration specifying subspace and slice parameters
-      num_epochs: Total number of pretraining epochs to run
-      learning_rate: Peak AdamW learning rate used for warmup-cosine decay
-      key: PRNG key for projector initialization
-      checkpoint_dir: Directory path for saving output checkpoints
-      log_every: Frequency of logging metrics to stdout and wandb
-      resume: Flag indicating whether to resume from existing checkpoints
-      val_dataloader: Optional validation dataloader for evaluation
-      config_dict: Optional dictionary of hyperparameters logged to wandb
-
-    Returns:
-      Trained (encoder, predictor) Equinox model tuple
-    """
-    checkpoint_dir = Path(checkpoint_dir)
-
-    wandb.init(
-        project="jepamania",
-        mode="offline",
-        config=config_dict or {},
-    )
-
-    subspace_dim = loss_cfg.subspace_dim or latent_dim // loss_cfg.num_subspaces
-    key_proj, slice_rng = jax.random.split(key)
-    # Frozen random orthogonal bases; the freshly generated values are only
-    # templates when resuming because the serialized subspace bases are restored.
-    subspace_projectors = generate_subspace_projectors(
-        key_proj,
-        latent_dim=latent_dim,
-        num_subspaces=loss_cfg.num_subspaces,
-        subspace_dim=subspace_dim,
-    )
-
-    batches_per_epoch = (
-        len(dataloader) if hasattr(dataloader, "__len__") else 1000  # type: ignore[arg-type]
-    )
-    total_steps = max(1, num_epochs * batches_per_epoch)
-    lr_schedule = _make_lr_schedule(learning_rate, total_steps)
-
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),
-        optax.adamw(lr_schedule),
-    )
-    opt_state = optimizer.init(eqx.filter(models, eqx.is_array))
-
-    projectors_path = checkpoint_dir / "projectors.eqx"
-    start_epoch = 0
-    if resume:
-        model_path = checkpoint_dir / "pretrain_model_latest.eqx"
-        latest_opt_path = checkpoint_dir / "pretrain_optstate_latest.eqx"
-        for path in (model_path, latest_opt_path, projectors_path):
-            if not path.exists():
-                raise FileNotFoundError(f"Cannot resume: missing {path}")
-        models = load_checkpoint(model_path, models)
-        opt_state = load_checkpoint(latest_opt_path, opt_state)
-        opt_state = _restart_lr_schedule(opt_state)
-        # Loading the subspace-only template also reads legacy tuple-form
-        # projectors.eqx files and ignores their obsolete slice-projector leaf.
-        subspace_projectors = load_checkpoint(projectors_path, subspace_projectors)
-        # Rewrite legacy tuple-form files so future checkpoints retain only the
-        # state required by the resampled-slice protocol.
-        save_checkpoint(projectors_path, subspace_projectors)
-        start_epoch = _last_epoch_index(checkpoint_dir)
-        print(f"Resumed from {model_path} at epoch {start_epoch}")
-    else:
-        save_checkpoint(projectors_path, subspace_projectors)
-
-    train_step = make_train_step(
-        optimizer, subspace_projectors, loss_cfg.num_slices, loss_cfg.reg_weight
-    )
-
-    @eqx.filter_jit
-    def eval_step(
-        models_eval: Models,
-        batch_eval: Batch,
-        slice_key: PRNGKeyArray,
-    ) -> Float[Array, ""]:
-        return compute_loss(
-            models_eval,
-            batch_eval,
-            subspace_projectors,
-            loss_cfg.num_slices,
-            loss_cfg.reg_weight,
-            slice_key,
-        )
-
-    best_val_loss = float("inf")
-    if resume and val_dataloader is not None:
-        best_path = checkpoint_dir / "pretrain_model_best.eqx"
-        if best_path.exists():
-            best_models = load_checkpoint(best_path, models)
-            val_losses = []
-            resume_eval_rng, _ = jax.random.split(slice_rng)
-            for batch in val_dataloader:
-                resume_eval_rng, slice_key = jax.random.split(resume_eval_rng)
-                val_losses.append(eval_step(best_models, batch, slice_key))
-            if val_losses:
-                best_val_loss = float(jnp.mean(jnp.stack(val_losses)))
-                print(
-                    f"Restored best validation loss from {best_path}: "
-                    f"{best_val_loss:.6f}"
-                )
-
-    last_epoch = start_epoch + num_epochs
-    global_step = 0
-    try:
-        for epoch in range(start_epoch, last_epoch):
-            # Keep losses as device scalars; a float() every step would block the
-            # host on each result and defeat JAX async dispatch.
-            epoch_losses = []
-            epoch_start = time.time()
-
-            for batch in dataloader:
-                slice_rng, slice_key = jax.random.split(slice_rng)
-                models, opt_state, loss = train_step(
-                    models, opt_state, batch, slice_key
-                )
-                epoch_losses.append(loss)
-                global_step += 1
-
-                if global_step == 1 or global_step % log_every == 0:
-                    current_lr = float(np.asarray(lr_schedule(global_step - 1)))
-                    print(
-                        f"epoch {epoch + 1}/{last_epoch} | step {global_step} | "
-                        f"loss {float(loss):.6f} | lr {current_lr:.2e}"
-                    )
-                    wandb.log(
-                        {
-                            "train/step_loss": float(loss),
-                            "train/learning_rate": current_lr,
-                            "epoch": epoch + 1,
-                            "global_step": global_step,
-                        },
-                        step=global_step,
-                    )
-
-            if not epoch_losses:
-                raise RuntimeError(
-                    "DataLoader yielded no batches; check data_dir and batch_size."
-                )
-
-            mean_loss = float(jnp.mean(jnp.stack(epoch_losses)))
-            duration = time.time() - epoch_start
-
-            val_loss_str = ""
-            val_mean_loss = None
-            if val_dataloader is not None:
-                val_losses = []
-                for val_batch in val_dataloader:
-                    slice_rng, slice_key = jax.random.split(slice_rng)
-                    val_losses.append(eval_step(models, val_batch, slice_key))
-                if val_losses:
-                    val_mean_loss = float(jnp.mean(jnp.stack(val_losses)))
-                    val_loss_str = f" | val loss {val_mean_loss:.6f}"
-
-            print(
-                f"epoch {epoch + 1}/{last_epoch} done | "
-                f"mean loss {mean_loss:.6f}{val_loss_str} | "
-                f"{len(epoch_losses)} batches in {duration:.1f}s"
-            )
-
-            log_dict = {
-                "train/epoch_loss": mean_loss,
-                "epoch": epoch + 1,
-                "duration_s": duration,
+def legacy_splits(root: Path, rollout_len: int, val_ratio: float, seed: int):
+    paths = [root] if root.is_file() else sorted(root.rglob("*.h5"))
+    groups: dict[str, list[Path]] = {}
+    provenance = {}
+    for path in paths:
+        with h5py.File(path, "r") as file:
+            if "episode_id" not in file or "action_ids" in file:
+                continue
+            metadata = cast(h5py.Group | None, file.get("metadata"))
+            first = None if metadata is None else next(iter(metadata.values()), None)
+            attrs = {} if first is None else first.attrs
+            source = str(attrs.get("source", path.parent.name))
+            groups.setdefault(source, []).append(path.resolve())
+            provenance[str(path.resolve())] = {
+                "source": source,
+                "recorded_map_name": str(attrs.get("map_name", "unknown")),
+                "recorded_map_uid": str(attrs.get("map_uid", "unknown")),
             }
-            if val_mean_loss is not None:
-                log_dict["val/epoch_loss"] = val_mean_loss
-            wandb.log(log_dict, step=global_step)
 
-            # Weights and optimizer state live in separate files so deployment
-            # ships weights-only while resume can restore the Adam moments.
-            save_checkpoint(
-                checkpoint_dir / f"pretrain_model_ep{epoch + 1}.eqx", models
+    train, validation = [], []
+    for paths in groups.values():
+        dataset = SlidingWindowDataset(
+            root, rollout_len=rollout_len, data_files=paths, view="ssl"
+        )
+        if len(dataset.episode_keys) >= 2 and val_ratio > 0:
+            fit, held_out = dataset.split(val_ratio=val_ratio, seed=seed)
+            train.append(fit)
+            validation.append(held_out)
+        elif len(dataset):
+            train.append(dataset)
+    return train, validation, provenance
+
+
+def sample_legacy(
+    groups: Sequence[SlidingWindowDataset], size: int, rng: np.random.Generator
+) -> tuple[Batch, list[list[int]]]:
+    # Rotate the remainder across groups while keeping each batch close to balanced.
+    counts = np.full(len(groups), size // len(groups), dtype=np.intp)
+    counts[rng.permutation(len(groups))[: size % len(groups)]] += 1
+    batches, indices = [], []
+    for group, count in zip(groups, counts, strict=True):
+        chosen = rng.integers(len(group), size=count)
+        indices.append(chosen.tolist())
+        if count:
+            batches.append(group.read_batch(chosen))
+    return {
+        name: np.concatenate([batch[name] for batch in batches]) for name in batches[0]
+    }, indices
+
+
+def make_ssl_objective(loss: LossConfig):
+    def objective(models, _targets, bases, key, batch):
+        _, predictions, actual = encode_rollout(models, batch)
+        metrics = ssl_metrics(predictions, actual, batch, bases, key, loss)
+        return metrics["ssl"], metrics
+
+    return objective
+
+
+def run_pretrain(args, model_cfg: SubJepaConfig, config: TrainConfig) -> None:
+    """Train from episode-split legacy recordings and export E/F weights."""
+    cfg = config.pretrain
+    if cfg.updates <= 0 or cfg.batch_size <= 0 or cfg.log_every <= 0:
+        raise ValueError("Updates, batch size and logging interval must be positive.")
+    if not 0 <= cfg.val_ratio < 1:
+        raise ValueError("Validation ratio must be in [0, 1).")
+    train, validation, sources = legacy_splits(
+        args.data_dir, cfg.rollout_len, cfg.val_ratio, cfg.seed
+    )
+    if not train:
+        raise ValueError(f"No complete SSL windows in {args.data_dir}.")
+
+    key, encoder_key, predictor_key = jax.random.split(jax.random.key(cfg.seed), 3)
+    models = (
+        ViTEncoder(model_cfg.encoder, encoder_key),
+        MLPPredictor(model_cfg.predictor, predictor_key),
+    )
+    if args.initialize:
+        models = load_world_model(
+            args.initialize, encoder_key, model_cfg.encoder, model_cfg.predictor
+        )
+    schedules = tuple(
+        optax.warmup_cosine_decay_schedule(
+            0.0, lr, min(500, cfg.updates - 1), cfg.updates, end_value=lr * 0.1
+        )
+        for lr in (cfg.lr_enc, cfg.lr_pred)
+    )
+    optimizer = make_optimizer(models, schedules)
+    state = new_state(
+        models, optimizer, (), key, model_cfg.encoder.latent_dim, config.loss
+    )
+    objective = make_ssl_objective(config.loss)
+    update = make_update(optimizer, objective, lambda _models, targets: targets)
+    evaluate = eqx.filter_jit(objective)
+    out = args.checkpoint_dir
+    out.mkdir(parents=True, exist_ok=True)
+    manifest_path = out / "run.json"
+    checkpoint = out / "learner.eqx"
+    manifest = json.loads(
+        json.dumps(
+            {
+                "training": OmegaConf.to_container(config, resolve=True),
+                "model": OmegaConf.to_container(model_cfg, resolve=True),
+                "action_table": ACTION_GRID_NP.tolist(),
+                "sources": sources,
+                "train": [group.episode_keys for group in train],
+                "validation": [group.episode_keys for group in validation],
+            }
+        )
+    )
+    if args.resume:
+        if json.loads(manifest_path.read_text(encoding="utf-8")) != manifest:
+            raise ValueError(
+                "Run configuration or episode split differs from the checkpoint."
             )
-            save_checkpoint(checkpoint_dir / "pretrain_model_latest.eqx", models)
-            save_checkpoint(checkpoint_dir / "pretrain_optstate_latest.eqx", opt_state)
+        state, start = load_checkpoint(checkpoint, (state, 0))
+    else:
+        if manifest_path.exists():
+            raise FileExistsError(f"Use --resume or a new run directory: {out}")
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        start = 0
 
-            if val_mean_loss is not None and val_mean_loss < best_val_loss:
-                best_val_loss = val_mean_loss
-                save_checkpoint(checkpoint_dir / "pretrain_model_best.eqx", models)
-    finally:
-        wandb.finish()
-
-    return models
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Offline Sub-JEPA pretraining")
-    parser.add_argument(
-        "--data-dir",
-        type=Path,
-        default=DEFAULT_DATA_DIR,
-        help="Directory of HDF5 shards",
+    validation_batch = (
+        sample_legacy(validation, cfg.batch_size, np.random.default_rng(cfg.seed))[0]
+        if validation
+        else None
     )
-    parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Continue from the rolling checkpoints in --checkpoint-dir",
-    )
-    return parser.parse_args()
+    for attempt in range(start, cfg.updates):
+        rng = np.random.default_rng(np.random.SeedSequence([cfg.seed, attempt]))
+        batch, indices = sample_legacy(train, cfg.batch_size, rng)
+        state, metrics = update(state, batch)
+        report_step = (attempt + 1) % cfg.log_every == 0 or attempt + 1 == cfg.updates
+        if not bool(metrics["accepted"]):
+            log_json(
+                out / "metrics.jsonl",
+                {"attempt": attempt + 1, "rejected_batch": indices},
+            )
+        elif report_step:
+            report = {name: float(value) for name, value in metrics.items()}
+            report.update(
+                {
+                    "updates": int(state.updates),
+                    "batch_size": cfg.batch_size,
+                    "rollout_len": cfg.rollout_len,
+                    "N": cfg.batch_size * cfg.rollout_len,
+                    "alpha": alpha_for(batch, config.loss.reg_weight),
+                }
+            )
+            if validation_batch is not None:
+                _, val_metrics = evaluate(
+                    state.models,
+                    (),
+                    state.bases,
+                    jax.random.key(cfg.seed),
+                    validation_batch,
+                )
+                report.update(
+                    {
+                        f"validation_{name}": float(value)
+                        for name, value in val_metrics.items()
+                    }
+                )
+            log_json(out / "metrics.jsonl", report)
+            print(json.dumps(report), flush=True)
+        if report_step:
+            save_checkpoint(checkpoint, (state, attempt + 1))
+    save_checkpoint(out / "world_model.eqx", state.models)
+    save_checkpoint(out / "projectors.eqx", state.bases)
 
 
 def main() -> None:
-    args = parse_args()
-    if DEFAULT_CONFIG.exists():
-        print(f"Loading model config from {DEFAULT_CONFIG}")
-    else:
-        print(
-            f"Warning: model config {DEFAULT_CONFIG} not found; "
-            "using structured defaults"
-        )
-    cfg = load_config(str(DEFAULT_CONFIG))
-
-    if DEFAULT_TRAIN_CONFIG.exists():
-        print(f"Loading train config from {DEFAULT_TRAIN_CONFIG}")
-    else:
-        print(f"Warning: train config {DEFAULT_TRAIN_CONFIG} not found; using defaults")
-    train_cfg = load_train_config(str(DEFAULT_TRAIN_CONFIG))
-
-    epochs = train_cfg.pretrain.epochs
-    batch_size = train_cfg.pretrain.batch_size
-    peak_lr = train_cfg.pretrain.peak_lr
-    seed = train_cfg.pretrain.seed
-
-    dataset = SlidingWindowDataset(
-        data_dir=args.data_dir,
-        history_len=IMG_HIST_LEN,
-        rollout_len=train_cfg.pretrain.rollout_len,
-        discretize_actions=False,
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
+    parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
+    parser.add_argument("--config", type=Path, default=DEFAULT_TRAIN_CONFIG)
+    parser.add_argument("--model-config", type=Path, default=DEFAULT_CONFIG)
+    start = parser.add_mutually_exclusive_group()
+    start.add_argument("--initialize", type=Path)
+    start.add_argument("--resume", action="store_true")
+    args = parser.parse_args()
+    run_pretrain(
+        args, load_config(str(args.model_config)), load_train_config(args.config)
     )
-    if len(dataset) == 0:
-        raise SystemExit(f"No valid transitions found in {args.data_dir}")
-    print(f"Indexed {len(dataset)} transitions across {len(dataset.shards)} shards")
-
-    train_dataset, val_dataset = dataset.split(
-        val_ratio=train_cfg.pretrain.val_ratio, seed=seed
-    )
-    print(
-        f"Dataset split by episode: {len(train_dataset)} train transitions, "
-        f"{len(val_dataset)} validation transitions"
-    )
-
-    train_dataloader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        drop_last=True,
-        seed=seed,
-    )
-    val_dataloader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        drop_last=False,
-        seed=seed,
-    )
-
-    key = jax.random.PRNGKey(seed)
-    key_enc, key_pred, key_train = jax.random.split(key, 3)
-
-    encoder = ViTEncoder(cfg.encoder, key_enc)
-    predictor = MLPPredictor(cfg.predictor, key_pred)
-
-    config_dict = {
-        "cfg": OmegaConf.to_container(cfg, resolve=True),
-        "train_cfg": OmegaConf.to_container(train_cfg, resolve=True),
-        "args": {
-            k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
-        },
-    }
-
-    train(
-        (encoder, predictor),
-        train_dataloader,
-        latent_dim=cfg.encoder.latent_dim,
-        loss_cfg=train_cfg.loss,
-        num_epochs=epochs,
-        learning_rate=peak_lr,
-        key=key_train,
-        checkpoint_dir=args.checkpoint_dir,
-        log_every=train_cfg.pretrain.log_every,
-        resume=args.resume,
-        val_dataloader=val_dataloader,
-        config_dict=config_dict,
-    )
-    print(f"Training complete. Checkpoints written to {args.checkpoint_dir}")
 
 
 if __name__ == "__main__":

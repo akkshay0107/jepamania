@@ -3,11 +3,11 @@
 from collections.abc import Iterator, Sequence
 from copy import copy
 from pathlib import Path
-from typing import NamedTuple, Self, cast
+from typing import Literal, NamedTuple, Self, cast
 
 import h5py
 import numpy as np
-from core.actions import discretize_action_np, rescale_gas_np
+from core.actions import ACTION_GRID_NP, discretize_action_np, rescale_gas_np
 from jaxtyping import Bool, Float32, Int
 
 Batch = dict[str, np.ndarray]
@@ -51,6 +51,7 @@ class SlidingWindowDataset:
         episode_ids: Sequence[int] | None = None,
         episode_keys: Sequence[tuple[str | Path, int]] | None = None,
         data_files: Sequence[str | Path] | None = None,
+        view: Literal["legacy", "ssl", "online_ssl", "rl"] = "legacy",
     ) -> None:
         """Index screen rollouts using an explicit file list or a recursive search.
 
@@ -64,13 +65,15 @@ class SlidingWindowDataset:
           episode_ids: Optional IDs selected across all files.
           episode_keys: Optional (file, episode ID) selections.
           data_files: Explicit input files. An empty sequence selects none.
+          view: Legacy padded windows, complete SSL windows, or online transitions.
         """
         self.H = int(history_len)
-        self.K = int(rollout_len)
+        self.K = 1 if view == "rl" else int(rollout_len)
         if self.H <= 0 or self.K <= 0:
             raise ValueError("history_len and rollout_len must be positive.")
         self.discretize_actions = discretize_actions
         self.load_rewards = load_rewards
+        self.view = view
 
         root = Path(data_dir)
         if data_files is not None:
@@ -130,6 +133,17 @@ class SlidingWindowDataset:
             final_observation_only = bool(
                 file.attrs.get("final_observation_only", False)
             )
+            online = self.view in ("online_ssl", "rl")
+            if online and (not final_observation_only or "action_ids" not in file):
+                raise ValueError(
+                    f"{path}: online replay requires IDs and final observations."
+                )
+            actions = cast(h5py.Dataset, file["actions"])
+            if online and any(
+                len(cast(h5py.Dataset, file[name])) != len(ids)
+                for name in ("action_ids", "rewards", "actions")
+            ):
+                raise ValueError(f"{path}: online replay rows do not align.")
             needs_next = final_observation_only or not include_terminal_windows
             metadata = cast(h5py.Group | None, file.get("metadata"))
 
@@ -140,7 +154,12 @@ class SlidingWindowDataset:
             episodes = []
             for start, end in zip(boundaries[:-1].tolist(), boundaries[1:].tolist()):
                 episode_id = int(ids[start])
-                num_windows = end - start - self.K + int(not needs_next)
+                action_end = min(end - int(final_observation_only), len(actions))
+                if self.view == "legacy":
+                    num_windows = end - start - self.K + int(not needs_next)
+                else:
+                    complete_end = min(action_end, end - 1)
+                    num_windows = complete_end - start - self.K + int(self.view == "rl")
                 if num_windows <= 0 or (
                     allowed is not None and episode_id not in allowed
                 ):
@@ -163,6 +182,13 @@ class SlidingWindowDataset:
                     reason = episode.attrs.get("termination")
                     if isinstance(reason, bytes):
                         reason = reason.decode("utf-8")
+                if online and (episode is None or reason is None):
+                    continue
+                terminated = (
+                    bool(episode.attrs["done"])
+                    if online and episode is not None
+                    else not final_observation_only or reason in _TERMINATIONS
+                )
 
                 episodes.append(
                     _Episode(
@@ -170,8 +196,8 @@ class SlidingWindowDataset:
                         episode_id,
                         start,
                         end,
-                        end - int(final_observation_only),
-                        not final_observation_only or reason in _TERMINATIONS,
+                        action_end,
+                        terminated,
                         num_windows,
                     )
                 )
@@ -207,6 +233,10 @@ class SlidingWindowDataset:
     def __len__(self) -> int:
         return int(self._offsets[-1])
 
+    @property
+    def episode_keys(self) -> list[tuple[str, int]]:
+        return [(str(self.shards[ep.shard]), ep.episode_id) for ep in self._episodes]
+
     def __getitem__(self, idx: int) -> Batch:
         return {
             name: values[0] for name, values in self.read_batch(np.array([idx])).items()
@@ -240,7 +270,12 @@ class SlidingWindowDataset:
                 actions = cast(h5py.Dataset, file["actions"])
                 rewards = (
                     cast(h5py.Dataset | None, file.get("rewards"))
-                    if self.load_rewards
+                    if self.load_rewards or self.view in ("online_ssl", "rl")
+                    else None
+                )
+                action_ids = (
+                    cast(h5py.Dataset, file["action_ids"])
+                    if self.view in ("online_ssl", "rl")
                     else None
                 )
 
@@ -260,6 +295,7 @@ class SlidingWindowDataset:
                         telemetry,
                         actions,
                         rewards,
+                        action_ids,
                         span,
                         times[part],
                         starts[part],
@@ -284,6 +320,7 @@ class SlidingWindowDataset:
         telemetry: h5py.Dataset,
         actions: h5py.Dataset,
         rewards: h5py.Dataset | None,
+        action_ids: h5py.Dataset | None,
         span: slice,
         times: Int[np.ndarray, "batch"],
         starts: Int[np.ndarray, "batch"],
@@ -307,6 +344,40 @@ class SlidingWindowDataset:
         steps = times[:, None] + np.arange(self.K)
         action_ends = np.array([ep.action_end for ep in episodes])[:, None]
         terminated = np.array([ep.terminated for ep in episodes])[:, None]
+        if self.view != "legacy":
+            batch = {
+                "obs_stack_t": histories[:, 0],
+                "telemetry_t": telemetry_stack[:, 0],
+                "obs_stack_targets": histories[:, 1:],
+                "telemetry_targets": telemetry_stack[:, 1:],
+            }
+            if action_ids is None:
+                batch["actions_seq"] = np.asarray(actions[span], dtype=np.float32)[
+                    steps - span.start
+                ]
+                return batch
+            if rewards is None:
+                raise ValueError("Online replay is missing rewards.")
+            ids = np.asarray(action_ids[span], dtype=np.int32)[steps - span.start]
+            if np.any((ids < 0) | (ids >= len(ACTION_GRID_NP))):
+                raise ValueError("Online replay contains an invalid action ID.")
+            reward_values = np.asarray(rewards[span], dtype=np.float32)[
+                steps - span.start
+            ]
+            done = terminated & (steps == action_ends - 1)
+            if self.view == "rl":
+                batch.update(
+                    action_ids=ids[:, 0], rewards=reward_values[:, 0], dones=done[:, 0]
+                )
+            else:
+                batch.update(
+                    actions_seq=ACTION_GRID_NP[ids],
+                    action_ids=ids,
+                    rewards=reward_values,
+                    dones=done,
+                )
+            return batch
+
         valid = steps < np.minimum(action_ends, len(actions))
         controls = _gather_actions_or_rewards(actions, span, steps - span.start, valid)
         controls = rescale_gas_np(controls, axis=1)
