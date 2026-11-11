@@ -24,6 +24,10 @@ wheels/
 # Scratch dir (for temporary benchmarks)
 scratch/
 
+# Local sources for README figures
+/figures/**/*.tex
+/figures/world-model-frame.png
+
 # output for benchmark scripts
 core/out/
 
