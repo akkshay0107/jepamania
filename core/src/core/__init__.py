@@ -1,9 +1,4 @@
-from .actions import (
-    discretize_action,
-    discretize_action_np,
-    to_continuous_action,
-    to_continuous_action_np,
-)
+from .actions import discretize_action_np, to_continuous_action_np
 from .config import PlannerConfig
 from .dynamics import MLPPredictor, RewardValueHead
 from .encoders import ViTEncoder, load_world_model
@@ -19,8 +14,6 @@ __all__ = [
     "MLPPredictor",
     "RewardValueHead",
     "CEMPlanner",
-    "discretize_action",
-    "to_continuous_action",
     "discretize_action_np",
     "to_continuous_action_np",
 ]

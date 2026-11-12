@@ -6,6 +6,7 @@ from pathlib import Path
 import equinox as eqx
 import jax
 import numpy as np
+from core.actions import ACTION_GRID_JAX, NEUTRAL_ACTION
 from core.config import IMG_HIST_LEN, IMG_SIZE, TELEMETRY_FEATURES, load_config
 from core.planners import CEMPlanner
 from win_client.mpc_driver import (
@@ -31,7 +32,7 @@ def main() -> None:
     config = load_config(str(Path(__file__).resolve().parents[1] / "config.yaml"))
     init, obs_key = jax.random.split(jax.random.key(42))
     models = make_driving_models(config, init)
-    encoder = models[0]
+    encoder, predictor, _ = models
     planner = CEMPlanner(config.planner, 0.997)
     driver = MPCDriver(planner, 42)
     rng = np.random.default_rng(42)
@@ -43,10 +44,14 @@ def main() -> None:
     }
     device_obs = jax.device_put(obs)
     encode = eqx.filter_jit(_encode)
+    state = encode(encoder, device_obs)
+    predict = eqx.filter_jit(predictor)
+    neutral = ACTION_GRID_JAX[NEUTRAL_ACTION]
     plan = planner.empty_plan()
     driver.warmup(models)
     calls = {
         "device encoding": lambda: encode(encoder, device_obs),
+        "device predictor": lambda: predict(state, neutral),
         "device MPC + encoding": lambda: search_action(
             planner, models, device_obs, plan, obs_key
         ),

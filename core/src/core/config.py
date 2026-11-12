@@ -16,15 +16,8 @@ TELEMETRY_SCALE: tuple[float, float, float] = (100.0, 6.0, 10000.0)
 TELEMETRY_FEATURES: int = 9
 ACTION_HISTORY_FEATURES: int = 6
 
-# Gas / Brake -> discretized into 6 bins
-# Steering [-1.0, 1.0] -> discretized into 9 bins
-# so 54 distinct actions possible at any given moment of time
-NUM_ACTIONS: int = 54
 # Learned width; model states append the six known action-history values.
 LATENT_DIM: int = 128
-
-# The legacy recorder marks failed collection episodes for inspection.
-FAILURE_PENALTY: float = -100.0
 
 
 @dataclass

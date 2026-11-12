@@ -5,11 +5,8 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, Float, PRNGKeyArray
 
-from core.config import (
-    ACTION_HISTORY_FEATURES,
-    NUM_ACTIONS,
-    PredictorConfig,
-)
+from core.actions import NUM_ACTIONS
+from core.config import ACTION_HISTORY_FEATURES, PredictorConfig
 
 
 class MLPPredictor(eqx.Module):

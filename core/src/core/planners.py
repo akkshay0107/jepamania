@@ -7,8 +7,8 @@ import jax
 import jax.numpy as jnp
 from jaxtyping import Array, PRNGKeyArray
 
-from core.actions import ACTION_GRID_JAX
-from core.config import NUM_ACTIONS, PlannerConfig
+from core.actions import ACTION_GRID_JAX, NUM_ACTIONS
+from core.config import PlannerConfig
 from core.dynamics import MLPPredictor, RewardValueHead
 
 if TYPE_CHECKING:
@@ -103,35 +103,44 @@ class CEMPlanner(eqx.Module):
         shifted_probs = jnp.concatenate(
             (previous.probabilities[1:], jnp.full((1, NUM_ACTIONS), 1 / NUM_ACTIONS))
         )
-        starting_elites = jnp.zeros((self.elites, self.horizon), dtype=jnp.int32)
+        score_candidates = eqx.filter_vmap(self.score, in_axes=(None, None, None, 0))
 
-        def iteration(carry, item):
-            probs, old_elites = carry
-            index, search_key = item
-            candidates = sample_actions(
-                jnp.broadcast_to(probs, (self.samples, *probs.shape)), search_key
+        def sample(probs, draw_key):
+            return sample_actions(
+                jnp.broadcast_to(probs, (self.samples, *probs.shape)), draw_key
             )
-            shifted_best = jnp.concatenate((previous.actions[1:], candidates[0, -1:]))
-            candidates = candidates.at[0].set(
-                jnp.where(previous.valid, shifted_best, candidates[0])
-            )
-            candidates = candidates.at[: self.elites].set(
-                jnp.where(index > 0, old_elites, candidates[: self.elites])
-            )
-            scores = eqx.filter_vmap(self.score, in_axes=(None, None, None, 0))(
-                predictor, head, root, candidates
-            )
-            _, elite_indices = jax.lax.top_k(scores, self.elites)
-            elites = candidates[elite_indices]
-            elite_frequency = jax.nn.one_hot(elites, NUM_ACTIONS).mean(axis=0)
+
+        def select_elites(probs, candidates, scores):
+            elite_scores, indices = jax.lax.top_k(scores, self.elites)
+            elites = candidates[indices]
+            frequency = jax.nn.one_hot(elites, NUM_ACTIONS).mean(axis=0)
             probs = uniform_mix(
-                (1 - self.elite_weight) * probs + self.elite_weight * elite_frequency
+                (1 - self.elite_weight) * probs + self.elite_weight * frequency
             )
-            return (probs, elites), None
+            return probs, elites, elite_scores
 
-        (probs, elites), _ = jax.lax.scan(
-            iteration,
-            (shifted_probs, starting_elites),
-            (jnp.arange(self.iterations), jax.random.split(key, self.iterations)),
+        keys = jax.random.split(key, self.iterations)
+        candidates = sample(shifted_probs, keys[0])
+        shifted_best = jnp.concatenate((previous.actions[1:], candidates[0, -1:]))
+        candidates = candidates.at[0].set(
+            jnp.where(previous.valid, shifted_best, candidates[0])
         )
+        initial = select_elites(
+            shifted_probs,
+            candidates,
+            score_candidates(predictor, head, root, candidates),
+        )
+
+        def iteration(carry, draw_key):
+            probs, old_elites, old_scores = carry
+            # A full draw preserves the previous planner's seeded proposals.
+            fresh = sample(probs, draw_key)[self.elites :]
+            scores = score_candidates(predictor, head, root, fresh)
+            return select_elites(
+                probs,
+                jnp.concatenate((old_elites, fresh)),
+                jnp.concatenate((old_scores, scores)),
+            ), None
+
+        (probs, elites, _), _ = jax.lax.scan(iteration, initial, keys[1:])
         return Plan(elites[0], probs, jnp.asarray(True))
