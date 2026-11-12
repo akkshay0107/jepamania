@@ -1,12 +1,11 @@
 import argparse
-import sys
 from pathlib import Path
-from typing import cast
 
 import h5py
 import matplotlib.pyplot as plt  # pyright: ignore[reportMissingImports]
 import numpy as np
 from core.actions import GAS_BRAKE_VALUES_NP, rescale_gas_np, to_continuous_action_np
+from jaxtyping import Float
 from matplotlib.colors import LogNorm  # pyright: ignore[reportMissingImports]
 from scipy.ndimage import gaussian_filter
 
@@ -17,25 +16,20 @@ WORKSPACE_DIR = SCRIPT_DIR.parent.parent
 DATA_DIR = WORKSPACE_DIR / "win-client" / "data"
 OUTPUT_PLOT = SCRIPT_DIR.parent / "out" / "action_distributions.png"
 
-# Telemetry layout (TELEMETRY_FEATURES = 9):
-#   [0]   speed
-#   [1]   gear
-#   [2]   rpm
-#   [3:6] act1  — older buffered action (gas, brake, steer)
-#   [6:9] act2  — most recent buffered action
-TELEM_ACT1_SLICE = slice(3, 6)
+LATEST_CONTROL = slice(6, 9)
 
 
-def load_gamepad_actions(data_path: Path):
-    """Loads all actions and telemetry inputs from HDF5 files in data_path.
-
-    Returns:
-        tuple: (actions, telemetry_actions) both as NumPy arrays,
-               or (None, None) if no data.
-    """
+def load_gamepad_actions(
+    data_path: Path,
+) -> tuple[
+    Float[np.ndarray, "actions 3"] | None,
+    Float[np.ndarray, "paired_actions 3"] | None,
+    float,
+]:
+    """Read executed controls, paired next-observation controls, and their max error."""
     if not data_path.exists():
         print(f"Data path does not exist: {data_path}")
-        return None, None
+        return None, None, 0.0
 
     if data_path.is_file():
         h5_files = [data_path] if data_path.suffix == ".h5" else []
@@ -44,54 +38,82 @@ def load_gamepad_actions(data_path: Path):
 
     if not h5_files:
         print(f"No HDF5 files (*.h5) found in: {data_path}")
-        return None, None
+        return None, None, 0.0
 
     print(f"Found {len(h5_files)} HDF5 files in {data_path}")
 
     all_actions = []
     all_telemetry_actions = []
+    max_diff = 0.0
 
     for file_path in h5_files:
         try:
-            with h5py.File(file_path, "r") as f:
-                if "actions" in f:
-                    actions_ds = cast(h5py.Dataset, f["actions"])
-                    actions = cast(np.ndarray, actions_ds[:])
-                    if actions.ndim == 1 or (
-                        actions.ndim == 2 and actions.shape[-1] != 3
-                    ):
-                        actions = to_continuous_action_np(actions)
-                    actions = rescale_gas_np(actions.astype(np.float32))
-                    all_actions.append(actions)
-                else:
+            with h5py.File(file_path, "r") as file:
+                if "actions" not in file:
                     print(f"Warning: 'actions' dataset not found in {file_path.name}")
+                    continue
+                actions = np.asarray(file["actions"])
+                if actions.ndim == 1 or (actions.ndim == 2 and actions.shape[1] == 1):
+                    actions = to_continuous_action_np(actions.reshape(-1))
+                if actions.ndim != 2 or actions.shape[1] != 3:
+                    raise ValueError("Expected three control values per action.")
 
-                telemetry = None
-                if "observations/telemetry" in f:
-                    ds = cast(h5py.Dataset, f["observations/telemetry"])
-                    telemetry = cast(np.ndarray, ds[:])
-                elif "observations" in f:
-                    obs_grp = cast(h5py.Group, f["observations"])
-                    if "telemetry" in obs_grp:
-                        telemetry_ds = cast(h5py.Dataset, obs_grp["telemetry"])
-                        telemetry = cast(np.ndarray, telemetry_ds[:])
+                ids = np.asarray(file.get("episode_id"))
+                same_episode = (
+                    ids[:-1] == ids[1:]
+                    if ids.ndim == 1 and len(ids) == len(actions)
+                    else None
+                )
+                final_observation_only = bool(
+                    file.attrs.get("final_observation_only", False)
+                )
+                if final_observation_only:
+                    if same_episode is None:
+                        raise ValueError(
+                            "Final observation rows require aligned episode IDs."
+                        )
+                    actions = actions[:-1][same_episode]
+                if not len(actions):
+                    continue
+                actions = rescale_gas_np(actions.astype(np.float32))
+                all_actions.append(actions)
 
-                if telemetry is not None and telemetry.shape[1] >= 6:
-                    telemetry_actions = telemetry[:, TELEM_ACT1_SLICE]
-                    telemetry_actions = rescale_gas_np(telemetry_actions)
-                    all_telemetry_actions.append(telemetry_actions)
-        except Exception as e:
-            print(f"Error reading {file_path.name}: {e}")
+                if (
+                    same_episode is None
+                    or not same_episode.any()
+                    or "observations/telemetry" not in file
+                ):
+                    continue
+                telemetry = np.asarray(file["observations/telemetry"], dtype=np.float32)
+                if (
+                    telemetry.ndim != 2
+                    or len(telemetry) != len(ids)
+                    or telemetry.shape[1] < 9
+                ):
+                    continue
+                # The next observation carries the executed action in its newest slot.
+                next_controls = rescale_gas_np(
+                    telemetry[1:, LATEST_CONTROL][same_episode]
+                )
+                paired = (
+                    actions if final_observation_only else actions[:-1][same_episode]
+                )
+                all_telemetry_actions.append(next_controls)
+                max_diff = float(
+                    np.maximum(max_diff, np.max(np.abs(paired - next_controls)))
+                )
+        except (OSError, ValueError, IndexError) as error:
+            print(f"Error reading {file_path.name}: {error}")
 
     if not all_actions:
-        return None, None
+        return None, None, 0.0
 
     actions_concat = np.concatenate(all_actions, axis=0)
     telem_concat = (
         np.concatenate(all_telemetry_actions, axis=0) if all_telemetry_actions else None
     )
 
-    return actions_concat, telem_concat
+    return actions_concat, telem_concat, max_diff
 
 
 def print_statistics(name: str, actions: np.ndarray):
@@ -228,27 +250,19 @@ def parse_args():
 def main():
     args = parse_args()
     print("Scanning for gamepad action datasets...")
-    actions, telem_actions = load_gamepad_actions(args.data_dir)
+    actions, telem_actions, max_diff = load_gamepad_actions(args.data_dir)
 
     if actions is None:
-        print(
-            "\nNo gamepad action data found in the default directory. "
-            "Exiting gracefully."
-        )
-        sys.exit(0)
+        print(f"\nNo gamepad action data found in {args.data_dir}.")
+        return
 
-    print_statistics("Recorded actions Dataset", actions)
+    print_statistics("Recorded actions", actions)
 
     if telem_actions is not None:
-        print_statistics(
-            "Telemetry act1 features (Indices 3-5: gas, brake, steer)", telem_actions
-        )
-
-        diff = np.abs(actions - telem_actions)
-        max_diff = np.max(diff)
+        print_statistics("Next-observation controls", telem_actions)
         print(
-            f"\nValidation: Maximum discrepancy between action and "
-            f"telemetry inputs is {max_diff:.6f}"
+            f"\nMaximum discrepancy between recorded and next-observation controls "
+            f"is {max_diff:.6f} across {len(telem_actions):,} paired transitions."
         )
     else:
         print(

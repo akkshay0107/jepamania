@@ -1,6 +1,7 @@
 """Measure warmed-up encoding and CEM inference on the local driver."""
 
 import time
+from pathlib import Path
 
 import equinox as eqx
 import jax
@@ -27,7 +28,7 @@ def benchmark(call, iterations: int = 100):
 
 
 def main() -> None:
-    config = load_config("core/config.yaml")
+    config = load_config(str(Path(__file__).resolve().parents[1] / "config.yaml"))
     init, obs_key = jax.random.split(jax.random.key(42))
     models = make_driving_models(config, init)
     encoder = models[0]

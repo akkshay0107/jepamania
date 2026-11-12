@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 from omegaconf import OmegaConf
 
@@ -50,14 +50,9 @@ class TrainConfig:
     finetune: FinetuneConfig = field(default_factory=FinetuneConfig)
 
 
-def load_train_config(yaml_path: str | Path = "train/config.yaml") -> TrainConfig:
-    """
-    Loads training configuration from a YAML file, falling back to structured defaults
-    for any missing fields or if the file is not found.
-    """
-    base_cfg = OmegaConf.structured(TrainConfig)
-    try:
-        yaml_cfg = OmegaConf.load(str(yaml_path))
-        return OmegaConf.merge(base_cfg, yaml_cfg)  # type: ignore
-    except FileNotFoundError:
-        return base_cfg  # type: ignore
+def load_train_config(yaml_path: str | Path | None = None) -> TrainConfig:
+    """Return defaults, with overrides from a supplied YAML file."""
+    config = OmegaConf.structured(TrainConfig)
+    if yaml_path is not None:
+        config = OmegaConf.merge(config, OmegaConf.load(yaml_path))
+    return cast(TrainConfig, config)

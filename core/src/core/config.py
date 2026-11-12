@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import cast
 
 from omegaconf import OmegaConf
 
@@ -61,14 +62,9 @@ class SubJepaConfig:
     planner: PlannerConfig = field(default_factory=PlannerConfig)
 
 
-def load_config(yaml_path: str = "config.yaml") -> SubJepaConfig:
-    """
-    Loads configuration from a YAML file, falling back to structured defaults
-    for any missing fields or if the file is not found.
-    """
-    base_cfg = OmegaConf.structured(SubJepaConfig)
-    try:
-        yaml_cfg = OmegaConf.load(yaml_path)
-        return OmegaConf.merge(base_cfg, yaml_cfg)  # type: ignore
-    except FileNotFoundError:
-        return base_cfg  # type: ignore
+def load_config(yaml_path: str | None = None) -> SubJepaConfig:
+    """Return defaults, with overrides from a supplied YAML file."""
+    config = OmegaConf.structured(SubJepaConfig)
+    if yaml_path is not None:
+        config = OmegaConf.merge(config, OmegaConf.load(yaml_path))
+    return cast(SubJepaConfig, config)
