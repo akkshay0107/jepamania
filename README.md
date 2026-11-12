@@ -22,7 +22,9 @@ RPM, and the last two executed controls. A control is a gas, brake, and
 steering triple. Native `rtgym` returns the observation for the completed
 interval as it sends the next control, so the driver records the action
 that actually ran during the interval. Human drives and rollouts from a
-pretrained SAC agent can be saved as HDF5 episodes for offline training.
+pretrained SAC agent can be saved as HDF5 episodes for offline training. New
+offline recordings store observations and continuous controls. Live RL replay
+also stores discrete action IDs, rewards, and race-ending labels.
 [Game session](win-client/src/win_client/game_session.py) · [Recorder](win-client/record.py)
 
 ### World model
@@ -32,8 +34,7 @@ A small convolutional stem turns the four-frame stack into a 4 × 4 grid
 of visual tokens. The encoder adds one token for speed, gear, and RPM,
 passes the tokens through two vision transformer blocks, and pools them
 into a 128-value embedding. The two past controls are appended directly,
-bringing the state to 134 values. This state (in latent space) is meant to capture 
-and compress the required information to drive the model. 
+bringing the default state to 134 values.
 [Encoder](core/src/core/encoders.py) · [Model configuration](core/config.yaml)
 
 Given the current state and a proposed control, the predictor (a residual MLP)
@@ -45,22 +46,23 @@ and "imagine" what would have happened if a proposed action took place.
 
 ### Windows controller
 
-A shared network reads the model state and predicts the next interval's
-reward and the Q-value, for each action. The driver uses 54 discrete actions
-from nine steering angles and six gas/brake settings. Greedy Q picks the action
-with the highest predicted return. 
+A shared head predicts the immediate reward and probability of ending the
+race for each action, plus one value for continuing from the state. The
+driver uses 54 discrete actions from nine steering angles and six gas/brake
+settings.
 
 Model-predictive control (MPC) uses the cross-entropy method (CEM) to sample
 five-step sequences and update the per-step action probabilities using
 the best-scoring candidates.
 
-A sequence's score is the sum of discounted predicted rewards plus the
-discounted best Q-value at the final predicted state. The driver sends the
-first action of the chosen sequence and replans from the next observation.
+The score adds discounted rewards along the sequence and the discounted value
+at the final predicted state. Each term is weighted by the probability that
+the race has continued to that point. The driver sends the first action of
+the chosen sequence and replans from the next observation.
 [Action grid](core/src/core/actions.py) · [Planner](core/src/core/planners.py) · [Driver](win-client/src/win_client/mpc_driver.py)
 
 <p align="center">
-  <img src="figures/world-model-loop.png" width="744" alt="An unmasked Trackmania frame enters the ViT with vehicle telemetry. The resulting latent and control history initialize the predictor. CEM samples and scores five-action rollouts under the current model, then sends only the first action of the best sequence found back to Trackmania.">
+  <img src="figures/world-model-loop.png" width="744" alt="The ViT encodes Trackmania frames and vehicle telemetry. CEM rolls out five-action sequences from the latent state and control history, scores survival-weighted rewards and continuation value, and sends the first action of the best sequence to Trackmania.">
 </p>
 
 ## Training
@@ -82,70 +84,101 @@ as a way to increase its variance and "use" more of its latent capacity to store
 
 ### Online learning
 
-The online loop loads a pretrained encoder and predictor and adds a shared
-reward and Q head. The driver holds a fixed model snapshot during an episode
-while the learner updates from completed HDF5 recordings in the background.
-Replay distinguishes game terminals from collection cuts with a valid final
-observation. It skips transitions that are missing their next observation.
+The online loop loads a pretrained encoder and predictor and initializes the
+shared head. Each epoch collects a batch of drives, runs a fixed number of
+optimizer attempts, and publishes a checkpoint. A throttle-biased heuristic
+drives the early epochs. CEM uses one frozen model snapshot for each later
+collection batch. Replay distinguishes genuine race endings from collection
+cutoffs with a valid final observation.
 [Online loop](rl_loop.py) · [Replay writer](train/src/train/rollout_episodes.py)
 
-The update combines Sub-JEPA with reward prediction and Double DQN.
-Sub-JEPA can use both offline and online windows. Recorded rewards and
-TD targets supervise the head on observed states and states predicted
-along the recorded control sequence. The code supports frozen-encoder and
-RL-only comparisons. Evaluation uses the same snapshot for greedy Q and
-MPC, with the MPC runs gated on a reward forecast check on evaluation drives.
-[Online updates](train/src/train/finetune.py) · [Evaluation](rl_loop.py#L326)
+The update combines Sub-JEPA with mean squared error for reward and scalar
+value, and binary cross-entropy for termination. It trains on observed and
+imagined states. The value targets use recorded rewards and a slowly updated
+value estimate at the last real observation when the race continues.
+The RL targets come from live replay, and Sub-JEPA can also use historical
+observations and actions.
+
+Set `finetune.evaluation_interval` to an epoch count to enable evaluation.
+Separate CEM races use the checkpoint just published, and `evaluation.jsonl`
+records finish rate, median successful lap time, mean discounted return,
+and p99 inference latency.
+[Online updates](train/src/train/finetune.py) · [Epoch settings](train/config.yaml)
+
+### Running the code
+
+Run these commands from the repository root. Install the locked dependencies
+with `uv sync --locked`. Pretraining reads HDF5 recordings and exports the
+encoder and predictor.
+
+```sh
+uv run python -m train.pretrain --data-dir win-client/data/ssl --checkpoint-dir checkpoints/pretrain
+```
+
+Recording and live driving use TMRL and the Openplanet plugin on Windows.
+Online RL and checkpoint driving require TMRL's virtual gamepad.
+
+```sh
+uv run python win-client/record.py --mode human
+uv run python rl_loop.py --initialize checkpoints/pretrain/world_model.eqx --run-dir checkpoints/online
+uv run python rl_loop.py --resume --run-dir checkpoints/online
+uv run python win-client/run.py --checkpoint-path checkpoints/online/driver.eqx
+```
+
+Stop recording with Ctrl+C. Agent recording uses `--mode agent` with a SAC
+checkpoint configured in [`win-client/settings.yaml`](win-client/settings.yaml).
+Use `--resume` to continue an interrupted run with the same run directory and
+settings.
+
+To migrate from an older Q checkpoint, start a fresh scalar-value run from a
+`world_model.eqx` that matches the encoder and predictor settings. The online
+learner picks up a neighboring `projectors.eqx` when SSL is enabled.
 
 ## Offline experiments
 
 ### Recordings and baselines
 
-In early CPU runs, adding explicit control history improved speed forecasts.
-Extrapolating the last speed change was still more accurate. Several image
-forecasts scored about the same as repeating the current frame on the
-road-facing region. Using more embedding dimensions gave little indication
-of which models retained useful visual geometry.
+The early CPU runs tested whether adding control history improved speed
+forecasts and whether the model could beat simple forecast baselines. Giving
+the model the last two controls improved speed forecasts. Extrapolating the
+last change in speed was still more accurate. Several image forecasts scored
+about the same as repeating the current frame on the road-facing region.
 
-The human and SAC agent recordings came from different maps even though the
-files gave them the same map label. The larger agent pool dominated the mix,
-some control combinations were rare, and the logs lacked synchronized
-timestamps to measure the delay between actions and screen captures. The
-contribution of each issue to forecast error remains uncertain. For the
-follow-up experiments I used human recordings and split by whole driving
-episode before sampling clips.
+For the follow-up experiments I used human recordings only.
 
-### Image readouts and forecasts
+### Image readouts and rollout error
 
-I fitted a fresh image decoder for each encoder so the probe could learn
-that encoder's coordinates. It used only the 128 learned values to reconstruct
-the latest frame in the observation.
-A readout from the **recorded future embedding** shows how much of the scene
-the decoder can recover without any rollout error. A readout from the
-**predicted embedding** shows what the model preserves over the rollout.
+To measure how much visual detail the encoder retained and how much survived a
+five-step rollout, I fitted a fresh image decoder for each encoder. It
+reconstructed the latest frame in the observation from the 128 learned values.
+A readout from the recorded future embedding shows what the decoder can
+recover from the actual future observation. A readout from the predicted
+embedding shows how much detail survives the rollout.
 
-![Five views of the same Trackmania clip, from the current and recorded future frames to readouts from the real future embedding, a frozen-encoder forecast, and a joint SSL forecast.](figures/five-step-forecast.png)
+![Five views of the same Trackmania clip showing the current and recorded future frames, the real-future readout, and forecasts from the frozen and jointly trained encoders.](figures/five-step-forecast.png)
 
 *A clip selected near the median five-step forecast error for the frozen
-encoder. The real-future readout uses that same encoder. Gray masks cover the
-car and bottom HUD, which are excluded from the pixel score.*
+encoder. The real-future readout uses the same encoder. Gray masks mark the
+car and lower HUD, which are excluded from the pixel score.*
 
-With the encoder frozen, the predictor could fit one-step transitions on
-64 clips, but errors accumulated when it fed its own predictions back in.
-Training on five-step rollouts brought the embedding error on those training
-clips down to about 2% of the error from holding the initial embedding fixed.
-On the development episodes, forecasts were more accurate when the predictor
-received a recorded embedding at each step.
+With the encoder frozen, the predictor fit one-step transitions on 64 clips.
+Errors grew when it rolled forward from its own predictions. Training on
+five-step rollouts brought the five-step embedding error on those clips down
+to about 2% of the error from holding the initial embedding fixed. On the
+development episodes, image forecasts improved when the predictor received
+the recorded embedding at each step.
 
 ### Frozen and joint training
 
-I started each condition from the same visually pretrained encoder and
-predictor. Each run used 1,536 updates and batches of 24 five-step windows.
-I evaluated on 320 windows from 16 held-out episodes reused during
-development. Each cell gives the results for seeds 17 and 42. Scores are
-road-facing pixel mean squared error divided by the error from repeating
-the current frame (`1.000`). The mean training image scored `0.809`.
-Lower is better.
+This comparison tested whether updating the encoder along with the predictor
+improved five-step forecasts or preserved more detail in the real-future
+readout. Each run started from the same visually pretrained model and used
+1,536 updates with batches of 24 five-step windows. The evaluation used 320
+windows from 16 episodes held out from training and reused during development.
+
+Scores are the mean squared pixel error in the road-facing region divided by
+the error from repeating the current frame (`1.000`). The mean training image
+scored `0.809`. Lower is better. Each cell lists seeds 17 and 42 in that order.
 
 | Training condition | Five-step forecast | Real-future readout |
 | --- | ---: | ---: |
@@ -153,19 +186,18 @@ Lower is better.
 | Joint Sub-JEPA, regularizer weight 0.02 | 0.738 / 0.718 | 0.475 / 0.477 |
 | Joint Sub-JEPA, regularizer weight 0.002 | 0.652 / 0.672 | 0.531 / 0.535 |
 
-Freezing the encoder gave the lowest errors in both columns. All three
-forecasts beat the mean training image. In an earlier diagnostic, training
-Sub-JEPA from scratch fell short of that baseline, and adding an image
-reconstruction term recovered some of the forecast accuracy lost in joint
+Freezing the encoder gave the lowest error in both columns. All three
+forecasts beat the mean training image. In earlier diagnostics, Sub-JEPA
+trained from scratch fell short of that baseline. Adding an image
+reconstruction loss recovered some of the forecast accuracy lost in joint
 training.
 
-At the visual starting checkpoint, the weighted Gaussian regularizer's
-encoder gradient was about 16 times as large as the prediction term's, by
-median norm ratio across the batches I checked. Lowering the weight from
-0.02 to 0.002 improved the five-step forecast and worsened the real-future
-readout. The balance of the two loss terms and the changing targets from
-the shared encoder are both possible contributors to the joint-training
-result.
+At the starting checkpoint, the median ratio of encoder gradient norms was
+about 16 to 1 for the weighted regularizer and the prediction loss. Reducing
+the regularizer weight improved the five-step forecast and worsened the
+real-future readout. The loss weights and the changing targets from the shared
+encoder may both have contributed to the result. Performance on new recordings
+remains open.
 
 ### Steering sensitivity
 
@@ -190,11 +222,10 @@ with a short RL phase.
    racing lines. Collecting my own data across different maps is also hard to
    scale.
 
-2. The online RL loop is set up to collect rollouts while the model drives
-   and train on completed episodes in the background. Later episodes can use
-   the updated model. Without a GPU on the Windows machine where I play
-   Trackmania, those updates would take much longer. Running a single game
-   instance also limits how quickly I can collect observations for training.
+2. The online RL loop collects drives and trains on the completed episodes
+   before the next collection batch. Without a GPU on the Windows machine
+   where I play Trackmania, those updates would take much longer. Running a
+   single game instance also limits how quickly I can collect observations.
    The SSL phase fell short of what I wanted the model to learn, which leaves
    more work for RL and makes it harder to get the model to a usable state.
 
