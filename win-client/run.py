@@ -1,4 +1,4 @@
-"""Drive Trackmania with a frozen Q or MPC model snapshot."""
+"""Drive Trackmania with a frozen CEM model snapshot."""
 
 import argparse
 import json
@@ -13,7 +13,6 @@ from win_client.utils import get_tmrl_env
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint-path", type=Path, required=True)
-    parser.add_argument("--controller", choices=("q", "mpc"), default="mpc")
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -27,7 +26,7 @@ def main() -> None:
             driver.reset()
             episode = drive_episode(
                 env,
-                lambda obs: driver.select(models, obs, args.controller),
+                lambda obs: driver.select(models, obs),
                 keep_observations=False,
             )
             print(json.dumps(episode.summary(driver.planner.gamma)), flush=True)

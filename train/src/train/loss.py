@@ -3,11 +3,8 @@ import functools
 import jax
 import jax.numpy as jnp
 import numpy as np
-import optax
-from core.actions import ACTION_GRID_JAX
 from core.config import ACTION_HISTORY_FEATURES
-from core.dynamics import MLPPredictor, RewardQHead
-from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray
+from jaxtyping import Array, Float, PRNGKeyArray
 
 
 @functools.partial(jax.vmap, in_axes=(0, None, None))
@@ -195,60 +192,3 @@ def sub_jepa_loss(
         target_mask,
     )
     return prediction + reg_weight * regularization
-
-
-def double_dqn_target(
-    reward: Float[Array, "..."],
-    done: Bool[Array, "..."],
-    live_q: Float[Array, "... actions"],
-    target_q: Float[Array, "... actions"],
-    gamma: float,
-) -> Float[Array, "..."]:
-    """Choose with the live network and evaluate with stopped target weights."""
-    action = jnp.argmax(jax.lax.stop_gradient(live_q), axis=-1)
-    bootstrap = select_action(target_q, action)
-    return jax.lax.stop_gradient(reward + jnp.where(done, 0.0, gamma * bootstrap))
-
-
-def select_action(
-    values: Float[Array, "... actions"], actions: Int[Array, "..."]
-) -> Float[Array, "..."]:
-    return jnp.take_along_axis(values, actions[..., None], axis=-1)[..., 0]
-
-
-def terminal_loss(
-    predictor: MLPPredictor,
-    head: RewardQHead,
-    roots: Float[Array, "batch state_dim"],
-    actions: Int[Array, "batch"],
-    done: Bool[Array, "batch"],
-    key: PRNGKeyArray,
-) -> tuple[Float[Array, ""], Float[Array, ""]]:
-    """Fit an absorbing learned state and penalize readout leakage near it."""
-    width = predictor.latent_dim
-    count = jnp.sum(done)
-
-    def compute(_):
-        terminal = jax.vmap(predictor)(roots, ACTION_GRID_JAX[actions])
-        first = jnp.mean(jnp.square(terminal[:, :width]), axis=-1)
-        sampled = jax.random.randint(key, (2, len(roots)), 0, len(ACTION_GRID_JAX))
-
-        def advance(states, action_ids):
-            states = jax.vmap(predictor)(states, ACTION_GRID_JAX[action_ids])
-            reward, q = jax.vmap(head)(states)
-            norm = jnp.mean(jnp.square(states[:, :width]), axis=-1)
-            leakage = 0.5 * (
-                jnp.mean(optax.huber_loss(reward), axis=-1)
-                + jnp.mean(optax.huber_loss(q), axis=-1)
-            )
-            return states, (norm, leakage)
-
-        _, (norm, leakage) = jax.lax.scan(advance, terminal, sampled)
-        penalty = first + jnp.mean(norm + leakage, axis=0)
-        return (
-            jnp.sum(jnp.where(done, penalty, 0.0)) / count,
-            jnp.sum(jnp.where(done, jnp.mean(leakage, axis=0), 0.0)) / count,
-        )
-
-    zero = jnp.zeros((), dtype=roots.dtype)
-    return jax.lax.cond(count > 0, compute, lambda _: (zero, zero), operand=None)

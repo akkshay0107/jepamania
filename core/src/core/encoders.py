@@ -17,7 +17,7 @@ from core.config import (
     EncoderConfig,
     PredictorConfig,
 )
-from core.dynamics import MLPPredictor, RewardQHead
+from core.dynamics import MLPPredictor, RewardValueHead
 
 
 def normalize_telemetry(
@@ -256,4 +256,4 @@ def load_world_model(
     return eqx.tree_deserialise_leaves(path, template)
 
 
-type DrivingModels = tuple[ViTEncoder, MLPPredictor, RewardQHead]
+type DrivingModels = tuple[ViTEncoder, MLPPredictor, RewardValueHead]

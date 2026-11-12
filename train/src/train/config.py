@@ -35,10 +35,12 @@ class FinetuneConfig:
     batch_size: int = 24
     seed: int = 42
     log_every: int = 250
-    fill_decisions: int = 4096
-    decisions: int = 100_000
-    evaluation_every: int = 10_000
-    evaluation_episodes: int = 5
+    total_epochs: int = 20
+    exploration_epochs: int = 2
+    drives_per_epoch: int = 5
+    optimizer_attempts_per_epoch: int = 1000
+    evaluation_interval: int | None = None
+    evaluation_races: int = 5
 
 
 @dataclass

@@ -1,11 +1,11 @@
-"""Local synchronous Q and MPC inference using immutable model snapshots."""
+"""Run synchronous CEM inference and record Trackmania drives."""
 
 import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, cast
+from typing import cast
 
 import equinox as eqx
 import jax
@@ -20,15 +20,14 @@ from core.config import (
     TELEMETRY_SCALE,
     SubJepaConfig,
 )
-from core.dynamics import MLPPredictor, RewardQHead
+from core.dynamics import MLPPredictor, RewardValueHead
 from core.encoders import DrivingModels, ViTEncoder
 from core.planners import CEMPlanner, Plan
 from omegaconf import OmegaConf
 
 from win_client.game_session import MAX_EPISODE_STEPS, DrivingEnvironment, Observation
 
-type Controller = Literal["q", "mpc"]
-
+DRIVER_CHECKPOINT_VERSION = 2
 PREPROCESSING = {
     "frames": IMG_HIST_LEN,
     "image_size": IMG_SIZE,
@@ -45,7 +44,7 @@ def make_driving_models(config: SubJepaConfig, key) -> DrivingModels:
     return (
         ViTEncoder(config.encoder, encoder_key),
         MLPPredictor(config.predictor, predictor_key),
-        RewardQHead(config.encoder.latent_dim, head_key),
+        RewardValueHead(config.encoder.latent_dim, head_key),
     )
 
 
@@ -53,7 +52,7 @@ def load_driver(path: Path, seed: int):
     with path.open("rb") as file:
         metadata = json.loads(file.readline())
         if (
-            metadata["version"] != 1
+            metadata["version"] != DRIVER_CHECKPOINT_VERSION
             or metadata["action_table"] != ACTION_GRID_NP.tolist()
         ):
             raise ValueError("Unsupported driving checkpoint action table or version.")
@@ -79,12 +78,6 @@ def _encode(encoder: ViTEncoder, observation: Observation):
 
 
 @eqx.filter_jit
-def greedy_action(encoder: ViTEncoder, head: RewardQHead, obs: Observation):
-    _, q = head.for_search(_encode(encoder, obs))
-    return jnp.argmax(q)
-
-
-@eqx.filter_jit
 def search_action(
     planner: CEMPlanner, models: DrivingModels, obs: Observation, plan: Plan, key
 ):
@@ -107,12 +100,7 @@ class MPCDriver:
         if episode_seed is not None:
             self.key = jax.random.fold_in(jax.random.key(self.seed), episode_seed)
 
-    def select(
-        self, models: DrivingModels, observation: Observation, controller: Controller
-    ) -> int:
-        encoder, _, head = models
-        if controller == "q":
-            return int(greedy_action(encoder, head, observation))
+    def select(self, models: DrivingModels, observation: Observation) -> int:
         action, self.plan, self.key = search_action(
             self.planner, models, observation, self.plan, self.key
         )
@@ -123,8 +111,6 @@ class MPCDriver:
             "screen": np.zeros((IMG_HIST_LEN, IMG_SIZE, IMG_SIZE), dtype=np.uint8),
             "telemetry": np.zeros(3 + ACTION_HISTORY_FEATURES, dtype=np.float32),
         }
-        encoder, _, head = models
-        greedy_action(encoder, head, observation).block_until_ready()
         jax.block_until_ready(
             search_action(
                 self.planner, models, observation, self.empty, jax.random.key(0)
@@ -143,6 +129,9 @@ class Episode:
     action_errors: list[float]
     elapsed_seconds: float
 
+    def discounted_return(self, gamma: float) -> float:
+        return float(np.dot(self.rewards, gamma ** np.arange(len(self.rewards))))
+
     def summary(self, gamma: float) -> dict[str, object]:
         steps = len(self.actions)
         return {
@@ -152,7 +141,7 @@ class Episode:
             "finish_seconds": self.elapsed_seconds if self.reason == "done" else None,
             "elapsed_seconds": self.elapsed_seconds,
             "done": self.done,
-            "return": float(np.dot(self.rewards, gamma ** np.arange(steps))),
+            "return": self.discounted_return(gamma),
             "inference_p99_ms": (
                 float(np.percentile(self.inference_ms, 99))
                 if self.inference_ms

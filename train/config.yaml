@@ -23,7 +23,9 @@ finetune:
   batch_size: 24
   seed: 42
   log_every: 250
-  fill_decisions: 4096
-  decisions: 100000
-  evaluation_every: 10000
-  evaluation_episodes: 5
+  total_epochs: 20
+  exploration_epochs: 2
+  drives_per_epoch: 5
+  optimizer_attempts_per_epoch: 1000
+  evaluation_interval: null
+  evaluation_races: 5

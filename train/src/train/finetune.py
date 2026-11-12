@@ -1,14 +1,14 @@
-"""Joint SubJEPA, reward, and Double DQN updates from recorded game transitions."""
+"""Joint Sub-JEPA, reward, termination, and scalar value updates from replay."""
 
 import equinox as eqx
 import jax
 import jax.numpy as jnp
 import optax
-from core.dynamics import RewardQHead
+from core.dynamics import RewardValueHead
 from core.encoders import DrivingModels, ViTEncoder
+from jaxtyping import Array, Bool, Float
 
 from train.config import FinetuneConfig, LossConfig
-from train.loss import double_dqn_target, select_action, terminal_loss
 from train.pretrain import (
     Batch,
     LearnerState,
@@ -19,49 +19,61 @@ from train.pretrain import (
     ssl_metrics,
 )
 
-type TargetModels = tuple[ViTEncoder, RewardQHead]
+type TargetModels = tuple[ViTEncoder, RewardValueHead]
 type OnlineState = LearnerState[DrivingModels, TargetModels]
 
 
-def read_states(head: RewardQHead, states):
-    reward, q = jax.vmap(head)(states.reshape(-1, states.shape[-1]))
-    shape = (*states.shape[:-1], q.shape[-1])
-    return reward.reshape(shape), q.reshape(shape)
+def return_targets(
+    rewards: Float[Array, "batch steps"],
+    dones: Bool[Array, "batch steps"],
+    tail: Float[Array, "batch"],
+    gamma: float,
+) -> Float[Array, "batch steps"]:
+    def step(continuation, transition):
+        reward, done = transition
+        value = reward + jnp.where(done, 0.0, gamma * continuation)
+        return value, value
+
+    _, returns = jax.lax.scan(step, tail, (rewards.T, dones.T), reverse=True)
+    return returns.T
 
 
-def td_targets(head, targets, live_next, batch: Batch, gamma: float):
-    target_encoder, target_head = targets
-    _, live_q = read_states(head, jax.lax.stop_gradient(live_next))
-    target_next = encode(
-        target_encoder, batch["obs_stack_targets"], batch["telemetry_targets"]
+def tail_value(targets: TargetModels, batch: Batch) -> Float[Array, "batch"]:
+    encoder, head = targets
+    states = encode(
+        encoder, batch["obs_stack_targets"][:, -1], batch["telemetry_targets"][:, -1]
     )
-    if batch["action_ids"].ndim == 1:
-        target_next = target_next[:, 0]
-    _, target_q = read_states(target_head, target_next)
-    return double_dqn_target(
-        jnp.asarray(batch["rewards"]),
-        jnp.asarray(batch["dones"]),
-        live_q,
-        target_q,
-        gamma,
-    )
+    return jax.lax.stop_gradient(eqx.filter_vmap(head.state_value)(states))
 
 
-def reward_and_td(head, states, batch: Batch, targets):
-    reward, q = read_states(head, states)
-    ids = jnp.asarray(batch["action_ids"])
-    reward_error = select_action(reward, ids) - batch["rewards"]
-    selected_q = select_action(q, ids)
+def action_losses(
+    rewards: Float[Array, "... actions"],
+    logits: Float[Array, "... actions"],
+    batch: Batch,
+) -> tuple[Float[Array, ""], Float[Array, ""]]:
+    actions = jnp.asarray(batch["action_ids"])[..., None]
+    reward = jnp.take_along_axis(rewards, actions, axis=-1)[..., 0]
+    logit = jnp.take_along_axis(logits, actions, axis=-1)[..., 0]
+    done = jnp.asarray(batch["dones"], dtype=logit.dtype)
     return (
-        jnp.mean(optax.huber_loss(reward_error)),
-        jnp.mean(optax.huber_loss(selected_q - targets)),
-        jnp.mean(selected_q),
+        jnp.mean((reward - batch["rewards"]) ** 2),
+        jnp.mean(optax.sigmoid_binary_cross_entropy(logit, done)),
     )
 
 
 def make_joint_objective(config: FinetuneConfig, loss: LossConfig):
+    """Build the objective for observed transitions and recorded action rollouts.
+
+    Arguments:
+      config: Discount and joint training settings.
+      loss: Sub-JEPA regularization settings.
+
+    Returns:
+      A loss function that also reports its components.
+    """
     use_ssl = config.ablation != "rl-only"
     freeze_encoder = config.ablation == "frozen-encoder"
+    gamma = config.gamma
 
     def objective(
         models: DrivingModels,
@@ -76,39 +88,21 @@ def make_joint_objective(config: FinetuneConfig, loss: LossConfig):
         if freeze_encoder:
             weights, static = eqx.partition(encoder, eqx.is_array)
             encoder = eqx.combine(jax.tree.map(jax.lax.stop_gradient, weights), static)
-        legacy_key, online_key, terminal_key = jax.random.split(key, 3)
-        roots = encode(encoder, real["obs_stack_t"], real["telemetry_t"])
-        real_next = encode(
-            encoder, real["obs_stack_targets"][:, 0], real["telemetry_targets"][:, 0]
-        )
-        real_target = td_targets(head, targets, real_next, real, config.gamma)
-        reward, td, q_mean = reward_and_td(head, roots, real, real_target)
-        terminal, leakage = terminal_loss(
-            predictor,
-            head,
-            roots,
-            jnp.asarray(real["action_ids"]),
-            jnp.asarray(real["dones"]),
-            terminal_key,
-        )
 
-        zero = jnp.zeros((), dtype=roots.dtype)
-        ssl = {
-            "ssl": zero,
-            "prediction": zero,
-            "regularization": zero,
-            "weighted_regularization": zero,
-        }
+        roots = encode(encoder, real["obs_stack_t"], real["telemetry_t"])
+        rewards, logits, values = eqx.filter_vmap(head)(roots)
+        reward, termination = action_losses(rewards, logits, real)
+        target = jnp.asarray(real["rewards"]) + jnp.where(
+            real["dones"], 0.0, gamma * tail_value(targets, real)
+        )
+        value = jnp.mean((values - target) ** 2)
+
+        ssl = {}
+        legacy_key, online_key = jax.random.split(key)
         if use_ssl and legacy is not None:
             _, predicted, actual = encode_rollout((encoder, predictor), legacy)
             ssl = ssl_metrics(predicted, actual, legacy, bases, legacy_key, loss)
 
-        metrics = {
-            "reward_real": reward,
-            "td_real": td,
-            "q_mean": q_mean,
-            "td_target_mean": jnp.mean(real_target),
-        }
         if online is not None:
             online_root, predicted, actual = encode_rollout(
                 (encoder, predictor), online
@@ -118,31 +112,43 @@ def make_joint_objective(config: FinetuneConfig, loss: LossConfig):
                     predicted, actual, online, bases, online_key, loss
                 )
                 ssl = (
-                    online_ssl
-                    if legacy is None
-                    else {
-                        name: 0.5 * (ssl[name] + value)
-                        for name, value in online_ssl.items()
+                    {
+                        name: 0.5 * (ssl[name] + term)
+                        for name, term in online_ssl.items()
                     }
+                    if ssl
+                    else online_ssl
                 )
-            rollout_states = jnp.concatenate(
-                (online_root[:, None], predicted[:, :-1]), axis=1
+
+            states = jnp.concatenate((online_root[:, None], predicted[:, :-1]), axis=1)
+            rewards, logits, values = eqx.filter_vmap(eqx.filter_vmap(head))(states)
+            rollout_reward, rollout_termination = action_losses(rewards, logits, online)
+
+            dones = jnp.asarray(online["dones"], dtype=jnp.bool_)
+            tail = tail_value(targets, online)
+            returns = return_targets(jnp.asarray(online["rewards"]), dones, tail, gamma)
+            imagined_values = eqx.filter_vmap(eqx.filter_vmap(head.state_value))(
+                jax.lax.stop_gradient(predicted)
             )
-            rollout_target = td_targets(head, targets, actual, online, config.gamma)
-            rollout_reward, rollout_td, _ = reward_and_td(
-                head, rollout_states, online, rollout_target
+            values = jnp.concatenate((values[:, :1], imagined_values[:, :-1]), axis=1)
+            value_errors = (values - returns) ** 2
+            tail_errors = jnp.where(
+                dones[:, -1], 0.0, (imagined_values[:, -1] - tail) ** 2
             )
-            metrics.update(reward_rollout=rollout_reward, td_rollout=rollout_td)
+            rollout_value = (value_errors.sum() + tail_errors.sum()) / (
+                value_errors.size + jnp.count_nonzero(~dones[:, -1])
+            )
+
             reward = 0.5 * (reward + rollout_reward)
-            td = 0.5 * (td + rollout_td)
-        total = ssl["ssl"] + reward + td + 0.1 * terminal
+            termination = 0.5 * (termination + rollout_termination)
+            value = 0.5 * (value + rollout_value)
+
+        total = reward + termination + value + ssl.get("ssl", 0.0)
         return total, {
             **ssl,
-            **metrics,
             "reward": reward,
-            "td": td,
-            "terminal": terminal,
-            "terminal_leakage": leakage,
+            "termination": termination,
+            "value": value,
         }
 
     return objective

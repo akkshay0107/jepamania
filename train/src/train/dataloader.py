@@ -159,7 +159,7 @@ class SlidingWindowDataset:
                     num_windows = end - start - self.K + int(not needs_next)
                 else:
                     complete_end = min(action_end, end - 1)
-                    num_windows = complete_end - start - self.K + int(self.view == "rl")
+                    num_windows = complete_end - start - self.K + int(online)
                 if num_windows <= 0 or (
                     allowed is not None and episode_id not in allowed
                 ):

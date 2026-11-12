@@ -5,7 +5,7 @@ from .actions import (
     to_continuous_action_np,
 )
 from .config import PlannerConfig
-from .dynamics import MLPPredictor, RewardQHead
+from .dynamics import MLPPredictor, RewardValueHead
 from .encoders import ViTEncoder, load_world_model
 from .interfaces import Encoder, Predictor
 from .planners import CEMPlanner
@@ -17,7 +17,7 @@ __all__ = [
     "ViTEncoder",
     "load_world_model",
     "MLPPredictor",
-    "RewardQHead",
+    "RewardValueHead",
     "CEMPlanner",
     "discretize_action",
     "to_continuous_action",

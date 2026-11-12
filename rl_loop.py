@@ -1,50 +1,41 @@
-"""Collect on the game thread and learn from completed HDF5 episodes in parallel."""
+"""Collect, train, publish, and evaluate Trackmania RL in fixed epochs."""
 
 import argparse
 import json
-import queue
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
-import equinox as eqx
 import h5py
 import jax
-import jax.numpy as jnp
 import numpy as np
-from core.actions import ACTION_GRID_NP
-from core.config import IMG_HIST_LEN, SubJepaConfig, load_config
-from core.encoders import DrivingModels, load_world_model
-from core.planners import CEMPlanner, rollout_reward
+from core.actions import ACTION_GRID_NP, discretize_action_np
+from core.config import SubJepaConfig, load_config
+from core.encoders import DrivingModels
+from core.planners import CEMPlanner
 from omegaconf import OmegaConf
-from train.config import TrainConfig, load_train_config
+from train.config import FinetuneConfig, TrainConfig, load_train_config
 from train.dataloader import SlidingWindowDataset
-from train.finetune import OnlineState, build_joint_learner, make_joint_objective
+from train.finetune import OnlineState, build_joint_learner
 from train.pretrain import (
     DEFAULT_CONFIG,
     DEFAULT_DATA_DIR,
     DEFAULT_TRAIN_CONFIG,
-    alpha_for,
-    encode,
+    Batch,
     legacy_splits,
     load_checkpoint,
     log_json,
-    make_gradient_probe,
     new_state,
     sample_legacy,
     save_checkpoint,
 )
 from train.rollout_episodes import publish_episode
 from win_client.env_patches import apply_online_rl_patches
-from win_client.game_session import (
-    MAX_EPISODE_STEPS,
-    REWARD_DEFINITION,
-    DrivingEnvironment,
-)
+from win_client.game_session import REWARD_DEFINITION, DrivingEnvironment, Observation
 from win_client.mpc_driver import (
+    DRIVER_CHECKPOINT_VERSION,
     PREPROCESSING,
-    Controller,
     Episode,
     MPCDriver,
     drive_episode,
@@ -53,436 +44,267 @@ from win_client.mpc_driver import (
 from win_client.settings import cfg as game_config
 from win_client.utils import get_tmrl_env
 
-
-class Snapshot(NamedTuple):
-    models: DrivingModels
-    updates: int
+HEURISTIC_ACTIONS = discretize_action_np(
+    np.array(
+        [(1, 0, steer) for steer in (-0.5, -0.2, 0.0, 0.2, 0.5)]
+        + [(0, 0, 0), (0, 1, 0)],
+        dtype=np.float32,
+    )
+)
 
 
 class RunState(NamedTuple):
     learner: OnlineState
+    completed_epoch: int
     attempt: int
     replay_cursor: int
-    update_credit: int
 
 
-def replay_shards(root: Path) -> list[Path]:
-    return sorted(root.glob("episode-*.h5"))
+def heuristic_driver(rng: np.random.Generator) -> Callable[[Observation], int]:
+    tick = 0
+    held_action = 0
 
-
-def replay_cursor(path: Path) -> int:
-    return int(path.stem.removeprefix("episode-"))
-
-
-def exploration_action(decision: int, fill: int, seed: int) -> int | None:
-    filling = decision < fill
-    phase_decision = decision if filling else decision - fill
-    block = phase_decision // 4
-    rng = np.random.default_rng(np.random.SeedSequence([seed, int(filling), block]))
-    epsilon = 1.0 if filling else 0.2 - 0.15 * min(block * 4 / 100_000, 1.0)
-    return int(rng.integers(len(ACTION_GRID_NP))) if rng.random() < epsilon else None
-
-
-class OnlineLearner:
-    """Own the learner state and publish whole model versions at update boundaries."""
-
-    def __init__(
-        self,
-        root: Path,
-        config: TrainConfig,
-        manifest: dict[str, Any],
-        state: RunState,
-        update: Callable,
-        legacy: list[SlidingWindowDataset],
-    ) -> None:
-        self.root = root
-        self.config = config
-        self.manifest = manifest
-        self.state = state
-        self.update = update
-        self.legacy = [] if config.finetune.ablation == "rl-only" else legacy
-        self.probe = make_gradient_probe(
-            make_joint_objective(config.finetune, config.loss),
-            ("prediction", "weighted_regularization", "reward", "td"),
-        )
-        probe_rng = np.random.default_rng(config.finetune.seed + 1)
-        self.probe_legacy = (
-            sample_legacy(self.legacy, min(4, config.finetune.batch_size), probe_rng)[0]
-            if self.legacy
-            else None
-        )
-        self.incoming: queue.Queue[Path | None] = queue.Queue()
-        self.latest = Snapshot(state.learner.models, int(state.learner.updates))
-
-    def _save(self, state: RunState) -> None:
-        save_checkpoint(self.root / "learner.eqx", state)
-        save_checkpoint(
-            self.root / "driver.eqx",
-            state.learner.models,
-            metadata={
-                **self.manifest["inference"],
-                "updates": int(state.learner.updates),
-            },
-        )
-        self.latest = Snapshot(state.learner.models, int(state.learner.updates))
-
-    def run(self) -> None:
-        cfg = self.config.finetune
-        rollout_len = self.config.pretrain.rollout_len
-        replay = self.root / "replay"
-        transitions = SlidingWindowDataset(replay, data_files=[], view="rl")
-        windows = SlidingWindowDataset(
-            replay, data_files=[], view="online_ssl", rollout_len=rollout_len
-        )
-        state = self.state
-        self._save(state)
-        seen = set()
-        closing = False
-        rejected = 0
-
-        def include(path: Path, *, restore: bool = False) -> None:
-            nonlocal state
-            if path in seen:
-                return
-            with h5py.File(path, "r") as file:
-                if file.attrs.get("reward_convention") != REWARD_DEFINITION:
-                    raise ValueError(f"Reward definition differs in {path}.")
-            before = len(transitions)
-            transitions.include_online_shard(path)
-            windows.include_online_shard(path)
-            after = len(transitions)
-            if after != replay_cursor(path):
-                raise ValueError(
-                    f"Replay sequence or transition count differs in {path}."
-                )
-            seen.add(path)
-            if restore:
-                return
-            gained = max(0, after - cfg.fill_decisions) - max(
-                0, before - cfg.fill_decisions
+    def select(_observation: Observation) -> int:
+        nonlocal tick, held_action
+        if tick % 4 == 0:
+            held_action = int(
+                rng.choice(HEURISTIC_ACTIONS, p=(0.1, 0.15, 0.3, 0.15, 0.1, 0.1, 0.1))
             )
-            if before < cfg.fill_decisions <= after:
-                gained += 1
-            state = state._replace(
-                replay_cursor=after,
-                update_credit=min(MAX_EPISODE_STEPS, state.update_credit + gained),
-            )
+        tick += 1
+        return held_action
 
-        for path in replay_shards(replay):
-            include(path, restore=replay_cursor(path) <= state.replay_cursor)
-        if len(transitions) < state.replay_cursor:
-            raise ValueError("Online replay is missing episodes used by the learner.")
-
-        while not closing or state.update_credit > 0:
-            # Drain metadata before sampling so a slow learner sees fresh replay.
-            while not closing:
-                try:
-                    incoming = self.incoming.get(block=state.update_credit == 0)
-                except queue.Empty:
-                    break
-                if incoming is None:
-                    closing = True
-                else:
-                    include(incoming)
-
-            if state.update_credit == 0:
-                continue
-            rng = np.random.default_rng(
-                np.random.SeedSequence([cfg.seed, state.attempt])
-            )
-            indices = rng.integers(len(transitions), size=cfg.batch_size)
-            real = transitions.read_batch(indices)
-            legacy, legacy_ids = (
-                sample_legacy(self.legacy, cfg.batch_size, rng)
-                if self.legacy
-                else (None, [])
-            )
-            online_ids = (
-                rng.integers(len(windows), size=cfg.batch_size)
-                if len(windows)
-                else None
-            )
-            online = None if online_ids is None else windows.read_batch(online_ids)
-            next_state, metrics = self.update(state.learner, real, legacy, online)
-            state = RunState(
-                next_state,
-                state.attempt + 1,
-                state.replay_cursor,
-                state.update_credit - 1,
-            )
-            if not bool(metrics["accepted"]):
-                rejected += 1
-                log_json(
-                    self.root / "updates.jsonl",
-                    {
-                        "attempt": state.attempt,
-                        "replay_cursor": state.replay_cursor,
-                        "rejected_transitions": indices.tolist(),
-                        "legacy_indices": legacy_ids,
-                        "online_indices": None
-                        if online_ids is None
-                        else online_ids.tolist(),
-                    },
-                )
-                if rejected >= 8:
-                    self._save(state)
-                    raise FloatingPointError(
-                        "Eight consecutive joint updates were rejected."
-                    )
-                continue
-            rejected = 0
-            updates = int(next_state.updates)
-            if updates in (1, 2) or updates % 250 == 0:
-                self._save(state)
-            self._log_update(state, metrics, legacy, online, transitions, windows)
-        self._save(state)
-        self.state = state
-
-    def _log_update(self, state, metrics, legacy, online, transitions, windows) -> None:
-        cfg = self.config.finetune
-        updates = int(state.learner.updates)
-        sources = {}
-        for name, batch in (("legacy", legacy), ("online", online)):
-            if cfg.ablation == "rl-only":
-                continue
-            if batch is not None:
-                size, steps = batch["actions_seq"].shape[:2]
-                sources[name] = {
-                    "B": size,
-                    "K": steps,
-                    "N": size * steps,
-                    "alpha": alpha_for(batch, self.config.loss.reg_weight),
-                }
-        report = {
-            "attempt": state.attempt,
-            "updates": updates,
-            "replay_cursor": state.replay_cursor,
-            "joint_decisions": state.replay_cursor - cfg.fill_decisions,
-            "updates_per_joint_decision": updates
-            / max(1, state.replay_cursor - cfg.fill_decisions),
-            "ssl": sources,
-            "rl_B": cfg.batch_size,
-        }
-        if updates == 1 or updates % cfg.log_every == 0:
-            report.update({name: float(value) for name, value in metrics.items()})
-        if updates % cfg.log_every == 0:
-            probe_size = min(4, cfg.batch_size)
-            real_probe = transitions.read_batch(
-                np.arange(min(probe_size, len(transitions)))
-            )
-            online_probe = (
-                windows.read_batch(np.arange(min(probe_size, len(windows))))
-                if len(windows)
-                else None
-            )
-            gradients = self.probe(
-                state.learner,
-                jax.random.key(cfg.seed + 1),
-                real_probe,
-                self.probe_legacy,
-                online_probe,
-            )
-            report["encoder_gradients"] = {
-                name: float(value) for name, value in gradients.items()
-            }
-        log_json(self.root / "updates.jsonl", report)
+    return select
 
 
-@eqx.filter_jit
-def forecast_reward(models: DrivingModels, frames, telemetry, actions, gamma: float):
-    encoder, predictor, head = models
-    roots = encode(encoder, frames, telemetry)
-    returns, _ = jax.vmap(rollout_reward, in_axes=(None, None, 0, 0, None))(
-        predictor, head, roots, jnp.asarray(actions), gamma
-    )
-    return returns
+def collect_drive(
+    env: DrivingEnvironment,
+    driver: MPCDriver,
+    models: DrivingModels,
+    use_cem: bool,
+    seed: int,
+    number: int,
+) -> Episode:
+    for retry in range(3):
+        if use_cem:
+            driver.reset(2 * (3 * number + retry))
+            select = partial(driver.select, models)
+        else:
+            rng = np.random.default_rng(np.random.SeedSequence([seed, number, retry]))
+            select = heuristic_driver(rng)
+        episode = drive_episode(env, select)
+        if episode.actions:
+            return episode
+    raise RuntimeError("Three game resets produced no complete transition.")
 
 
-def check_reward_forecasts(models, episode: Episode, horizon: int, gamma: float):
-    if len(episode.actions) < horizon:
-        return None
-    roots = np.linspace(0, len(episode.actions) - horizon, 24, dtype=np.intp)
-    rows = roots[:, None] + np.arange(horizon)
-    history = np.maximum(roots[:, None] + np.arange(-IMG_HIST_LEN + 1, 1), 0)
-    frames = np.stack(
-        [
-            np.stack([episode.observations[index]["screen"][-1] for index in row])
-            for row in history
-        ]
-    )
-    telemetry = np.stack([episode.observations[index]["telemetry"] for index in roots])
-    actions = np.asarray(episode.actions, dtype=np.int32)[rows]
-    actual = np.asarray(episode.rewards)[rows] @ (gamma ** np.arange(horizon))
-    predicted = np.asarray(forecast_reward(models, frames, telemetry, actions, gamma))
-    if not np.isfinite(predicted).all():
-        return None
-    return {
-        "mae": float(np.mean(np.abs(predicted - actual))),
-        "actual_mean": float(np.mean(actual)),
-        "predicted_mean": float(np.mean(predicted)),
-    }
+def include_drive(
+    path: Path,
+    epoch: int,
+    transitions: SlidingWindowDataset,
+    windows: SlidingWindowDataset,
+) -> None:
+    with h5py.File(path, "r") as file:
+        episode = cast(h5py.Group, file["metadata/episode_0"])
+        if (
+            file.attrs.get("reward_convention") != REWARD_DEFINITION
+            or episode.attrs.get("epoch") != epoch
+            or episode.attrs.get("checkpoint_version") != epoch - 1
+        ):
+            raise ValueError(f"Replay reward, epoch, or checkpoint differs in {path}.")
+    before = len(transitions)
+    transitions.include_online_shard(path)
+    if len(transitions) == before:
+        raise ValueError(f"No complete transitions in {path}.")
+    windows.include_online_shard(path)
+
+
+def sample_replay(
+    data: SlidingWindowDataset, size: int, rng: np.random.Generator, recent_start: int
+) -> Batch:
+    recent_size = (size + 1) // 2 if recent_start < len(data) else 0
+    indices = rng.integers(len(data), size=size)
+    if recent_size:
+        indices[:recent_size] = rng.integers(recent_start, len(data), size=recent_size)
+    return data.read_batch(indices)
+
+
+def write_text_atomic(path: Path, contents: str) -> None:
+    temp = path.with_suffix(".part")
+    temp.write_text(contents, encoding="utf-8")
+    temp.replace(path)
 
 
 def evaluate(
-    driver: MPCDriver,
-    env: DrivingEnvironment,
-    snapshot: Snapshot,
-    decisions: int,
-    config: TrainConfig,
-) -> tuple[dict[str, Any], bool]:
-    cfg = config.finetune
-    results: dict[str, list[dict[str, Any]]] = {"q": [], "mpc": []}
-    checks = []
-    can_search = False
-    for pair in range(cfg.evaluation_episodes):
-        order: tuple[Controller, Controller] = (
-            ("mpc", "q")
-            if can_search and (decisions // cfg.evaluation_every + pair) % 2
-            else ("q", "mpc")
+    env: DrivingEnvironment, driver: MPCDriver, state: RunState, cfg: FinetuneConfig
+) -> dict[str, int | float | None]:
+    epoch = state.completed_epoch
+    models = state.learner.models
+    episodes = []
+    for race in range(cfg.evaluation_races):
+        driver.reset(2 * (epoch * cfg.evaluation_races + race) + 1)
+        episodes.append(
+            drive_episode(env, partial(driver.select, models), keep_observations=False)
         )
-        for controller in order:
-            if controller == "mpc" and not can_search:
-                continue
-            driver.reset(2 * (decisions + pair) + 1)
 
-            def select(obs, mode: Controller = controller):
-                return driver.select(snapshot.models, obs, mode)
-
-            episode = drive_episode(
-                env,
-                select,
-                keep_observations=controller == "q",
-            )
-            results[controller].append(episode.summary(cfg.gamma))
-            if controller == "q":
-                check = check_reward_forecasts(
-                    snapshot.models, episode, driver.planner.horizon, cfg.gamma
-                )
-                checks.append(check)
-                # Keep the initial search trial bounded by a held-out reward check.
-                can_search = check is not None and check["mae"] <= 0.1
-    q, mpc = results["q"], results["mpc"]
-    comparable = len(q) == len(mpc) and bool(q) and sum(e["finished"] for e in mpc) > 0
-    improved = comparable and (
-        sum(e["finished"] for e in mpc),
-        np.mean([e["return"] for e in mpc]),
-    ) > (sum(e["finished"] for e in q), np.mean([e["return"] for e in q]))
+    finishes = [ep.elapsed_seconds for ep in episodes if ep.reason == "done"]
+    latencies = [latency for ep in episodes for latency in ep.inference_ms]
     return {
-        "decisions": decisions,
-        "updates": snapshot.updates,
-        "episodes": results,
-        "reward_forecast_checks": checks,
-    }, bool(improved)
+        "epoch": epoch,
+        "checkpoint_version": epoch,
+        "finish_rate": len(finishes) / len(episodes),
+        "median_finish_seconds": float(np.median(finishes)) if finishes else None,
+        "mean_discounted_return": float(
+            np.mean([ep.discounted_return(cfg.gamma) for ep in episodes])
+        ),
+        "inference_p99_ms": float(np.percentile(latencies, 99)),
+    }
 
 
-def collect_trial(
+def evaluate_if_due(
+    root: Path,
     env: DrivingEnvironment,
     driver: MPCDriver,
-    learner: OnlineLearner,
-    storage: ThreadPoolExecutor,
-    worker: Future,
-    decisions: int,
+    state: RunState,
+    cfg: FinetuneConfig,
+) -> None:
+    epoch, interval = state.completed_epoch, cfg.evaluation_interval
+    if epoch == 0 or interval is None or epoch % interval:
+        return
+    path = root / "evaluation.jsonl"
+    history = path.read_text(encoding="utf-8") if path.is_file() else ""
+    if not history or json.loads(history.splitlines()[-1])["epoch"] != epoch:
+        row = json.dumps(evaluate(env, driver, state, cfg), allow_nan=False)
+        write_text_atomic(path, f"{history}{row}\n")
+
+
+def publish_driver(path: Path, state: RunState, inference: dict[str, Any]) -> None:
+    save_checkpoint(
+        path,
+        state.learner.models,
+        metadata={
+            **inference,
+            "checkpoint_version": state.completed_epoch,
+            "updates": int(state.learner.updates),
+        },
+    )
+
+
+def run_epochs(
     root: Path,
-) -> int:
-    cfg = learner.config.finetune
-    evaluation_boundary = (decisions // cfg.evaluation_every + 1) * cfg.evaluation_every
-    pending: list[Future] = []
-    use_mpc = False
-    empty = 0
+    state: RunState,
+    update: Callable,
+    legacy: list[SlidingWindowDataset],
+    config: TrainConfig,
+    driver: MPCDriver,
+    env: DrivingEnvironment,
+    inference: dict[str, Any],
+) -> None:
+    """Restore replay, then run collection, updates, and publication in order.
 
-    def store(path, episode, metadata):
-        learner.incoming.put(publish_episode(path, episode, metadata))
-        log_json(root / "collection.jsonl", {**metadata, **episode.summary(cfg.gamma)})
+    Arguments:
+      root: Directory for replay, checkpoints, and logs.
+      state: Learner and counters at the last completed epoch.
+      update: One optimizer attempt.
+      legacy: Historical datasets for the auxiliary SSL objective.
+      config: Replay and epoch settings.
+      driver: CEM driver used for collection and evaluation.
+      env: Shared game adapter.
+      inference: Metadata stored with the driver weights.
 
-    while decisions < cfg.decisions:
-        if worker.done():
-            worker.result()
-            raise RuntimeError("The online learner stopped unexpectedly.")
-        while pending and (pending[0].done() or len(pending) >= 4):
-            pending.pop(0).result()
-        snapshot = learner.latest
-        driver.reset(2 * decisions)
-        controller: Controller = "mpc" if use_mpc else "q"
-        use_mpc = False
-        start = decisions
-        tick = start
-        block_end = start
-        held_action = None
+    Returns:
+      None. Progress is saved at completed epochs.
+    """
+    cfg = config.finetune
+    replay = root / "replay"
+    transitions = SlidingWindowDataset(replay, data_files=[], view="rl")
+    windows = SlidingWindowDataset(
+        replay,
+        data_files=[],
+        view="online_ssl",
+        rollout_len=config.pretrain.rollout_len,
+    )
+    drives = cfg.drives_per_epoch
+    for number in range(state.completed_epoch * drives):
+        path = replay / f"episode-{number:08d}.h5"
+        include_drive(path, number // drives + 1, transitions, windows)
+    if len(transitions) != state.replay_cursor:
+        raise ValueError("Replay transition count differs from the learner checkpoint.")
 
-        def select(obs):
-            nonlocal tick, block_end, held_action
-            if tick == block_end:
-                held_action = exploration_action(tick, cfg.fill_decisions, cfg.seed)
-                phase_tick = (
-                    tick if tick < cfg.fill_decisions else tick - cfg.fill_decisions
+    driver_path = root / "driver.eqx"
+    if state.completed_epoch:
+        published = None
+        if driver_path.is_file():
+            with driver_path.open("rb") as file:
+                published = json.loads(file.readline()).get("checkpoint_version")
+        if published != state.completed_epoch:
+            publish_driver(driver_path, state, inference)
+        evaluate_if_due(root, env, driver, state, cfg)
+
+    learner, attempt = state.learner, state.attempt
+    for epoch in range(state.completed_epoch + 1, cfg.total_epochs + 1):
+        use_cem = epoch > cfg.exploration_epochs
+        snapshot = learner.models
+        first_transition, first_window = len(transitions), len(windows)
+        for number in range((epoch - 1) * drives, epoch * drives):
+            path = replay / f"episode-{number:08d}.h5"
+            if not path.is_file():
+                episode = collect_drive(
+                    env, driver, snapshot, use_cem, cfg.seed, number
                 )
-                block_end = tick + 4 - phase_tick % 4
-                if held_action is not None:
-                    driver.reset()
-            tick += 1
-            if held_action is not None:
-                return held_action
-            return driver.select(snapshot.models, obs, controller)
-
-        limit = min(
-            MAX_EPISODE_STEPS,
-            cfg.decisions - decisions,
-            evaluation_boundary - decisions,
-        )
-        if decisions < cfg.fill_decisions:
-            limit = min(limit, cfg.fill_decisions - decisions)
-        episode = drive_episode(env, select, max_steps=limit)
-        if not episode.actions:
-            empty += 1
-            if empty >= 3:
-                raise RuntimeError("Three game resets produced no complete transition.")
-            continue
-        empty = 0
-        decisions += len(episode.actions)
-        metadata = {
-            "start_decision": start,
-            "end_decision": decisions,
-            "joint_decisions": max(0, decisions - cfg.fill_decisions),
-            "held_action": exploration_action(
-                decisions - 1, cfg.fill_decisions, cfg.seed
-            ),
-            "block_offset": (
-                decisions
-                if decisions <= cfg.fill_decisions
-                else decisions - cfg.fill_decisions
-            )
-            % 4,
-            "updates": snapshot.updates,
-            "controller": "fill" if start < cfg.fill_decisions else controller,
-        }
-        pending.append(
-            storage.submit(
-                store,
-                root / "replay" / f"episode-{decisions:06d}.h5",
-                episode,
-                metadata,
-            )
-        )
-        if decisions == evaluation_boundary or decisions == cfg.decisions:
-            if learner.latest.updates:
-                report, use_mpc = evaluate(
-                    driver, env, learner.latest, decisions, learner.config
-                )
-                log_json(root / "evaluation.jsonl", report)
-            elif decisions < cfg.decisions:
+                metadata = {
+                    "epoch": epoch,
+                    "checkpoint_version": epoch - 1,
+                    "drive": number,
+                    "controller": "cem" if use_cem else "heuristic",
+                }
+                publish_episode(path, episode, metadata)
                 log_json(
-                    root / "evaluation.jsonl",
-                    {
-                        "decisions": decisions,
-                        "updates": 0,
-                        "reason": "awaiting_joint_update",
-                    },
+                    root / "collection.jsonl",
+                    {**metadata, **episode.summary(cfg.gamma)},
                 )
-            evaluation_boundary += cfg.evaluation_every
+            include_drive(path, epoch, transitions, windows)
 
-    for item in pending:
-        item.result()
-    return decisions
+        recent_transition = first_transition if use_cem else len(transitions)
+        recent_window = first_window if use_cem else len(windows)
+        reports: list[dict[str, object]] = []
+        for _ in range(cfg.optimizer_attempts_per_epoch):
+            rng = np.random.default_rng(np.random.SeedSequence([cfg.seed, attempt]))
+            real = sample_replay(transitions, cfg.batch_size, rng, recent_transition)
+            historical = (
+                sample_legacy(legacy, cfg.batch_size, rng)[0] if legacy else None
+            )
+            online = (
+                sample_replay(windows, cfg.batch_size, rng, recent_window)
+                if len(windows)
+                else None
+            )
+            learner, metrics = update(learner, real, historical, online)
+            attempt += 1
+            accepted = bool(metrics.pop("accepted"))
+            if not accepted or attempt == 1 or attempt % cfg.log_every == 0:
+                report: dict[str, object] = {
+                    "epoch": epoch,
+                    "attempt": attempt,
+                    "accepted": accepted,
+                }
+                if accepted:
+                    report.update(
+                        {name: float(value) for name, value in metrics.items()}
+                    )
+                reports.append(report)
+
+        state = RunState(learner, epoch, attempt, len(transitions))
+        save_checkpoint(root / "learner.eqx", state)
+        for report in reports:
+            log_json(root / "updates.jsonl", report)
+        publish_driver(driver_path, state, inference)
+        evaluate_if_due(root, env, driver, state, cfg)
+        print(
+            json.dumps(
+                {"epoch": epoch, "attempts": attempt, "updates": int(learner.updates)}
+            ),
+            flush=True,
+        )
 
 
 def run_online(
@@ -491,45 +313,51 @@ def run_online(
     config: TrainConfig,
     env_factory: Callable[[], Any] = get_tmrl_env,
 ) -> None:
-    """Run one decision-budgeted trial, restoring durable state when requested.
+    """Initialize or resume an epoch run and own the game session.
 
     Arguments:
-      args: Run directory, recording source, and checkpoint options.
+      args: Run paths and initialization options.
       model: Encoder, predictor, and planner settings.
-      config: Offline split, loss, and online training settings.
-      env_factory: Factory for the ordinary reset/step game interface.
+      config: Replay, loss, and epoch settings.
+      env_factory: Factory for the reset/step game interface.
 
     Returns:
-      None. Progress, model snapshots, and evaluation summaries are saved to disk.
+      None. The run writes learner state, driver weights, and metrics.
     """
     cfg = config.finetune
-    if not 0 < cfg.fill_decisions < cfg.decisions:
-        raise ValueError(
-            "Fill must be positive and smaller than the online decision budget."
-        )
     if (
         min(
-            cfg.batch_size, cfg.log_every, cfg.evaluation_every, cfg.evaluation_episodes
+            cfg.batch_size,
+            cfg.log_every,
+            cfg.total_epochs,
+            cfg.drives_per_epoch,
+            cfg.optimizer_attempts_per_epoch,
+            cfg.evaluation_races,
         )
         <= 0
     ):
-        raise ValueError(
-            "Batch size, logging and evaluation intervals must be positive."
-        )
+        raise ValueError("Epoch, batch, update, and logging counts must be positive.")
+    if not 0 <= cfg.exploration_epochs <= cfg.total_epochs:
+        raise ValueError("Exploration epochs must fit the run.")
+    if cfg.evaluation_interval is not None and cfg.evaluation_interval <= 0:
+        raise ValueError("Evaluation interval must be positive when set.")
     if model.planner.sequence_len > config.pretrain.rollout_len:
         raise ValueError("Planning horizon must fit the SSL rollout horizon.")
 
     root = args.run_dir.resolve()
     root.mkdir(parents=True, exist_ok=True)
-    key, init_key, world_key = jax.random.split(jax.random.key(cfg.seed), 3)
+    manifest_path = root / "run.json"
+    if not args.resume and (
+        manifest_path.exists() or any((root / "replay").glob("episode-*.h5"))
+    ):
+        raise FileExistsError(f"Use --resume or a new run directory: {root}")
+
+    key, init_key = jax.random.split(jax.random.key(cfg.seed))
     models = make_driving_models(model, init_key)
     if not args.resume:
-        world = load_world_model(
-            args.initialize, world_key, model.encoder, model.predictor
-        )
-        models = (*world, models[2])
+        models = (*load_checkpoint(args.initialize, models[:2]), models[2])
     optimizer, update = build_joint_learner(models, cfg, config.loss)
-    state = new_state(
+    learner = new_state(
         models,
         optimizer,
         (models[0], models[2]),
@@ -543,16 +371,17 @@ def run_online(
         config.pretrain.val_ratio,
         config.pretrain.seed,
     )
+    inference = {
+        "version": DRIVER_CHECKPOINT_VERSION,
+        "model": OmegaConf.to_container(model, resolve=True),
+        "action_table": ACTION_GRID_NP.tolist(),
+        "preprocessing": PREPROCESSING,
+        "gamma": cfg.gamma,
+    }
     manifest = json.loads(
         json.dumps(
             {
-                "inference": {
-                    "version": 1,
-                    "model": OmegaConf.to_container(model, resolve=True),
-                    "action_table": ACTION_GRID_NP.tolist(),
-                    "preprocessing": PREPROCESSING,
-                    "gamma": cfg.gamma,
-                },
+                "inference": inference,
                 "reward": REWARD_DEFINITION,
                 "map_name": game_config.agent.map_name,
                 "map_uid": game_config.agent.map_uid,
@@ -563,72 +392,45 @@ def run_online(
             }
         )
     )
-    manifest_path = root / "run.json"
+    state = RunState(learner, 0, 0, 0)
     if args.resume:
         saved = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if {name: saved[name] for name in manifest} != manifest:
+        if saved["inference"]["version"] != DRIVER_CHECKPOINT_VERSION:
+            raise ValueError("Start a scalar-value run from a pretrained world model.")
+        if any(saved.get(name) != value for name, value in manifest.items()):
             raise ValueError(
                 "Replay configuration, reward, map or legacy split differs."
             )
-        restored = load_checkpoint(root / "learner.eqx", RunState(state, 0, 0, 0))
+        state = load_checkpoint(root / "learner.eqx", state)
     else:
-        if manifest_path.exists():
-            raise FileExistsError(f"Use --resume or a new run directory: {root}")
         projector_path = args.projectors or args.initialize.with_name("projectors.eqx")
         if args.projectors or projector_path.is_file():
-            state = state._replace(bases=load_checkpoint(projector_path, state.bases))
+            state = state._replace(
+                learner=learner._replace(
+                    bases=load_checkpoint(projector_path, learner.bases)
+                )
+            )
         manifest["initial_world_model"] = str(args.initialize.resolve())
         manifest["projectors"] = (
             str(projector_path.resolve()) if projector_path.is_file() else None
         )
-        restored = RunState(state, 0, 0, 0)
-        save_checkpoint(root / "learner.eqx", restored)
-        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        save_checkpoint(root / "learner.eqx", state)
+        write_text_atomic(manifest_path, json.dumps(manifest, indent=2))
 
-    shards = replay_shards(root / "replay")
-    decisions = replay_cursor(shards[-1]) if shards else 0
-    learner = OnlineLearner(root, config, manifest, restored, update, legacy)
     driver = MPCDriver(CEMPlanner(model.planner, cfg.gamma), cfg.seed)
-    driver.warmup(learner.latest.models)
+    driver.warmup(state.learner.models)
     apply_online_rl_patches()
     env = DrivingEnvironment(env_factory())
     try:
-        with (
-            ThreadPoolExecutor(max_workers=1, thread_name_prefix="learner") as learning,
-            ThreadPoolExecutor(max_workers=1, thread_name_prefix="replay") as storage,
-        ):
-            future = learning.submit(learner.run)
-            try:
-                decisions = collect_trial(
-                    env, driver, learner, storage, future, decisions, root
-                )
-            finally:
-                storage.shutdown(wait=True)
-                learner.incoming.put(None)
-                future.result()
-
-        history = root / "evaluation.jsonl"
-        evaluations = (
-            []
-            if not history.exists()
-            else [
-                json.loads(line)["decisions"]
-                for line in history.read_text().splitlines()
-            ]
-        )
-        if learner.latest.updates and decisions not in evaluations:
-            report, _ = evaluate(driver, env, learner.latest, decisions, config)
-            log_json(history, report)
-        print(
-            json.dumps(
-                {
-                    "decisions": decisions,
-                    "updates": learner.latest.updates,
-                    "updates_per_joint_decision": learner.latest.updates
-                    / max(1, decisions - cfg.fill_decisions),
-                }
-            ),
-            flush=True,
+        run_epochs(
+            root,
+            state,
+            update,
+            [] if cfg.ablation == "rl-only" else legacy,
+            config,
+            driver,
+            env,
+            inference,
         )
     finally:
         env.close()

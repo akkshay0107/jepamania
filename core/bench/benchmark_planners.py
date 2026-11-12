@@ -1,4 +1,4 @@
-"""Measure warmed-up encoding, Q inference, and MPC on the local driver."""
+"""Measure warmed-up encoding and CEM inference on the local driver."""
 
 import time
 
@@ -10,7 +10,6 @@ from core.planners import CEMPlanner
 from win_client.mpc_driver import (
     MPCDriver,
     _encode,
-    greedy_action,
     make_driving_models,
     search_action,
 )
@@ -31,7 +30,7 @@ def main() -> None:
     config = load_config("core/config.yaml")
     init, obs_key = jax.random.split(jax.random.key(42))
     models = make_driving_models(config, init)
-    encoder, _, head = models
+    encoder = models[0]
     planner = CEMPlanner(config.planner, 0.997)
     driver = MPCDriver(planner, 42)
     rng = np.random.default_rng(42)
@@ -47,12 +46,10 @@ def main() -> None:
     driver.warmup(models)
     calls = {
         "device encoding": lambda: encode(encoder, device_obs),
-        "device Q + encoding": lambda: greedy_action(encoder, head, device_obs),
         "device MPC + encoding": lambda: search_action(
             planner, models, device_obs, plan, obs_key
         ),
-        "host Q + transfer": lambda: driver.select(models, obs, "q"),
-        "host MPC + transfer": lambda: driver.select(models, obs, "mpc"),
+        "host MPC + transfer": lambda: driver.select(models, obs),
     }
     print(f"Backend {jax.default_backend()} | milliseconds after warmup")
     for name, call in calls.items():

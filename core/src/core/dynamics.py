@@ -1,7 +1,9 @@
+import math
+
 import equinox as eqx
 import jax
 import jax.numpy as jnp
-from jaxtyping import Array, Bool, Float, PRNGKeyArray
+from jaxtyping import Array, Float, PRNGKeyArray
 
 from core.config import (
     ACTION_HISTORY_FEATURES,
@@ -56,66 +58,58 @@ class MLPPredictor(eqx.Module):
         return jnp.concatenate([next_latent, next_history])
 
 
-class RewardQHead(eqx.Module):
-    """Predict interval rewards and returns for the same discrete actions."""
+class RewardValueHead(eqx.Module):
+    """Predict per-action rewards and termination, and a scalar state value."""
 
     latent_dim: int = eqx.field(static=True)
     hidden: tuple[eqx.nn.Linear, eqx.nn.Linear]
     reward: eqx.nn.Linear
-    q: eqx.nn.Linear
+    termination: eqx.nn.Linear
+    value_projection: eqx.nn.Linear
 
     def __init__(self, latent_dim: int, key: PRNGKeyArray) -> None:
         self.latent_dim = latent_dim
-        first, second, reward, value = jax.random.split(key, 4)
+        first, second, reward, termination, value = jax.random.split(key, 5)
         width = 256
         self.hidden = (
             eqx.nn.Linear(latent_dim + ACTION_HISTORY_FEATURES, width, key=first),
             eqx.nn.Linear(width, width, key=second),
         )
 
-        def zero_projection(output_key):
-            projection = eqx.nn.Linear(width, NUM_ACTIONS, key=output_key)
+        def projection(output_key: PRNGKeyArray, outputs: int, bias: float = 0.0):
+            layer = eqx.nn.Linear(width, outputs, key=output_key)
             return eqx.tree_at(
-                lambda layer: (layer.weight, layer.bias),
-                projection,
+                lambda linear: (linear.weight, linear.bias),
+                layer,
                 (
-                    jnp.zeros_like(projection.weight),
-                    jnp.zeros(NUM_ACTIONS, dtype=projection.weight.dtype),
+                    jnp.zeros_like(layer.weight),
+                    jnp.full(outputs, bias, dtype=layer.weight.dtype),
                 ),
             )
 
-        self.reward = zero_projection(reward)
-        self.q = zero_projection(value)
+        self.reward = projection(reward, NUM_ACTIONS)
+        self.termination = projection(termination, NUM_ACTIONS, math.log(0.01 / 0.99))
+        self.value_projection = projection(value, 1)
 
     def __check_init__(self) -> None:
         if self.latent_dim <= 0:
             raise ValueError("Learned latent width must be positive.")
 
-    def __call__(
-        self, state: Float[Array, "state_dim"]
-    ) -> tuple[Float[Array, "actions"], Float[Array, "actions"]]:
+    def features(self, state: Float[Array, "state_dim"]) -> Float[Array, "hidden"]:
         features = state
         for layer in self.hidden:
             features = jax.nn.silu(layer(features))
-        return self.reward(features), self.q(features)
+        return features
 
-    def for_search(
+    def state_value(self, state: Float[Array, "state_dim"]) -> Float[Array, ""]:
+        return self.value_projection(self.features(state))[0]
+
+    def __call__(
         self, state: Float[Array, "state_dim"]
-    ) -> tuple[Float[Array, "actions"], Float[Array, "actions"]]:
-        reward, q = self(state)
-        absorbing = is_absorbing(state, self.latent_dim)
-        return jnp.where(absorbing, 0.0, reward), jnp.where(absorbing, 0.0, q)
-
-
-def is_absorbing(state: Float[Array, "state_dim"], latent_dim: int) -> Bool[Array, ""]:
-    return jnp.all(state[:latent_dim] == 0)
-
-
-def search_transition(
-    predictor: MLPPredictor, state: Float[Array, "state_dim"], action: Float[Array, "3"]
-) -> Float[Array, "state_dim"]:
-    next_state = predictor(state, action)
-    absorbing = is_absorbing(state, predictor.latent_dim) | is_absorbing(
-        next_state, predictor.latent_dim
-    )
-    return jnp.where(absorbing, jnp.zeros_like(next_state), next_state)
+    ) -> tuple[Float[Array, "actions"], Float[Array, "actions"], Float[Array, ""]]:
+        features = self.features(state)
+        return (
+            self.reward(features),
+            self.termination(features),
+            self.value_projection(features)[0],
+        )
