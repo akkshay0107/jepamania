@@ -15,7 +15,12 @@ from core.config import SubJepaConfig, load_config
 from core.encoders import DrivingModels
 from core.planners import CEMPlanner
 from omegaconf import OmegaConf
-from train.config import FinetuneConfig, TrainConfig, load_train_config
+from train.config import (
+    FinetuneConfig,
+    TrainConfig,
+    load_train_config,
+    matches_manifest,
+)
 from train.dataloader import SlidingWindowDataset
 from train.finetune import OnlineState, build_joint_learner
 from train.pretrain import (
@@ -365,11 +370,17 @@ def run_online(
         model.encoder.latent_dim,
         config.loss,
     )
-    legacy, validation, sources = legacy_splits(
-        args.data_dir,
-        config.pretrain.rollout_len,
-        config.pretrain.val_ratio,
-        config.pretrain.seed,
+    use_ssl = cfg.ablation != "rl-only"
+    pretrain_settings: dict[str, int | float] = {
+        "rollout_len": config.pretrain.rollout_len
+    }
+    loss_settings = (
+        OmegaConf.to_container(config.loss, resolve=True)
+        if use_ssl
+        else {
+            "num_subspaces": config.loss.num_subspaces,
+            "subspace_dim": config.loss.subspace_dim,
+        }
     )
     inference = {
         "version": DRIVER_CHECKPOINT_VERSION,
@@ -378,42 +389,54 @@ def run_online(
         "preprocessing": PREPROCESSING,
         "gamma": cfg.gamma,
     }
-    manifest = json.loads(
-        json.dumps(
-            {
-                "inference": inference,
-                "reward": REWARD_DEFINITION,
-                "map_name": game_config.agent.map_name,
-                "map_uid": game_config.agent.map_uid,
-                "training": OmegaConf.to_container(config, resolve=True),
-                "legacy_sources": sources,
-                "legacy_train": [group.episode_keys for group in legacy],
-                "legacy_validation": [group.episode_keys for group in validation],
-            }
+    manifest = {
+        "inference": inference,
+        "reward": REWARD_DEFINITION,
+        "map_name": game_config.agent.map_name,
+        "map_uid": game_config.agent.map_uid,
+        "training": {
+            "loss": loss_settings,
+            "pretrain": pretrain_settings,
+            "finetune": OmegaConf.to_container(cfg, resolve=True),
+        },
+    }
+    legacy = []
+    if use_ssl:
+        pretrain_settings.update(
+            val_ratio=config.pretrain.val_ratio, seed=config.pretrain.seed
         )
-    )
+        legacy, validation, sources = legacy_splits(
+            args.data_dir,
+            config.pretrain.rollout_len,
+            config.pretrain.val_ratio,
+            config.pretrain.seed,
+        )
+        manifest.update(
+            legacy_sources=sources,
+            legacy_train=[group.episode_keys for group in legacy],
+            legacy_validation=[group.episode_keys for group in validation],
+        )
+    manifest = json.loads(json.dumps(manifest))
     state = RunState(learner, 0, 0, 0)
     if args.resume:
         saved = json.loads(manifest_path.read_text(encoding="utf-8"))
         if saved["inference"]["version"] != DRIVER_CHECKPOINT_VERSION:
             raise ValueError("Start a scalar-value run from a pretrained world model.")
-        if any(saved.get(name) != value for name, value in manifest.items()):
+        if not matches_manifest(saved, manifest, "training"):
             raise ValueError(
                 "Replay configuration, reward, map or legacy split differs."
             )
         state = load_checkpoint(root / "learner.eqx", state)
     else:
-        projector_path = args.projectors or args.initialize.with_name("projectors.eqx")
-        if args.projectors or projector_path.is_file():
+        projector_path = args.initialize.with_name("projectors.eqx")
+        if use_ssl and projector_path.is_file():
             state = state._replace(
                 learner=learner._replace(
                     bases=load_checkpoint(projector_path, learner.bases)
                 )
             )
+            manifest["projectors"] = str(projector_path.resolve())
         manifest["initial_world_model"] = str(args.initialize.resolve())
-        manifest["projectors"] = (
-            str(projector_path.resolve()) if projector_path.is_file() else None
-        )
         save_checkpoint(root / "learner.eqx", state)
         write_text_atomic(manifest_path, json.dumps(manifest, indent=2))
 
@@ -426,7 +449,7 @@ def run_online(
             root,
             state,
             update,
-            [] if cfg.ablation == "rl-only" else legacy,
+            legacy,
             config,
             driver,
             env,
@@ -441,7 +464,6 @@ def main() -> None:
     initial = parser.add_mutually_exclusive_group(required=True)
     initial.add_argument("--initialize", type=Path)
     initial.add_argument("--resume", action="store_true")
-    parser.add_argument("--projectors", type=Path)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     parser.add_argument("--config", type=Path, default=DEFAULT_TRAIN_CONFIG)

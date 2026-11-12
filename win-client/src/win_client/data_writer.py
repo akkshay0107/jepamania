@@ -12,10 +12,6 @@ from core.config import IMG_SIZE, TELEMETRY_FEATURES
 
 from win_client.settings import cfg
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
-
 
 class HDF5Writer:
     """Asynchronous HDF5 writer with per-episode metadata support."""
@@ -24,24 +20,19 @@ class HDF5Writer:
         self,
         filepath: Path,
         chunk_size: int = cfg.hdf5_chunk_size,
-        append: bool = False,
         online_reward: str | None = None,
     ) -> None:
         """Open an asynchronous writer for a rollout shard.
 
         Arguments:
-          filepath: HDF5 file to create or extend.
+          filepath: HDF5 file to create.
           chunk_size: Number of frames written in one HDF5 resize operation.
-          append: Whether to continue an existing schema-compatible shard.
           online_reward: Reward definition for an online shard with final observations.
 
         Returns:
           None.
         """
-        self.filepath = filepath
         self.chunk_size = chunk_size
-        if append and online_reward is not None:
-            raise ValueError("Online replay shards are immutable.")
         self.online_reward = online_reward
 
         # Queue shared between main thread (producer) and writer thread (consumer).
@@ -63,57 +54,43 @@ class HDF5Writer:
         self._thread_error: Optional[BaseException] = None
 
         filepath.parent.mkdir(parents=True, exist_ok=True)
-        if append and filepath.exists():
-            validate_hdf5_schema(filepath)
-            self._file = h5py.File(filepath, "a")
-            if "episode_id" in self._file:
-                ep_id_ds = self._file["episode_id"]
-                self.current_size = int(ep_id_ds.shape[0])  # pyright: ignore[reportAttributeAccessIssue]
-            else:
-                self.current_size = 0
+        self._file = h5py.File(filepath, "w")
 
-            metadata_ids: list[int] = []
-            if "metadata" in self._file and len(self._file["metadata"]) > 0:  # pyright: ignore[reportArgumentType]
-                meta_grp = self._file["metadata"]
-                metadata_ids = [
-                    int(k.split("_")[1])
-                    for k in meta_grp.keys()  # pyright: ignore[reportAttributeAccessIssue]
-                    if k.startswith("episode_") and k.split("_")[1].isdigit()
-                ]
-            frame_id = (
-                int(np.max(cast(h5py.Dataset, self._file["episode_id"])[:]))
-                if self.current_size > 0
-                else -1
-            )
-            self._current_episode_id = max(metadata_ids, default=frame_id)
-            self._current_episode_id = max(self._current_episode_id, frame_id)
-        else:
-            self._file = h5py.File(filepath, "w")
-
-            obs_grp = self._file.create_group("observations")
-            obs_grp.create_dataset(
-                "screen",
-                shape=(0, 1, IMG_SIZE, IMG_SIZE),
-                maxshape=(None, 1, IMG_SIZE, IMG_SIZE),
-                chunks=(chunk_size, 1, IMG_SIZE, IMG_SIZE),
-                dtype=np.uint8,
-                compression="gzip",
-            )
-            obs_grp.create_dataset(
-                "telemetry",
-                shape=(0, TELEMETRY_FEATURES),
-                maxshape=(None, TELEMETRY_FEATURES),
-                chunks=(chunk_size, TELEMETRY_FEATURES),
-                dtype=np.float32,
-            )
-            self._file.create_dataset(
-                "actions",
-                shape=(0, cfg.action_dim),
-                maxshape=(None, cfg.action_dim),
-                chunks=(chunk_size, cfg.action_dim),
-                dtype=np.float32,
-                compression="gzip",
-            )
+        obs_grp = self._file.create_group("observations")
+        obs_grp.create_dataset(
+            "screen",
+            shape=(0, 1, IMG_SIZE, IMG_SIZE),
+            maxshape=(None, 1, IMG_SIZE, IMG_SIZE),
+            chunks=(chunk_size, 1, IMG_SIZE, IMG_SIZE),
+            dtype=np.uint8,
+            compression="gzip",
+        )
+        obs_grp.create_dataset(
+            "telemetry",
+            shape=(0, TELEMETRY_FEATURES),
+            maxshape=(None, TELEMETRY_FEATURES),
+            chunks=(chunk_size, TELEMETRY_FEATURES),
+            dtype=np.float32,
+        )
+        self._file.create_dataset(
+            "actions",
+            shape=(0, cfg.action_dim),
+            maxshape=(None, cfg.action_dim),
+            chunks=(chunk_size, cfg.action_dim),
+            dtype=np.float32,
+            compression="gzip",
+        )
+        self._file.create_dataset(
+            "episode_id",
+            shape=(0,),
+            maxshape=(None,),
+            chunks=(chunk_size,),
+            dtype=np.int32,
+        )
+        self._file.create_group("metadata")
+        if online_reward is not None:
+            self._file.attrs["final_observation_only"] = True
+            self._file.attrs["reward_convention"] = online_reward
             self._file.create_dataset(
                 "rewards",
                 shape=(0,),
@@ -122,30 +99,16 @@ class HDF5Writer:
                 dtype=np.float32,
             )
             self._file.create_dataset(
-                "episode_id",
+                "action_ids",
                 shape=(0,),
                 maxshape=(None,),
                 chunks=(chunk_size,),
                 dtype=np.int32,
             )
-            self._file.create_group("metadata")
-            if online_reward is not None:
-                self._file.attrs["final_observation_only"] = True
-                self._file.attrs["reward_convention"] = online_reward
-                self._file.create_dataset(
-                    "action_ids",
-                    shape=(0,),
-                    maxshape=(None,),
-                    chunks=(chunk_size,),
-                    dtype=np.int32,
-                )
 
         self._thread = threading.Thread(target=self._writer_loop, daemon=True)
         self._thread.start()
-        logging.info(
-            f"HDF5Writer started → {filepath} (append={append}, "
-            f"resumed_ep={self._current_episode_id}, size={self.current_size})"
-        )
+        logging.info("Recording to %s", filepath)
 
     def new_episode(self, metadata: dict[str, Any]) -> int:
         """Signal the start of a new episode."""
@@ -200,10 +163,10 @@ class HDF5Writer:
             "screen": np.copy(obs_dict["screen"]),
             "telemetry": np.copy(obs_dict["telemetry"]),
             "action": np.copy(action).astype(np.float32),
-            "reward": float(reward),
-            "action_id": action_id,
             "episode_id": self._current_episode_id,
         }
+        if self.online_reward is not None:
+            frame_data.update(reward=float(reward), action_id=action_id)
         self._queue.put(frame_data)
 
     def close(self) -> None:
@@ -278,8 +241,8 @@ class HDF5Writer:
                 self._obs_buf.append(token["screen"])
                 self._telemetry_buf.append(token["telemetry"])
                 self._action_buf.append(token["action"])
-                self._reward_buf.append(token["reward"])
                 if self.online_reward is not None:
+                    self._reward_buf.append(token["reward"])
                     self._action_id_buf.append(token["action_id"])
                 self._episode_id_buf.append(token["episode_id"])
 
@@ -300,15 +263,16 @@ class HDF5Writer:
         obs_ds = cast(h5py.Dataset, obs["screen"])
         telem_ds = cast(h5py.Dataset, obs["telemetry"])
         actions_ds = cast(h5py.Dataset, self._file["actions"])
-        rewards_ds = cast(h5py.Dataset, self._file["rewards"])
         ep_id_ds = cast(h5py.Dataset, self._file["episode_id"])
 
         obs_ds.resize(new_size, axis=0)
         telem_ds.resize(new_size, axis=0)
         actions_ds.resize(new_size, axis=0)
-        rewards_ds.resize(new_size, axis=0)
         ep_id_ds.resize(new_size, axis=0)
         if self.online_reward is not None:
+            rewards = cast(h5py.Dataset, self._file["rewards"])
+            rewards.resize(new_size, axis=0)
+            rewards[self.current_size : new_size] = self._reward_buf
             action_ids = cast(h5py.Dataset, self._file["action_ids"])
             action_ids.resize(new_size, axis=0)
             action_ids[self.current_size : new_size] = self._action_id_buf
@@ -316,9 +280,6 @@ class HDF5Writer:
         obs_ds[self.current_size : new_size] = np.stack(self._obs_buf)
         telem_ds[self.current_size : new_size] = np.stack(self._telemetry_buf)
         actions_ds[self.current_size : new_size] = np.stack(self._action_buf)
-        rewards_ds[self.current_size : new_size] = np.array(
-            self._reward_buf, dtype=np.float32
-        )
         ep_id_ds[self.current_size : new_size] = np.array(
             self._episode_id_buf, dtype=np.int32
         )
@@ -331,35 +292,3 @@ class HDF5Writer:
         self._reward_buf.clear()
         self._action_id_buf.clear()
         self._episode_id_buf.clear()
-
-
-def validate_hdf5_schema(filepath: str | Path) -> None:
-    """Validate the required datasets in a screen rollout file."""
-    path = Path(filepath)
-    if not path.exists():
-        raise FileNotFoundError(f"Rollout file not found: {path}")
-
-    with h5py.File(path, "r") as file:
-        required = {
-            "observations/screen",
-            "observations/telemetry",
-            "actions",
-            "rewards",
-            "episode_id",
-            "metadata",
-        }
-        missing = sorted(name for name in required if name not in file)
-        if missing:
-            raise ValueError(f"Invalid rollout file {path}; missing: {missing}")
-
-        frame_count = len(cast(h5py.Dataset, file["episode_id"]))
-        aligned = (
-            "observations/screen",
-            "observations/telemetry",
-            "actions",
-            "rewards",
-        )
-        if any(len(cast(h5py.Dataset, file[name])) != frame_count for name in aligned):
-            raise ValueError(
-                f"Invalid rollout file {path}; frame datasets are misaligned"
-            )

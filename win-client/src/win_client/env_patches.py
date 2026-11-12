@@ -76,11 +76,9 @@ def _patched_safe_keyres() -> None:
             logging.warning("Trackmania window not focused. Reset key skipped.")
 
 
-def _monitor_step(
-    self, speed_val: float, end_of_track: bool, teleported: bool, base_rew: float
-):
-    from core.config import FAILURE_PENALTY
-
+def _collection_end(
+    self, speed_val: float, end_of_track: bool, teleported: bool
+) -> str | None:
     from win_client.settings import cfg
 
     if not hasattr(self, "_ep_frame_count"):
@@ -110,22 +108,13 @@ def _monitor_step(
         elif self._ep_frame_count >= cfg.episode_monitor.max_frames_per_episode:
             reason = "frame_budget"
 
-    terminated = reason is not None
-    if terminated:
+    if reason is not None:
         self.prev_pos = None
         self._ep_frame_count = 0
         self._stuck_counter = 0
         self._warmup_counter = 0
 
-    if reason == "done":
-        rew = base_rew + getattr(self, "finish_reward", 0.0)
-    elif reason in ("stuck", "frame_budget", "respawn"):
-        rew = FAILURE_PENALTY
-    else:
-        rew = base_rew + getattr(self, "constant_penalty", 0.0)
-
-    rew = np.float32(rew)
-    return rew, terminated, reason
+    return reason
 
 
 def _capture_trackmania(self):
@@ -148,11 +137,11 @@ def _capture_trackmania(self):
 
 def _collection_get_obs_rew_terminated_info(self):
     obs, info = _capture_trackmania(self)
-    reward, terminated, reason = _monitor_step(
-        self, float(obs[0][0]), info["end_of_track"], info["teleported"], base_rew=0.0
+    reason = _collection_end(
+        self, float(obs[0][0]), info["end_of_track"], info["teleported"]
     )
     info["termination_reason"] = reason
-    return obs, reward, terminated, info
+    return obs, np.float32(0.0), reason is not None, info
 
 
 def _online_get_obs_rew_terminated_info(self):
@@ -167,12 +156,7 @@ def _online_get_obs_rew_terminated_info(self):
 
 
 def apply_data_collection_patches() -> None:
-    """Apply TMRL patches for data collection and map-agnostic evaluation.
-
-    Ignores TMRL's reference trajectory reward function and only marks
-    an episode terminated when crossing the finish line (end_of_track)
-    or when an in-game manual respawn/teleport is detected.
-    """
+    """Apply recording cutoffs and expose controls for SSL data collection."""
     _apply_patches(online=False)
 
 

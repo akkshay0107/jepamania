@@ -1,131 +1,48 @@
 import platform
 
 import numpy as np
-from core.config import IMG_HIST_LEN, IMG_SIZE, TELEMETRY_FEATURES
+from core.config import IMG_SIZE, TELEMETRY_FEATURES
 
 
-def obs_to_dict(obs, keep_history: bool = False) -> dict[str, np.ndarray]:
-    """
-    Normalize a raw TMRL/rtgym observation into the model input schema.
-
-    Arguments:
-      obs: Raw observation returned by the environment.
-      keep_history: Whether to return the fixed-length history expected by an encoder.
-
-    Returns:
-      A dictionary containing screen frames and nine telemetry values.
-    """
-
+def obs_to_dict(obs) -> dict[str, np.ndarray]:
+    """Read one grayscale frame and telemetry from TMRL or a simulator."""
     if isinstance(obs, dict):
-        telemetry = np.asarray(obs["telemetry"], dtype=np.float32).reshape(-1)
-        if len(telemetry) < TELEMETRY_FEATURES:
-            pad_len = TELEMETRY_FEATURES - len(telemetry)
-            telemetry = np.pad(telemetry, (0, pad_len), mode="constant")
-        elif len(telemetry) > TELEMETRY_FEATURES:
-            raise ValueError(
-                f"Environment produced {len(telemetry)} telemetry floats, "
-                f"expected at most TELEMETRY_FEATURES={TELEMETRY_FEATURES}."
-            )
         screen = np.asarray(obs["screen"], dtype=np.uint8)
-        if not keep_history:
-            if screen.ndim == 3:
-                screen = screen[-1:]
-            elif screen.ndim == 2:
-                screen = screen[np.newaxis, ...]
-        else:
-            if screen.ndim == 2:
-                screen = np.repeat(screen[np.newaxis, ...], IMG_HIST_LEN, axis=0)
-            elif screen.ndim == 3:
-                if screen.shape[0] < IMG_HIST_LEN:
-                    pad = IMG_HIST_LEN - screen.shape[0]
-                    screen = np.pad(screen, ((pad, 0), (0, 0), (0, 0)), mode="edge")
-                elif screen.shape[0] > IMG_HIST_LEN:
-                    screen = screen[-IMG_HIST_LEN:]
-        return {"screen": screen, "telemetry": telemetry}
-
-    if isinstance(obs, (tuple, list)) and len(obs) >= 1:
-        screen = None
-        telem_parts = []
-        for item in obs:
-            arr = np.asarray(item)
-            if screen is None and (arr.ndim >= 3 or arr.dtype == np.uint8):
-                screen = arr.astype(np.uint8)
-            else:
-                telem_parts.append(arr.flatten().astype(np.float32))
-
-        if screen is None:
-            screen = (
-                np.zeros((IMG_HIST_LEN, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
-                if keep_history
-                else np.zeros((1, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
-            )
-        else:
-            if not keep_history:
-                if screen.ndim == 3:
-                    screen = screen[-1:]
-                elif screen.ndim == 2:
-                    screen = screen[np.newaxis, ...]
-            else:
-                if screen.ndim == 2:
-                    screen = np.repeat(screen[np.newaxis, ...], IMG_HIST_LEN, axis=0)
-                elif screen.ndim == 3:
-                    if screen.shape[0] < IMG_HIST_LEN:
-                        pad = IMG_HIST_LEN - screen.shape[0]
-                        screen = np.pad(screen, ((pad, 0), (0, 0), (0, 0)), mode="edge")
-                    elif screen.shape[0] > IMG_HIST_LEN:
-                        screen = screen[-IMG_HIST_LEN:]
-
-        if telem_parts:
-            telemetry = np.concatenate(telem_parts, axis=0)
-        else:
-            telemetry = np.zeros(TELEMETRY_FEATURES, dtype=np.float32)
-
-        if len(telemetry) < TELEMETRY_FEATURES:
-            raise ValueError(
-                "TMRL screen observation is missing its action history: "
-                f"received {len(telemetry)} telemetry floats, expected "
-                f"{TELEMETRY_FEATURES}. Ensure rtgym act_in_obs=True and "
-                "act_buf_len=2."
-            )
-        elif len(telemetry) > TELEMETRY_FEATURES:
-            raise ValueError(
-                f"Environment produced {len(telemetry)} telemetry floats, "
-                f"expected at most TELEMETRY_FEATURES={TELEMETRY_FEATURES}. "
-                "Check the env observation layout against core.config."
-            )
-        return {"screen": screen, "telemetry": telemetry}
-
-    arr = np.asarray(obs)
-
-    if not keep_history:
-        if arr.ndim >= 3:
-            screen = arr[-1:].astype(np.uint8)
-        elif arr.ndim == 2:
-            screen = arr[np.newaxis, ...].astype(np.uint8)
-        else:
-            screen = np.zeros((1, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
+        telemetry = np.asarray(obs["telemetry"], dtype=np.float32).reshape(-1)
+        if telemetry.size == 3:
+            telemetry = np.pad(telemetry, (0, TELEMETRY_FEATURES - 3))
+    elif isinstance(obs, (tuple, list)):
+        parts = [np.asarray(item) for item in obs]
+        image = next(
+            (
+                index
+                for index, part in enumerate(parts)
+                if part.shape[-2:] == (IMG_SIZE, IMG_SIZE)
+            ),
+            None,
+        )
+        if image is None:
+            raise ValueError("TMRL observation is missing a grayscale frame.")
+        screen = parts.pop(image).astype(np.uint8, copy=False)
+        telemetry = (
+            np.concatenate([part.reshape(-1) for part in parts], dtype=np.float32)
+            if parts
+            else np.empty(0, dtype=np.float32)
+        )
     else:
-        if arr.ndim >= 3:
-            screen = (
-                arr[-IMG_HIST_LEN:].astype(np.uint8)
-                if arr.shape[0] >= IMG_HIST_LEN
-                else np.pad(
-                    arr.astype(np.uint8),
-                    ((IMG_HIST_LEN - arr.shape[0], 0), (0, 0), (0, 0)),
-                    mode="edge",
-                )
-            )
-        elif arr.ndim == 2:
-            screen = np.repeat(
-                arr[np.newaxis, ...].astype(np.uint8), IMG_HIST_LEN, axis=0
-            )
-        else:
-            screen = np.zeros((IMG_HIST_LEN, IMG_SIZE, IMG_SIZE), dtype=np.uint8)
+        raise ValueError("Expected a TMRL observation or simulation dictionary.")
 
-    return {
-        "screen": screen,
-        "telemetry": np.zeros(TELEMETRY_FEATURES, dtype=np.float32),
-    }
+    if screen.ndim == 3:
+        screen = screen[-1:]
+    elif screen.ndim == 2:
+        screen = screen[None]
+    if screen.shape != (1, IMG_SIZE, IMG_SIZE):
+        raise ValueError("The game must return a grayscale 64×64 observation.")
+    if telemetry.size != TELEMETRY_FEATURES:
+        raise ValueError(
+            f"Expected {TELEMETRY_FEATURES} telemetry values including action history."
+        )
+    return {"screen": screen, "telemetry": telemetry}
 
 
 class OUNoise:

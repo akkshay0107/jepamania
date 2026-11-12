@@ -14,7 +14,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-from core.actions import ACTION_GRID_NP
 from core.config import PIXEL_SCALE, SubJepaConfig, load_config
 from core.dynamics import MLPPredictor
 from core.encoders import ViTEncoder, load_world_model
@@ -22,7 +21,7 @@ from core.interfaces import Encoder, Predictor
 from jaxtyping import Array, PRNGKeyArray, PyTree
 from omegaconf import OmegaConf
 
-from train.config import LossConfig, TrainConfig, load_train_config
+from train.config import LossConfig, TrainConfig, load_train_config, matches_manifest
 from train.dataloader import SlidingWindowDataset
 from train.loss import generate_subspace_projectors, sub_jepa_components
 
@@ -90,68 +89,18 @@ def encode_rollout(models: Models, batch: Batch):
     return roots, predicted, targets
 
 
-def ssl_components(
-    predicted: Float[Array, "batch steps state_dim"],
-    targets: Float[Array, "batch steps state_dim"],
-    bases: Float[Array, "subspaces latent_dim subspace_dim"],
-    num_slices: int,
-    key: PRNGKeyArray,
-    mask: np.ndarray | Array | None = None,
-) -> tuple[Float[Array, ""], Float[Array, ""]]:
-    return sub_jepa_components(
-        predicted.reshape(-1, predicted.shape[-1]),
-        targets.reshape(-1, targets.shape[-1]),
-        bases,
-        num_slices,
-        key,
-        None if mask is None else jnp.asarray(mask).reshape(-1),
-    )
-
-
-def compute_loss(
-    models: Models,
-    batch: Batch,
-    subspace_projectors: Float[Array, "subspaces latent_dim subspace_dim"],
-    num_slices: int,
-    reg_weight: float,
-    slice_key: PRNGKeyArray,
-) -> Float[Array, ""]:
-    _, predicted, targets = encode_rollout(models, batch)
-    prediction, regularization = ssl_components(
-        predicted,
-        targets,
-        subspace_projectors,
-        num_slices,
-        slice_key,
-        batch.get("target_mask_seq"),
-    )
-    return prediction + reg_weight * regularization
-
-
-def make_train_step(optimizer, subspace_projectors, num_slices, reg_weight):
-    """Build the scalar SSL step used by the saved diagnostic and local checks."""
-
-    @eqx.filter_jit
-    def train_step(models, opt_state, batch, slice_key):
-        loss, grads = eqx.filter_value_and_grad(compute_loss)(
-            models, batch, subspace_projectors, num_slices, reg_weight, slice_key
-        )
-        updates, opt_state = optimizer.update(
-            grads, opt_state, eqx.filter(models, eqx.is_array)
-        )
-        return eqx.apply_updates(models, updates), opt_state, loss
-
-    return train_step
-
-
 def alpha_for(batch: Batch, reference_weight: float) -> float:
     batch_size, steps = batch["actions_seq"].shape[:2]
     return reference_weight * 120 / (batch_size * steps)
 
 
 def ssl_metrics(predicted, targets, batch, bases, key, loss: LossConfig) -> Metrics:
-    prediction, regularization = ssl_components(
-        predicted, targets, bases, loss.num_slices, key
+    prediction, regularization = sub_jepa_components(
+        predicted.reshape(-1, predicted.shape[-1]),
+        targets.reshape(-1, targets.shape[-1]),
+        bases,
+        loss.num_slices,
+        key,
     )
     alpha = alpha_for(batch, loss.reg_weight)
     return {
@@ -380,7 +329,16 @@ def make_ssl_objective(loss: LossConfig):
 
 
 def run_pretrain(args, model_cfg: SubJepaConfig, config: TrainConfig) -> None:
-    """Train from episode-split legacy recordings and export E/F weights."""
+    """Train from episode-split recordings and export the world model.
+
+    Arguments:
+      args: Dataset, output, and checkpoint options.
+      model_cfg: Encoder and predictor settings.
+      config: Offline training and loss settings.
+
+    Returns:
+      None. The run writes checkpoints and metrics to the output directory.
+    """
     cfg = config.pretrain
     if cfg.updates <= 0 or cfg.batch_size <= 0 or cfg.log_every <= 0:
         raise ValueError("Updates, batch size and logging interval must be positive.")
@@ -420,9 +378,16 @@ def run_pretrain(args, model_cfg: SubJepaConfig, config: TrainConfig) -> None:
     manifest = json.loads(
         json.dumps(
             {
-                "training": OmegaConf.to_container(config, resolve=True),
-                "model": OmegaConf.to_container(model_cfg, resolve=True),
-                "action_table": ACTION_GRID_NP.tolist(),
+                "training": {
+                    "loss": OmegaConf.to_container(config.loss, resolve=True),
+                    "pretrain": OmegaConf.to_container(cfg, resolve=True),
+                },
+                "model": {
+                    "encoder": OmegaConf.to_container(model_cfg.encoder, resolve=True),
+                    "predictor": OmegaConf.to_container(
+                        model_cfg.predictor, resolve=True
+                    ),
+                },
                 "sources": sources,
                 "train": [group.episode_keys for group in train],
                 "validation": [group.episode_keys for group in validation],
@@ -430,7 +395,8 @@ def run_pretrain(args, model_cfg: SubJepaConfig, config: TrainConfig) -> None:
         )
     )
     if args.resume:
-        if json.loads(manifest_path.read_text(encoding="utf-8")) != manifest:
+        saved = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not matches_manifest(saved, manifest, "training", "model"):
             raise ValueError(
                 "Run configuration or episode split differs from the checkpoint."
             )

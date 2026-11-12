@@ -7,7 +7,6 @@ dependencies = [
     "core",
     "h5py",
     "jax[cuda12]; sys_platform == 'linux'",
-    "wandb",
 ]
 
 [tool.uv.sources]

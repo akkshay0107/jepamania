@@ -5,6 +5,28 @@ from typing import Optional, cast
 from omegaconf import OmegaConf
 
 
+def _contains_settings(saved: object, expected: object) -> bool:
+    if isinstance(expected, dict):
+        return isinstance(saved, dict) and all(
+            key in saved and _contains_settings(saved[key], value)
+            for key, value in expected.items()
+        )
+    return saved == expected
+
+
+def matches_manifest(saved: dict, expected: dict, *config_keys: str) -> bool:
+    """Check run identity, ignoring older fields outside the phase's config."""
+    return all(
+        key in saved
+        and (
+            _contains_settings(saved[key], value)
+            if key in config_keys
+            else saved[key] == value
+        )
+        for key, value in expected.items()
+    )
+
+
 @dataclass
 class LossConfig:
     num_subspaces: int = 16

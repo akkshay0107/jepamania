@@ -1,6 +1,7 @@
 import datetime
 import logging
 from collections import deque
+from contextlib import closing
 from pathlib import Path
 
 import numpy as np
@@ -10,23 +11,12 @@ from win_client.game_session import IDLE_ACTION
 from win_client.settings import cfg
 from win_client.utils import get_tmrl_env, obs_to_dict
 
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
-)
-
 
 class HumanRecorder:
-    """
-    Map-agnostic human play recorder.
-
-    Immediately starts recording frames on startup. Stepping the environment
-    exposes the human's actual inputs via the environment's info dictionary.
-    Exiting via Ctrl+C closes the session file cleanly.
-    """
+    """Record the player's executed controls and observations."""
 
     def __init__(self, output_dir: Path | None = None) -> None:
         self.output_dir = output_dir or Path(cfg.data_output_dir)
-        self.writer: HDF5Writer | None = None
 
     def _make_session_path(self) -> Path:
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -42,75 +32,45 @@ class HumanRecorder:
         }
 
     def run(self) -> None:
-        env = get_tmrl_env()
-
-        self.writer = HDF5Writer(self._make_session_path())
-        self.writer.new_episode(self._default_metadata())
-
-        raw_obs, _info = env.reset()
-
-        frame_count = 0
-        completed_episodes = 0
-        dummy_action = np.zeros(cfg.action_dim, dtype=np.float32)
-        action_history = deque((np.copy(IDLE_ACTION), np.copy(IDLE_ACTION)), maxlen=2)
-
-        logging.info("Recording STARTED. Make inputs in-game. Press Ctrl-C to stop.")
-
-        try:
-            while True:
-                recorded_obs = obs_to_dict(raw_obs)
-                recorded_obs["telemetry"][3:9] = np.concatenate(action_history)
-                raw_next, reward, terminated, truncated, info = env.step(dummy_action)
-                done = terminated or truncated
-
-                # Validate Openplanet input streaming on the first captured step
-                if frame_count == 0:
+        with closing(get_tmrl_env()) as env:
+            raw_obs, _ = env.reset()
+            writer = HDF5Writer(self._make_session_path())
+            action_history = deque((IDLE_ACTION, IDLE_ACTION), maxlen=2)
+            try:
+                writer.new_episode(self._default_metadata())
+                logging.info("Recording started. Press Ctrl-C to stop.")
+                while True:
+                    recorded_obs = obs_to_dict(raw_obs)
+                    recorded_obs["telemetry"][3:] = np.concatenate(action_history)
+                    raw_obs, _, terminated, truncated, info = env.step(
+                        IDLE_ACTION.copy()
+                    )
                     if "action" not in info:
-                        logging.warning(
-                            "\n=====================================================\n"
-                            "WARNING: 'action' not found in environment info!\n"
-                            "Openplanet is NOT streaming your human inputs.\n"
-                            "Every frame will log dummy [0, 0, 0] actions.\n"
-                            "Please check your Openplanet TMRL plugin status.\n"
-                            "=====================================================\n"
+                        raise RuntimeError(
+                            "Openplanet did not provide the player's controls."
                         )
+                    action = np.array(info["action"], dtype=np.float32)
+                    if (
+                        action.shape != IDLE_ACTION.shape
+                        or not np.isfinite(action).all()
+                    ):
+                        raise ValueError("Openplanet returned invalid player controls.")
+                    writer.append(recorded_obs, action)
+                    action_history.append(action)
 
-                actual_action = np.asarray(
-                    info.get("action", dummy_action), dtype=np.float32
-                )
-                if self.writer is not None:
-                    self.writer.append(
-                        recorded_obs, actual_action, reward=float(reward)
-                    )
-                action_history.append(np.copy(actual_action))
-
-                raw_obs = raw_next
-
-                if done:
-                    completed_episodes += 1
-                    reason = info.get(
-                        "termination_reason", "truncated" if truncated else "done"
-                    )
-                    if self.writer is not None:
-                        self.writer.end_episode(termination=reason)
-                        self.writer.new_episode(self._default_metadata())
-                    logging.info(
-                        f"Episode {completed_episodes} completed ({reason}). "
-                        "Starting new episode."
-                    )
-
-                    raw_obs, _info = env.reset()
-                    action_history.clear()
-                    action_history.extend((np.copy(IDLE_ACTION), np.copy(IDLE_ACTION)))
-                    frame_count = 0
-                    continue
-
-                frame_count += 1
-
-        except KeyboardInterrupt:
-            logging.info("Exiting HumanRecorder. Stopping collection.")
-        finally:
-            if self.writer is not None:
-                self.writer.end_episode(termination="manual")
-                self.writer.close()
-            env.close()
+                    if terminated or truncated:
+                        reason = info.get("termination_reason") or (
+                            "truncated" if truncated else "done"
+                        )
+                        writer.end_episode(reason)
+                        logging.info(
+                            "Episode ended (%s). Starting a new episode.", reason
+                        )
+                        raw_obs, _ = env.reset()
+                        action_history.extend((IDLE_ACTION, IDLE_ACTION))
+                        writer.new_episode(self._default_metadata())
+            except KeyboardInterrupt:
+                logging.info("Stopping human recording.")
+            finally:
+                writer.end_episode("manual")
+                writer.close()

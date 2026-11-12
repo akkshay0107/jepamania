@@ -5,7 +5,7 @@ from typing import Any, NamedTuple
 
 import numpy as np
 from core.actions import ACTION_GRID_NP
-from core.config import IMG_HIST_LEN, IMG_SIZE
+from core.config import IMG_HIST_LEN
 
 from win_client.utils import obs_to_dict
 
@@ -40,8 +40,6 @@ class DrivingEnvironment:
 
     def _observation(self, raw: Any, *, reset: bool = False) -> Observation:
         obs = obs_to_dict(raw)
-        if obs["screen"].shape != (1, IMG_SIZE, IMG_SIZE):
-            raise ValueError("The game must return a grayscale 64×64 observation.")
         frame = obs["screen"][0].copy()
         if reset:
             self.frames.clear()
